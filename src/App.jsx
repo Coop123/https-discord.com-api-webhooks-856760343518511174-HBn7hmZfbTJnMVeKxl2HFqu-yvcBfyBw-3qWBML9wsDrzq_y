@@ -1,0 +1,2031 @@
+import React, { useState, useMemo, useRef, useEffect, useLayoutEffect, useCallback } from "react";
+
+// ===========================================================================
+// MeetDeck — poolside coaching board for VCSL meets.
+// Left (no page scroll): On deck → In the water → Previous (scrolls inside)
+// → Event results (top 6 dual / top 10 champs). Right: meet sheet scrolls,
+// with a Jump-to-current button. Tap any of your swimmers anywhere.
+// ===========================================================================
+
+const TEAMS = [
+  { code: "OAK", name: "Oaktree" }, { code: "BDST", name: "Belwood" }, { code: "MTVD", name: "Montevideo" },
+  { code: "LPAC", name: "Los Paseos" }, { code: "SCVCC", name: "Silver Creek" }, { code: "AGCC", name: "Almaden" },
+];
+const TEAM_NAME = Object.fromEntries(TEAMS.map((t) => [t.code, t.name]));
+const TEAM_COLOR = { BDST: "#facc15", AGCC: "#22c55e", MTVD: "#ef4444", OAK: "#1e40af", LPAC: "#38bdf8", SCVCC: "#14b8a6" };
+const teamColor = (t) => TEAM_COLOR[t] || "#7c93b0";
+const STORE = (typeof window !== "undefined" && window.storage) ? window.storage : null;
+const CUR_KEY = "meetdeck:current:v1";
+const INDEX_KEY = "meetdeck:index:v1";
+const TEAM_ALIASES = {
+  OAK: ["oak", "oaktree"], BDST: ["bdst", "belwood", "dolphin", "dolphins", "bel"], MTVD: ["mtvd", "montevideo", "monte"],
+  LPAC: ["lpac", "lospaseos", "paseos"], SCVCC: ["scvcc", "silvercreek", "silver"], AGCC: ["agcc", "almaden"],
+};
+function normTeam(tok) {
+  if (!tok) return "UNAT";
+  const t = String(tok).toLowerCase().replace(/[^a-z]/g, "");
+  if (!t) return "UNAT";
+  for (const [code, al] of Object.entries(TEAM_ALIASES)) {
+    if (code.toLowerCase() === t) return code;
+    if (al.some((a) => a === t || (a.length >= 4 && t.startsWith(a)))) return code;
+  }
+  return String(tok).toUpperCase();
+}
+
+const DUAL = { 1: 6, 2: 4, 3: 3, 4: 2, 5: 1 };
+const CHAMPS = { 1: 11, 2: 9, 3: 8, 4: 7, 5: 6, 6: 5, 7: 4, 8: 3, 9: 2, 10: 1 };
+
+// Broad "needs work" focus areas — kept general on purpose. Turns is age-gated
+// (11+), but shows for IM at any age.
+const TAG_TREE = [
+  { label: "Starts", color: "#22c55e" },
+  { label: "Turns", color: "#f59e0b", minAge: 11 },
+  { label: "Finishes", color: "#a855f7" },
+  { label: "Streamline", color: "#0ea5e9" },
+  { label: "Underwaters", color: "#0ea5e9" },
+  { label: "Kick", color: "#0ea5e9" },
+  { label: "Stroke technique", color: "#0ea5e9" },
+  { label: "Breathing", color: "#0ea5e9" },
+  { label: "Body position", color: "#0ea5e9" },
+  { label: "Pacing / endurance", color: "#14b8a6" },
+  { label: "Race awareness", color: "#14b8a6" },
+];
+const IM_STROKES = ["Fly", "Back", "Breast", "Free"];
+const RELAY_POSITION = ["Lead-off", "Support", "Anchor"];
+const PROG_STROKES = ["Fly", "Back", "Breast", "Free", "IM"];
+const TAG_COLOR = Object.fromEntries(TAG_TREE.map((t) => [t.label, t.color]));
+
+const DQ_CODES = {
+  Butterfly: [["1A","Alternating kick"],["1B","Breaststroke-type kick"],["1C","Scissors kick"],["1E","Non-simultaneous arms"],["1F","Arms underwater recovery"],["1J","One-hand touch"],["1K","No touch"],["1L","Non-simultaneous touch"],["1M","Shoulders not past vertical off wall"],["1N","Head not up by 15m"]],
+  Backstroke: [["2I","No touch at turn"],["2K","Not on back off wall"],["2L","Shoulders past vertical toward breast"],["2N","Head not up by 15m"],["2P","Toes over gutter at start"],["2Q","Did not finish on back"],["2R","Submerged before turn/finish"],["2S","Delay initiating arm pull at turn"],["2T","Delay initiating turn past vertical"],["2U","Multiple strokes past vertical at turn"]],
+  Breaststroke: [["3A","Alternating kick"],["3B","Non-simultaneous kick"],["3C","Downward butterfly kick"],["3D","Scissors kick"],["3E","Hands past hipline"],["3F","Non-simultaneous arms"],["3G","Arms two strokes underwater"],["3H","Arms not in horizontal plane"],["3I","Elbows recovered over water"],["3J","One-hand touch"],["3K","No touch"],["3L","Non-simultaneous touch"],["3M","Shoulders not past vertical off wall"],["3P","Head under 2+ strokes"],["3Q","Incomplete stroke cycle"]],
+  Freestyle: [["4K","No touch on turn"],["4N","Head not up by 15m"]],
+  IM: [["5P","Strokes out of sequence"]],
+  Relay: [["61","Stroke infraction #1"],["62","Stroke infraction #2"],["63","Stroke infraction #3"],["64","Stroke infraction #4"],["66","Early take-off #2"],["67","Early take-off #3"],["68","Early take-off #4"],["6P","Changed order of swimmers"],["6Q","Not enough swimmers"]],
+  Miscellaneous: [["7O","False start"],["7P","Declared false start"],["7Q","Did not finish"],["7R","Delay of meet"],["7S","Entered water w/o permission"],["7T","Interfered w/ swimmer"],["7U","Walking/springing from bottom"],["7V","Standing on bottom"],["7W","Pulling lane line"],["7X","Finish in wrong lane"],["7Y","Unsportsmanlike conduct"]],
+};
+
+const entryId = (e, h, l) => `${e}:${h}:${l}`;
+const ORD = (n) => { const s = ["th","st","nd","rd"], v = n % 100; return n + (s[(v-20)%10] || s[v] || s[0]); };
+function toSeconds(t) { if (!t) return NaN; const m = String(t).trim().match(/^(?:(\d+):)?(\d{1,2}(?:\.\d+)?)$/); return m ? (m[1]?+m[1]:0)*60 + parseFloat(m[2]) : NaN; }
+const isBest = (time, seed) => { const a = toSeconds(time), b = toSeconds(seed); return !isNaN(a) && !isNaN(b) && a < b; };
+const brokeRecord = (time, rec) => { const a = toSeconds(time), b = toSeconds(rec); return !isNaN(a) && !isNaN(b) && a < b; };
+const hasDq = (d) => (d.dqs || []).length > 0;
+const isScratched = (d) => !!(d && d.scratched);
+const isNoShow = (d) => !!(d && d.noshow);
+const dqLabel = (d) => (d.dqs || []).map((q) => q.code).join(",");
+
+function categorize(name) { const n = (name||"").toLowerCase();
+  if (n.includes("medley relay")) return "Medley Relay";
+  if (n.includes("free relay") || (n.includes("relay") && n.includes("free"))) return "Free Relay";
+  if (n.includes("relay")) return "Medley Relay";
+  if (n.includes("fly") || n.includes("butterfly")) return "Fly";
+  if (n.includes("back")) return "Back";
+  if (n.includes("breast")) return "Breast";
+  if (/\bim\b/.test(n) || n.includes("individual medley")) return "IM";
+  if (n.includes("free")) return "Free"; return "Free"; }
+const CATS = ["Medley Relay", "Fly", "Back", "IM", "Breast", "Free", "Free Relay"];
+const isRelayEvent = (name) => /relay/i.test(name || "");
+const shortEvent = (name) => { let s = (name||"").trim(); s = s.replace(/^(girls|boys|mixed|women|men)\s+/i, ""); s = s.replace(/^(\d+\s*&\s*(under|over|u)\b|\d+\s*-\s*\d+|\d+\s*&\s*u)\s*/i, ""); s = s.replace(/\byard\s+/i, ""); return s.trim(); };
+
+function eventList(ev, evIdx, data) { const out = []; ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { const id = entryId(evIdx, htIdx, l.lane); const d = data[id] || {}; out.push({ id, l, secs: toSeconds(d.time), dq: hasDq(d), scr: isScratched(d), ns: isNoShow(d), time: d.time }); })); return out; }
+function rankedEvent(ev, evIdx, data, filter) { const relay = isRelayEvent(ev.name); let list = eventList(ev, evIdx, data).filter((e) => !isNaN(e.secs) && !e.dq && !e.scr && !e.ns); if (filter) list = list.filter((e) => filter.includes(e.l.team)); if (relay) list = list.filter((e) => e.l.relay === "A"); list.sort((a, b) => a.secs - b.secs); return list; }
+function computePlaces(events, data, filter, mode) { if (mode === "timetrial") return {}; const map = {}; events.forEach((ev, evIdx) => rankedEvent(ev, evIdx, data, filter).forEach((e, i) => (map[e.id] = i + 1))); return map; }
+// Place within a single heat (used live on the board before an event is final).
+function computeHeatPlaces(ev, evIdx, htIdx, data, filter) {
+  const ht = ev && ev.heats[htIdx]; if (!ht) return {};
+  let list = ht.lanes.map((l) => { const id = entryId(evIdx, htIdx, l.lane), d = data[id] || {}; return { id, l, secs: toSeconds(d.time), dq: hasDq(d) }; }).filter((e) => !isNaN(e.secs) && !e.dq);
+  if (filter) list = list.filter((e) => filter.includes(e.l.team));
+  if (isRelayEvent(ev.name)) list = list.filter((e) => e.l.relay === "A");
+  list.sort((a, b) => a.secs - b.secs); const map = {}; list.forEach((e, i) => (map[e.id] = i + 1)); return map;
+}
+function computeScores(events, data, mode, filter) { const table = mode === "champs" ? CHAMPS : DUAL; const pts = {}, swims = {}, imp = {}; if (mode === "timetrial") return { pts, swims, imp };
+  events.forEach((ev, evIdx) => { const relay = isRelayEvent(ev.name);
+    rankedEvent(ev, evIdx, data, filter).forEach((e, i) => { const p = (table[i+1] || 0) * (relay ? 2 : 1); pts[e.l.team] = (pts[e.l.team] || 0) + p; });
+    eventList(ev, evIdx, data).forEach((e) => { if (isNaN(e.secs)) return; if (filter && !filter.includes(e.l.team)) return; swims[e.l.team] = (swims[e.l.team] || 0) + 1; if (!e.dq && isBest(data[e.id]?.time, e.l.seed)) imp[e.l.team] = (imp[e.l.team] || 0) + 1; }); });
+  return { pts, swims, imp }; }
+// An event is finished when every entered lane has a time or a DQ (and ≥1 time).
+function eventFinished(ev, evIdx, data, filter) {
+  let entered = 0, done = 0, timed = 0;
+  eventList(ev, evIdx, data).forEach((e) => { if (filter && !filter.includes(e.l.team)) return; entered++; if (!isNaN(e.secs) || e.dq) done++; if (!isNaN(e.secs)) timed++; });
+  return entered > 0 && timed > 0 && done === entered;
+}
+
+const AGE_GROUPS = ["6u", "7-8", "9-10", "11-12", "13-14", "15-18"];
+function ageGroupOf(age) { if (!age || age <= 0) return null; if (age <= 6) return "6u"; if (age <= 8) return "7-8"; if (age <= 10) return "9-10"; if (age <= 12) return "11-12"; if (age <= 14) return "13-14"; return "15-18"; }
+const MIXED_GROUPS = ["6u", "15-18"]; // relays here are 2 boys + 2 girls
+// Gender + age group from an event name, for grouping.
+function evGender(name) { const n = (name || "").toLowerCase(); if (n.startsWith("girls") || n.includes(" girls")) return "Girls"; if (n.startsWith("boys") || n.includes(" boys")) return "Boys"; return "Mixed"; }
+function evAgeGroup(name) { const n = name || ""; if (/6\s*&\s*under|\b6u\b/i.test(n)) return "6u"; const m = n.match(/(\d+)\s*-\s*(\d+)/); if (m) return `${m[1]}-${m[2]}`; return "Open"; }
+
+// Points earned by each individual swimmer (relays credited to the relay entry).
+function computeSwimmerPoints(events, data, mode, filter) {
+  const table = mode === "champs" ? CHAMPS : DUAL; const out = {};
+  events.forEach((ev, evIdx) => { if (isRelayEvent(ev.name)) return;
+    rankedEvent(ev, evIdx, data, filter).forEach((e, i) => {
+      const pts = (table[i + 1] || 0); if (!pts) return;
+      const key = e.l.name + "|" + e.l.team;
+      (out[key] || (out[key] = { name: e.l.name, team: e.l.team, age: e.l.age, pts: 0, count: 0, events: [] }));
+      if (e.l.age) out[key].age = e.l.age;
+      out[key].pts += pts; out[key].count++; out[key].events.push({ ev: ev.name, place: i + 1, pts, time: e.time });
+    });
+  });
+  return out;
+}
+// Best single-swim improvement (seed − final, seconds) per swimmer.
+function computeImprovements(events, data, team) {
+  const out = {};
+  events.forEach((ev, evIdx) => { if (isRelayEvent(ev.name)) return;
+    ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { if (team && l.team !== team) return;
+      const d = data[entryId(evIdx, htIdx, l.lane)] || {}; const fs = toSeconds(d.time), ss = toSeconds(l.seed);
+      if (isNaN(fs) || isNaN(ss)) return; const drop = ss - fs; // positive = improved
+      const key = l.name + "|" + l.team;
+      if (!out[key] || drop > out[key].drop) out[key] = { name: l.name, team: l.team, age: l.age, gender: evGender(ev.name), drop, ev: shortEvent(ev.name), seed: l.seed, time: d.time };
+    }));
+  });
+  return out;
+}
+// Per-swimmer season-so-far aggregate across individual events (this meet).
+function computeLeague(events, data, mode, filter) {
+  const table = mode === "champs" ? CHAMPS : DUAL; const sw = {};
+  events.forEach((ev, evIdx) => { if (isRelayEvent(ev.name)) return;
+    const ranked = rankedEvent(ev, evIdx, data, filter); const placeOf = {}; ranked.forEach((e, i) => (placeOf[e.id] = i + 1));
+    ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { const id = entryId(evIdx, htIdx, l.lane), d = data[id] || {};
+      const key = l.name + "|" + l.team; (sw[key] || (sw[key] = { name: l.name, team: l.team, age: l.age, gender: evGender(ev.name), events: [], pts: 0 }));
+      const place = placeOf[id], pts = place ? (table[place] || 0) : 0; sw[key].pts += pts; if (l.age) sw[key].age = l.age;
+      const fs = toSeconds(d.time), ss = toSeconds(l.seed), improve = (!isNaN(fs) && !isNaN(ss)) ? ss - fs : null;
+      sw[key].events.push({ ev: shortEvent(ev.name), cat: categorize(ev.name), seed: l.seed, time: d.time || "", place, pts, improve });
+    }));
+  });
+  return sw;
+}
+
+// Mixed relay (6u, 15-18): 2 fastest girls + 2 fastest boys per team.
+function buildMixedRelays(events, ageGroup) {
+  const best = {};
+  events.forEach((ev) => { if (isRelayEvent(ev.name) || !/free/i.test(ev.name) || evAgeGroup(ev.name) !== ageGroup) return;
+    const g = evGender(ev.name);
+    ev.heats.forEach((ht) => ht.lanes.forEach((l) => { const s = toSeconds(l.seed); if (isNaN(s)) return;
+      (best[l.team] || (best[l.team] = {})); const cur = best[l.team][l.name];
+      if (!cur || s < cur.s) best[l.team][l.name] = { s, gender: g }; }));
+  });
+  return Object.entries(best).map(([team, swimmers]) => {
+    const arr = Object.entries(swimmers).map(([name, v]) => ({ name, s: v.s, gender: v.gender }));
+    const girls = arr.filter((x) => x.gender === "Girls").sort((a, b) => a.s - b.s).slice(0, 2);
+    const boys = arr.filter((x) => x.gender === "Boys").sort((a, b) => a.s - b.s).slice(0, 2);
+    let picked = [...girls, ...boys];
+    if (picked.length < 4) { const used = new Set(picked.map((p) => p.name)); picked = [...picked, ...arr.filter((x) => !used.has(x.name)).sort((a, b) => a.s - b.s)].slice(0, 4); }
+    picked.sort((a, b) => a.s - b.s);
+    return { team, swimmers: picked, total: picked.reduce((a, b) => a + b.s, 0), full: picked.length === 4 };
+  }).filter((r) => r.full).sort((a, b) => a.total - b.total);
+}
+
+// Build the fastest 4-person free relay per team for an age group + gender.
+function buildFreeRelays(events, ageGroup, gender) {
+  const best = {}; // team -> { name -> bestFreeSeed }
+  events.forEach((ev) => { if (isRelayEvent(ev.name) || !/free/i.test(ev.name)) return;
+    if (evAgeGroup(ev.name) !== ageGroup || (gender !== "Any" && evGender(ev.name) !== gender)) return;
+    ev.heats.forEach((ht) => ht.lanes.forEach((l) => { const s = toSeconds(l.seed); if (isNaN(s)) return;
+      (best[l.team] || (best[l.team] = {})); if (best[l.team][l.name] === undefined || s < best[l.team][l.name]) best[l.team][l.name] = s; }));
+  });
+  return Object.entries(best).map(([team, swimmers]) => {
+    const top = Object.entries(swimmers).map(([name, s]) => ({ name, s })).sort((a, b) => a.s - b.s).slice(0, 4);
+    return { team, swimmers: top, total: top.reduce((a, b) => a + b.s, 0), full: top.length === 4 };
+  }).filter((r) => r.full).sort((a, b) => a.total - b.total);
+}
+// Merge an uploaded results sheet (final times by name+event) for chosen teams.
+function mergeResults(parsedEvents, targetEvents, teamsToApply) {
+  const patch = {}; let matched = 0;
+  const idx = {}; // "evnum|name" -> {evIdx, htIdx, lane, team}
+  targetEvents.forEach((ev, evIdx) => ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { idx[ev.num + "|" + l.name.toLowerCase()] = { evIdx, htIdx, lane: l.lane, team: l.team }; })));
+  parsedEvents.forEach((ev) => ev.heats.forEach((ht) => ht.lanes.forEach((l) => {
+    const hit = idx[ev.num + "|" + l.name.toLowerCase()];
+    if (hit && (!teamsToApply || teamsToApply.includes(hit.team)) && toSeconds(l.finalTime || l.seed) && !isNaN(toSeconds(l.finalTime || l.seed))) {
+      patch[entryId(hit.evIdx, hit.htIdx, hit.lane)] = { time: l.finalTime || l.seed }; matched++;
+    }
+  })));
+  return { patch, matched };
+}
+
+function buildGrid(events, data, myTeam, places, records) { const rows = {}, order = [];
+  const addCell = (name, cat, cell) => { if (!rows[name]) { rows[name] = {}; order.push(name); } (rows[name][cat] || (rows[name][cat] = [])).push(cell); };
+  events.forEach((ev, evIdx) => { const cat = categorize(ev.name), evShort = shortEvent(ev.name), rec = records[ev.id];
+    ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { if (l.team !== myTeam) return; const id = entryId(evIdx, htIdx, l.lane), d = data[id] || {};
+      const parts = []; if (places[id]) parts.push(ORD(places[id])); if (d.time) parts.push(d.time + (isBest(d.time, l.seed) ? " B" : "") + (brokeRecord(d.time, rec) ? " BR" : "")); if (hasDq(d)) parts.push("DQ " + dqLabel(d));
+      const cm = []; if (d.tags) cm.push(...Object.keys(d.tags)); if (d.notes) cm.push(d.notes);
+      const suffix = (parts.length ? ": " + parts.join(", ") : "") + (cm.length ? " — " + cm.join("; ") : "");
+      if (l.swimmers && l.swimmers.length) { // relay → one cell per named swimmer, led by their split
+        l.swimmers.forEach((s, si) => { const bits = [];
+          if (d.splits && d.splits[si]) bits.push("split " + d.splits[si]);
+          if (places[id]) bits.push(ORD(places[id]));
+          if (d.time) bits.push("team " + d.time + (brokeRecord(d.time, rec) ? " BR" : ""));
+          if (hasDq(d)) bits.push("DQ " + dqLabel(d));
+          addCell(s.name, cat, evShort + (bits.length ? ": " + bits.join(", ") : "")); });
+      } else { addCell(l.name, cat, evShort + suffix); }
+    })); });
+  const matrix = [["Swimmer", ...CATS]]; order.forEach((name) => matrix.push([name, ...CATS.map((c) => (rows[name][c] || []).join(" | "))])); return matrix; }
+const toTSV = (m) => m.map((r) => r.map((c) => String(c).replace(/[\t\n]/g, " ")).join("\t")).join("\n");
+const toCSV = (m) => m.map((r) => r.map((c) => { const s = String(c); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(",")).join("\n");
+
+// ---- PDF reader: de-columns the Hy-Tek multi-column meet program ----------
+async function ensurePdfjs() {
+  if (window.pdfjsLib) return window.pdfjsLib;
+  await new Promise((res, rej) => { const s = document.createElement("script"); s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  return window.pdfjsLib;
+}
+async function pdfToText(file) {
+  const lib = await ensurePdfjs();
+  const buf = await file.arrayBuffer();
+  const pdf = await lib.getDocument({ data: buf }).promise;
+  const avg = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+  let out = "";
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const tc = await page.getTextContent();
+    const items = tc.items.filter((it) => it.str && it.str.trim()).map((it) => ({ s: it.str, x: it.transform[4], y: it.transform[5] }));
+    if (!items.length) { out += "\n"; continue; }
+    const anchors = items.filter((it) => /^(Lane|VCSL|Heat|#\d)/.test(it.s.trim())).map((it) => it.x).sort((a, b) => a - b);
+    let cols = [];
+    if (anchors.length) { let cur = [anchors[0]]; for (let i = 1; i < anchors.length; i++) { if (anchors[i] - cur[cur.length - 1] > 60) { cols.push(avg(cur)); cur = [anchors[i]]; } else cur.push(anchors[i]); } cols.push(avg(cur)); }
+    if (!cols.length) cols = [Math.min(...items.map((i) => i.x))];
+    const colOf = (it) => { let k = 0; for (let i = 0; i < cols.length; i++) if (it.x >= cols[i] - 12) k = i; return k; };
+    const buck = {};
+    items.forEach((it) => (buck[colOf(it)] || (buck[colOf(it)] = [])).push(it));
+    Object.keys(buck).map(Number).sort((a, b) => a - b).forEach((k) => {
+      const ws = buck[k].slice().sort((a, b) => b.y - a.y);
+      let curY = null, row = [];
+      const flush = () => { if (row.length) out += row.sort((a, b) => a.x - b.x).map((t) => t.s).join(" ").replace(/\s+/g, " ").trim() + "\n"; row = []; };
+      ws.forEach((it) => { if (curY === null || Math.abs(it.y - curY) <= 3) { row.push(it); if (curY === null) curY = it.y; } else { flush(); row = [it]; curY = it.y; } });
+      flush();
+    });
+    out += "\n";
+  }
+  return out;
+}
+
+const fmtT = (s) => { if (isNaN(s)) return "—"; const m = Math.floor(s / 60); const sec = s - m * 60; return m > 0 ? `${m}:${sec.toFixed(2).padStart(5, "0")}` : sec.toFixed(2); };
+
+// Relay splits — floating (not full-screen). One card per relay lane, in lane
+// order, with the four legs vertical, current leg highlighted, split entry.
+function RelaySplitsPanel({ heat, evIdx, htIdx, data, homeTeam, onClose, update, get, openPop }) {
+  const relays = heat.lanes.filter((l) => l.swimmers && l.team === homeTeam).sort((a, b) => a.lane - b.lane);
+  return (
+    <div className="md-splitscrim" onClick={onClose}>
+      <div className="md-splitpanel" onClick={(e) => e.stopPropagation()}>
+        <div className="md-splithead"><span>🏊 Relay splits — {shortEvent(heat.eventName)} · H{heat.num}</span><button className="md-x sm" onClick={onClose}>✕</button></div>
+        <div className="md-splitgrid">
+          {relays.map((l) => { const id = entryId(evIdx, htIdx, l.lane), d = get(id), leg = d.leg || 0, splits = d.splits || [];
+            return (
+              <div key={l.lane} className={"md-splitcard" + (l.team === homeTeam ? " mine" : "")}>
+                <div className="md-splitcardhead"><span className="md-splitlane">L{l.lane}</span><span className="md-splitteam" style={{ color: teamColor(l.team) }}>{l.team} {l.relay}</span>
+                  <input className="md-splittime" placeholder="––.––" value={d.time || ""} onChange={(e) => update(id, { time: e.target.value })} /></div>
+                <div className="md-legs">
+                  {l.swimmers.map((s, i) => (
+                    <div key={i} className={"md-leg" + (i === leg ? " cur" : "") + (i < leg ? " done" : "")}>
+                      <button className="md-legsel" onClick={() => update(id, { leg: i })}><span className="md-legnum">{i + 1}</span><span className="md-legname">{s.name}{s.age ? ` (${s.age})` : ""}</span></button>
+                      {splits[i] && <span className="md-legsplit">{splits[i]}</span>}
+                      <button className="md-legnote" title="Notes / tags" onClick={(e) => openPop(id + "#" + i, e.currentTarget)}>✎</button>
+                    </div>
+                  ))}
+                </div>
+                <div className="md-splitrow">
+                  <button className="md-nextleg" onClick={() => update(id, { leg: Math.min(3, leg + 1) })}>Next leg ▸</button>
+                  <input className="md-splitin" placeholder={`Leg ${leg + 1} split`} value={splits[leg] || ""} onChange={(e) => { const ns = splits.slice(); ns[leg] = e.target.value; update(id, { splits: ns }); }} />
+                </div>
+              </div>
+            ); })}
+          {!relays.length && <div className="md-prevempty">No {homeTeam} relay in this heat.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Import a results sheet and merge final times by name+event for chosen teams.
+function ResultsModal({ onClose, events, teams, homeTeam, onApply, onSaveNew }) {
+  const [text, setText] = useState(""); const [busy, setBusy] = useState("");
+  const parsed = useMemo(() => parseResults(text), [text]);
+  const [sel, setSel] = useState(teams);
+  const { patch, matched } = useMemo(() => mergeResults(parsed, events, sel), [parsed, events, sel]);
+  const count = parsed.reduce((n, ev) => n + ev.heats[0].lanes.length, 0);
+  const foundTeams = useMemo(() => { const s = new Set(); parsed.forEach((ev) => ev.heats[0].lanes.forEach((l) => s.add(l.team))); return [...s]; }, [parsed]);
+  const [form, setForm] = useState(false);
+  const [name, setName] = useState(""); const [mtype, setMtype] = useState("champs");
+  const [host, setHost] = useState(""); const [away, setAway] = useState("");
+  useEffect(() => { if (foundTeams.length && !host) setHost(foundTeams[0]); if (foundTeams.length > 1 && !away) setAway(foundTeams[1]); }, [foundTeams]);
+  const onFile = async (e) => { const f = e.target.files?.[0]; if (!f) return;
+    if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") { setBusy("Reading PDF…"); try { setText(await pdfToText(f)); setBusy(""); } catch { setBusy("Couldn't read the PDF — paste text."); } }
+    else { const r = new FileReader(); r.onload = () => setText(String(r.result || "")); r.readAsText(f); } };
+  const toggle = (t) => setSel((s) => s.includes(t) ? s.filter((x) => x !== t) : [...s, t]);
+  const teamOpt = (t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>;
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Import results sheet</div><div className="md-msub">Merge finals onto a loaded program, or save a whole new meet from results alone.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy || "Merge applies to:"}</span>
+          <span className="md-teamsel">{teams.map((t) => <button key={t} className={"md-teamchip" + (sel.includes(t) ? " on" : "")} style={sel.includes(t) ? { background: teamColor(t), borderColor: teamColor(t), color: "#0a1628" } : {}} onClick={() => toggle(t)}>{t}</button>)}</span></div>
+        {form ? (
+          <div className="md-newmeetform">
+            <label className="md-mrow">Meet name<input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Belwood vs Oaktree — Jun 20" /></label>
+            <label className="md-mrow">Meet type<select value={mtype} onChange={(e) => setMtype(e.target.value)}><option value="dual">Dual meet</option><option value="champs">Champs</option><option value="timetrial">Time trials</option></select></label>
+            {mtype === "dual" && <label className="md-mrow">Home team (1st)<select value={host} onChange={(e) => setHost(e.target.value)}>{foundTeams.map(teamOpt)}</select></label>}
+            {mtype === "dual" && <label className="md-mrow">Away team (2nd)<select value={away} onChange={(e) => setAway(e.target.value)}>{foundTeams.map(teamOpt)}</select></label>}
+            <div className="md-newmeetnote">{count} results across {new Set(parsed.map((e) => e.num)).size} events will become this meet.</div>
+          </div>
+        ) : (
+          <div className="md-impgrid">
+            <textarea className="md-imparea" placeholder={"Paste results text…"} value={text} onChange={(e) => setText(e.target.value)} />
+            <div className="md-preview"><div className="md-prevtop"><span>{parsed.length} events · {count} results · <b>{matched}</b> merge onto loaded meet</span></div>
+              <div className="md-prevbody"><div className="md-prevempty">“Merge” fills finals onto the loaded program by event # + name for the selected teams. “Save as new meet” builds and saves a fresh meet from just this results sheet.</div></div></div>
+          </div>
+        )}
+        <div className="md-mfoot"><button className="md-cancel" onClick={form ? () => setForm(false) : onClose}>{form ? "Back" : "Cancel"}</button>
+          {form
+            ? <button className="md-apply" disabled={!count || !name.trim()} onClick={() => onSaveNew({ meet: resultsToMeet(parsed), name: name.trim(), mode: mtype, host, away })}>Save meet</button>
+            : <>
+              <button className="md-ghost2" disabled={!count} onClick={() => setForm(true)}>Save as new meet</button>
+              <button className="md-apply" disabled={matched === 0} onClick={() => onApply(patch)}>Merge {matched} results</button>
+            </>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Team stats: high points + most improved, grouped by age.
+function StatsModal({ onClose, events, data, mode, filter, homeTeam }) {
+  const pts = useMemo(() => computeSwimmerPoints(events, data, mode, filter), [events, data, mode, filter]);
+  const imp = useMemo(() => computeImprovements(events, data, homeTeam), [events, data, homeTeam]);
+  const ptByGrp = {}; Object.values(pts).filter((x) => x.team === homeTeam && x.pts > 0).sort((a, b) => b.pts - a.pts).forEach((x) => { const g = ageGroupOf(x.age) || "Open"; (ptByGrp[g] || (ptByGrp[g] = [])).push(x); });
+  const impByGrp = {}; Object.values(imp).sort((a, b) => b.drop - a.drop).forEach((x) => { const g = ageGroupOf(x.age) || "Open"; (impByGrp[g] || (impByGrp[g] = [])).push(x); });
+  const groups = AGE_GROUPS.filter((g) => ptByGrp[g] || impByGrp[g]);
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Meet stats — {homeTeam}</div><div className="md-msub">{mode === "timetrial" ? "Time trials" : mode === "champs" ? "Champs" : "Dual"} · by age group · live</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-statwrap">
+          <div className="md-statcol">
+            <div className="md-stath">🏆 High points by age</div>
+            {groups.some((g) => ptByGrp[g]) ? groups.map((g) => ptByGrp[g] && (<div key={g} className="md-agegrp"><div className="md-agehdr">{g}</div>
+              {ptByGrp[g].map((x, i) => <div key={x.name} className="md-statrow"><span className="md-statrank">{i + 1}</span><span className="md-statname">{x.name}</span><span className="md-statsub">{x.count} swim{x.count > 1 ? "s" : ""}</span><span className="md-statval gold">{x.pts}</span></div>)}
+            </div>)) : <div className="md-prevempty">No points yet{mode === "timetrial" ? " (time trials don't score)" : ""}.</div>}
+          </div>
+          <div className="md-statcol">
+            <div className="md-stath">📉 Most improved by age</div>
+            {groups.some((g) => impByGrp[g]) ? groups.map((g) => impByGrp[g] && (<div key={g} className="md-agegrp"><div className="md-agehdr">{g}</div>
+              {impByGrp[g].slice(0, 6).map((x) => <div key={x.name} className="md-statrow"><span className={"md-gpill " + x.gender.toLowerCase()}>{x.gender[0]}</span><span className="md-statname">{x.name}</span><span className="md-statsub">{x.ev}</span><span className="md-statval green">−{x.drop.toFixed(2)}</span></div>)}
+            </div>)) : <div className="md-prevempty">No improvements yet — enter final times.</div>}
+          </div>
+        </div>
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+// A swimmer's swims in one stroke category across a set of meets (progression).
+function swimmerStrokeTimes(name, team, cat, meets) {
+  const out = [];
+  meets.forEach((m) => (m.events || []).forEach((ev, evIdx) => { if (isRelayEvent(ev.name) || categorize(ev.name) !== cat) return;
+    ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { if (l.name !== name || l.team !== team) return;
+      const d = (m.data || {})[entryId(evIdx, htIdx, l.lane)] || {};
+      out.push({ date: m.date || "", meet: m.meetName || "", ev: shortEvent(ev.name), seed: l.seed, final: d.time || "" });
+    }));
+  }));
+  return out.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+}
+
+// Aggregate saved meets → per-swimmer season totals. Time-trial meets earn no
+// points and are excluded from the improvement percentage.
+function computeSeason(meets) {
+  const sw = {};
+  meets.forEach((m) => { const tt = m.mode === "timetrial"; const table = m.mode === "champs" ? CHAMPS : DUAL; const data = m.data || {};
+    (m.events || []).forEach((ev, evIdx) => { if (isRelayEvent(ev.name)) return;
+      const placeOf = {}; if (!tt) rankedEvent(ev, evIdx, data, null).forEach((e, i) => (placeOf[e.id] = i + 1));
+      ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { const id = entryId(evIdx, htIdx, l.lane), d = data[id] || {};
+        const key = l.name + "|" + l.team; (sw[key] || (sw[key] = { name: l.name, team: l.team, age: l.age, gender: evGender(ev.name), pts: 0, swims: 0, improved: 0, meets: 0 }));
+        if (l.age) sw[key].age = l.age;
+        const fs = toSeconds(d.time), ss = toSeconds(l.seed);
+        if (!tt) { const p = placeOf[id]; if (p) sw[key].pts += (table[p] || 0); if (!isNaN(fs)) { sw[key].swims++; if (!isNaN(ss) && fs < ss) sw[key].improved++; } }
+      }));
+    });
+  });
+  return sw;
+}
+
+// Season & league: aggregates all saved meets. High points + improvement %
+// (improved swims / total swims, time trials excluded) by age group.
+function SeasonModal({ onClose, homeTeam, meets }) {
+  const [gender, setGender] = useState("All");
+  const [grp, setGrp] = useState("All");
+  const list = meets || [];
+  const agg = useMemo(() => computeSeason(list), [list]);
+  const all = Object.values(agg).filter((s) => s.team === homeTeam);
+  const match = (s) => (gender === "All" || s.gender === gender) && (grp === "All" || ageGroupOf(s.age) === grp);
+  const hp = all.filter(match).filter((s) => s.pts > 0).sort((a, b) => b.pts - a.pts).slice(0, 40);
+  const impByGrp = {}; all.filter(match).filter((s) => s.swims > 0).map((s) => ({ ...s, pct: Math.round((s.improved / s.swims) * 100) })).sort((a, b) => b.pct - a.pct || b.swims - a.swims)
+    .forEach((s) => { const g = ageGroupOf(s.age) || "Open"; (impByGrp[g] || (impByGrp[g] = [])).push(s); });
+  const groups = AGE_GROUPS.filter((g) => impByGrp[g]);
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Team stats — {homeTeam}</div><div className="md-msub">Across {list.length} saved meet{list.length === 1 ? "" : "s"} · season</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-rbctl">
+          <label className="md-ctl">Gender<select value={gender} onChange={(e) => setGender(e.target.value)}><option>All</option><option>Girls</option><option>Boys</option></select></label>
+          <label className="md-ctl">Age group<select value={grp} onChange={(e) => setGrp(e.target.value)}><option>All</option>{AGE_GROUPS.map((g) => <option key={g}>{g}</option>)}</select></label>
+        </div>
+        <div className="md-statwrap">
+          <div className="md-statcol">
+            <div className="md-stath">🏆 High points (season)</div>
+            {hp.length ? hp.map((x, i) => <div key={x.name + x.team} className="md-statrow mine"><span className="md-statrank">{i + 1}</span><span className="md-statname">{x.name}</span><span className="md-statsub">{ageGroupOf(x.age) || "?"} · {x.gender[0]}</span><span className="md-statval gold">{x.pts}</span></div>)
+              : <div className="md-prevempty">{list.length ? "No scored swims yet — enter finals then save." : "No saved meets yet — use “Save this meet to season” in Settings."}</div>}
+          </div>
+          <div className="md-statcol">
+            <div className="md-stath">📈 Improvement % by age</div>
+            {groups.length ? groups.map((g) => (<div key={g} className="md-agegrp"><div className="md-agehdr">{g}</div>
+              {impByGrp[g].slice(0, 8).map((x) => <div key={x.name + x.team} className="md-statrow mine"><span className={"md-gpill " + x.gender.toLowerCase()}>{x.gender[0]}</span><span className="md-statname">{x.name}</span><span className="md-statsub">{x.improved}/{x.swims} swims</span><span className="md-statval green">{x.pct}%</span></div>)}
+            </div>)) : <div className="md-prevempty">No non-time-trial swims yet.</div>}
+          </div>
+        </div>
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+// League browser: every swimmer, filter by team/age/gender, tap for stats.
+// Everyone entered in the meet — individual entries AND named relay legs — for
+// the scratch screen. A relay leg's id is the relay entry id + "#" + leg index,
+// the same addressing ActionPopover/RelaySplitsPanel already use for per-swimmer
+// data on a relay (tags, notes, DQs), so scratching one just writes to that id.
+function computeParticipants(events, data) {
+  const sw = {};
+  events.forEach((ev, ei) => ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => {
+    if (l.swimmers) {
+      l.swimmers.forEach((s, leg) => {
+        const id = entryId(ei, hi, l.lane) + "#" + leg, key = s.name + "|" + l.team;
+        (sw[key] || (sw[key] = { name: s.name, team: l.team, age: s.age, entries: [] }));
+        if (s.age) sw[key].age = s.age;
+        sw[key].entries.push({ id, ev: shortEvent(ev.name), scratched: isScratched(data[id] || {}), relay: true, relayLabel: l.relay, evIdx: ei, htIdx: hi, relayLane: l.lane, leg });
+      });
+      return;
+    }
+    const id = entryId(ei, hi, l.lane), key = l.name + "|" + l.team;
+    (sw[key] || (sw[key] = { name: l.name, team: l.team, age: l.age, entries: [] }));
+    if (l.age) sw[key].age = l.age;
+    sw[key].entries.push({ id, ev: shortEvent(ev.name), scratched: isScratched(data[id] || {}) });
+  })));
+  return Object.values(sw).sort((a, b) => a.team.localeCompare(b.team) || a.name.localeCompare(b.name));
+}
+
+// Every unique swimmer on a team across the whole meet program (solo + relay legs).
+function teamRoster(events, team) {
+  const seen = new Map();
+  events.forEach((ev) => ev.heats.forEach((ht) => ht.lanes.forEach((l) => {
+    if (l.swimmers) { if (l.team === team) l.swimmers.forEach((s) => { if (s.name && !seen.has(s.name)) seen.set(s.name, { name: s.name, age: s.age || 0, team }); }); return; }
+    if (l.team === team && l.name && !seen.has(l.name)) seen.set(l.name, { name: l.name, age: l.age || 0, team });
+  })));
+  return [...seen.values()];
+}
+// Infer each swimmer's gender from any Girls/Boys-labeled event they swim (solo or relay leg).
+function swimmerGenderMap(events) {
+  const map = {};
+  events.forEach((ev) => { const g = evGender(ev.name); if (g === "Mixed") return;
+    ev.heats.forEach((ht) => ht.lanes.forEach((l) => { if (l.swimmers) l.swimmers.forEach((s) => (map[s.name + "|" + l.team] = g)); else map[l.name + "|" + l.team] = g; })); });
+  return map;
+}
+// Fastest known time (final if swum, else seed) a swimmer has in a stroke category this meet.
+function bestStrokeSeed(events, data, name, team, cat) {
+  let best = Infinity;
+  events.forEach((ev, ei) => { if (isRelayEvent(ev.name) || categorize(ev.name) !== cat) return;
+    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (l.name !== name || l.team !== team) return;
+      const d = data[entryId(ei, hi, l.lane)] || {}; const t = toSeconds(d.time), s = toSeconds(l.seed), v = !isNaN(t) ? t : s;
+      if (!isNaN(v) && v < best) best = v; })); });
+  return isFinite(best) ? best : null;
+}
+const MEDLEY_ORDER = ["Back", "Breast", "Fly", "Free"];
+// Teammates eligible to swap into a relay leg: same team, same natural age group,
+// same gender as the event (when known), not already swimming this relay — ranked
+// fastest-first by their best time in the relevant stroke (medley legs swim in
+// Back/Breast/Fly/Free order; free relays are Free throughout). Falls back to an
+// unverified same-team list (flagged) if nobody fits the strict rule, so a coach
+// always has a couple of options rather than a dead end.
+function relayReplacementCandidates(events, data, evIdx, htIdx, lane, leg, team) {
+  const ev = events[evIdx]; const ht = ev && ev.heats[htIdx];
+  const relayLane = ht && ht.lanes.find((l) => l.lane === lane);
+  if (!relayLane || !relayLane.swimmers) return [];
+  const group = evAgeGroup(ev.name), evg = evGender(ev.name);
+  const stroke = /medley/i.test(ev.name) ? (MEDLEY_ORDER[leg] || "Free") : "Free";
+  const already = new Set(relayLane.swimmers.map((s) => s.name));
+  const genderMap = swimmerGenderMap(events);
+  const rank = (list) => list.map((c) => ({ ...c, best: bestStrokeSeed(events, data, c.name, team, stroke), stroke })).sort((a, b) => (a.best ?? Infinity) - (b.best ?? Infinity));
+  const pool = teamRoster(events, team).filter((c) => !already.has(c.name));
+  const strict = rank(pool.filter((c) => ageGroupOf(c.age) === group && (evg === "Mixed" || !genderMap[c.name + "|" + team] || genderMap[c.name + "|" + team] === evg))).map((c) => ({ ...c, verified: true }));
+  if (strict.length) return strict.slice(0, 3);
+  return rank(pool).slice(0, 3).map((c) => ({ ...c, verified: false }));
+}
+
+// Participants & scratches — all swimmers, filter by team, scratch per event
+// (including individual relay legs) or the whole meet.
+function ParticipantsModal({ onClose, events, data, homeTeam, onOne, onAll }) {
+  const people = useMemo(() => computeParticipants(events, data), [events, data]);
+  const teams = useMemo(() => [...new Set(people.map((p) => p.team))].sort(), [people]);
+  const [team, setTeam] = useState(homeTeam || "All");
+  const [open, setOpen] = useState(null);
+  const rows = people.filter((p) => team === "All" || p.team === team);
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Scratches</div><div className="md-msub">Scratch a swimmer per event — relay legs included — or the whole meet. Any team.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-rbctl"><label className="md-ctl">Team<select value={team} onChange={(e) => setTeam(e.target.value)}><option>All</option>{teams.map((t) => <option key={t}>{t}</option>)}</select></label><span className="md-lgcount">{rows.length} swimmers</span></div>
+        <div className="md-lglist">
+          {rows.map((p) => { const key = p.name + "|" + p.team, anyScr = p.entries.some((e) => e.scratched), allScr = p.entries.every((e) => e.scratched);
+            return (<div key={key} className={"md-lgitem" + (anyScr ? " scr" : "")}>
+              <button className="md-lgrow" onClick={() => setOpen(open === key ? null : key)}>
+                <span className="md-lgdot" style={{ background: teamColor(p.team) }} />
+                <span className="md-lgname">{p.name}</span>
+                <span className="md-lgmeta">{p.team}{p.age ? " · " + p.age : ""} · {p.entries.length} event{p.entries.length === 1 ? "" : "s"}</span>
+                {anyScr && <span className="md-timex" style={{ width: "auto", fontSize: 14 }}>X</span>}
+                <span className="md-cc">{open === key ? "▾" : "▸"}</span>
+              </button>
+              {open === key && <div className="md-lgdetail">
+                <button className={"md-mbtn" + (allScr ? "" : " danger")} onClick={() => onAll(p.name, p.team, !allScr)}>{allScr ? "↺ Un-scratch whole meet" : "✕ Scratch whole meet"}</button>
+                {p.entries.map((e) => (
+                  <div key={e.id} className="md-partev">
+                    <span className={"md-partname" + (e.scratched ? " scr" : "")}>{e.ev}{e.relay && <em className="md-relaytag"> · relay {e.relayLabel}</em>}</span>
+                    <button className={"md-partbtn" + (e.scratched ? " on" : "")} onClick={() => onOne({ ...e, name: p.name, team: p.team }, !e.scratched)}>{e.scratched ? "X — tap to restore" : "Scratch"}</button>
+                  </div>
+                ))}
+              </div>}
+            </div>); })}
+          {!rows.length && <div className="md-prevempty">No swimmers for this team.</div>}
+        </div>
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+// After a relay swimmer is scratched: offer a couple of eligible teammates to
+// swap into that leg, or leave the relay short a swimmer.
+function RelayReplaceModal({ target, candidates, onClose, onSwap }) {
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Replace {target.name}?</div><div className="md-msub">{shortEvent(target.eventName)} · {target.stroke || (candidates[0] && candidates[0].stroke) || ""} leg · {target.team}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-scratchbtns">
+          {candidates.length ? candidates.map((c) => (
+            <button key={c.name} className="md-mbtn" onClick={() => onSwap(c)}>
+              <b>{c.name}</b>{c.age ? ` (${c.age})` : ""} — {c.best != null ? fmtT(c.best) : "no time on record"}{!c.verified && <em style={{ marginLeft: 6, color: "#a8842a", fontStyle: "normal" }}>unverified age/gender</em>}
+            </button>
+          )) : <div className="md-prevempty">No eligible teammate found on the roster for this age group.</div>}
+          <button className="md-cancel" onClick={onClose}>Leave relay short (keep scratch)</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Improvement rate for a swimmer across meets (avg fractional time drop).
+function computeImpRate(name, team, meets) {
+  let acc = 0, n = 0;
+  meets.forEach((m) => { if (m.mode === "timetrial") return; (m.events || []).forEach((ev, ei) => { if (isRelayEvent(ev.name)) return;
+    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (l.name !== name || l.team !== team) return; const d = (m.data || {})[entryId(ei, hi, l.lane)] || {}; const fs = toSeconds(d.time), ss = toSeconds(l.seed); if (!isNaN(fs) && !isNaN(ss) && ss > 0 && fs < ss) { acc += (ss - fs) / ss; n++; } })); }); });
+  return n ? acc / n : 0.01;
+}
+// SwimCloud-style power: avg percentile of a swimmer's best times across the league, 0–100.
+function computePower(meets) {
+  const sw = {}, bestByEv = {};
+  meets.forEach((m) => (m.events || []).forEach((ev, ei) => { if (isRelayEvent(ev.name)) return; const ekey = evGender(ev.name) + "|" + evAgeGroup(ev.name) + "|" + categorize(ev.name);
+    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { const d = (m.data || {})[entryId(ei, hi, l.lane)] || {}; const t = toSeconds(d.time); const s = isNaN(t) ? toSeconds(l.seed) : t; if (isNaN(s)) return; const key = l.name + "|" + l.team;
+      (sw[key] || (sw[key] = { name: l.name, team: l.team, age: l.age, gender: evGender(ev.name), events: {} }));
+      if (l.age) sw[key].age = l.age; sw[key].events[ekey] = Math.min(sw[key].events[ekey] ?? Infinity, s);
+      (bestByEv[ekey] || (bestByEv[ekey] = {})); if (bestByEv[ekey][key] === undefined || s < bestByEv[ekey][key]) bestByEv[ekey][key] = s;
+    })); }));
+  const acc = {};
+  Object.values(bestByEv).forEach((mp) => { const arr = Object.entries(mp).map(([k, t]) => ({ k, t })).sort((a, b) => a.t - b.t); const n = arr.length; arr.forEach((e, i) => { const pct = n > 1 ? ((n - 1 - i) / (n - 1)) * 100 : 100; (acc[e.k] || (acc[e.k] = { s: 0, n: 0 })); acc[e.k].s += pct; acc[e.k].n++; }); });
+  Object.entries(acc).forEach(([k, v]) => { if (sw[k]) sw[k].power = Math.round(v.s / v.n); });
+  return sw;
+}
+// Team standings (W-L, points for/against, margins) from dual meets.
+function computeStandings(meets) {
+  const rec = {};
+  meets.forEach((m) => { if (m.mode !== "dual" || !m.hostTeam || !m.awayTeam) return;
+    const scores = computeScores(m.events || [], m.data || {}, "dual", [m.hostTeam, m.awayTeam]);
+    const hs = scores.pts[m.hostTeam] || 0, as = scores.pts[m.awayTeam] || 0;
+    [[m.hostTeam, hs, as], [m.awayTeam, as, hs]].forEach(([t, pf, pa]) => { (rec[t] || (rec[t] = { team: t, w: 0, l: 0, tie: 0, pf: 0, pa: 0, meets: [] }));
+      rec[t].pf += pf; rec[t].pa += pa; if (pf > pa) rec[t].w++; else if (pf < pa) rec[t].l++; else rec[t].tie++;
+      rec[t].meets.push({ meet: m.meetName, date: m.date, opp: t === m.hostTeam ? m.awayTeam : m.hostTeam, pf, pa, margin: pf - pa }); });
+  });
+  return rec;
+}
+
+// League dashboard: team records → tap a team for full stats + power ranking (SwimCloud-style).
+function LeagueModal({ onClose, meets, homeTeam }) {
+  const power = useMemo(() => computePower(meets), [meets]);
+  const standings = useMemo(() => computeStandings(meets), [meets]);
+  const teams = useMemo(() => [...new Set(Object.values(power).map((s) => s.team))].sort(), [power]);
+  const teamPower = (t) => { const arr = Object.values(power).filter((s) => s.team === t && s.power != null); return arr.length ? Math.round(arr.reduce((a, b) => a + b.power, 0) / arr.length) : 0; };
+  const [sel, setSel] = useState(null);
+  const rows = teams.map((t) => ({ team: t, ...(standings[t] || { w: 0, l: 0, tie: 0, pf: 0, pa: 0, meets: [] }), power: teamPower(t) }))
+    .sort((a, b) => (b.w - b.l) - (a.w - a.l) || b.power - a.power);
+  if (sel) {
+    const st = standings[sel] || { meets: [] };
+    const roster = Object.values(power).filter((s) => s.team === sel).sort((a, b) => (b.power || 0) - (a.power || 0));
+    return (
+      <div className="md-scrim" onClick={onClose}>
+        <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+          <div className="md-mhead"><div><button className="md-back" onClick={() => setSel(null)}>‹ League</button><div className="md-mtitle" style={{ color: teamColor(sel) }}>{TEAM_NAME[sel] || sel}</div><div className="md-msub">{st.w || 0}-{st.l || 0}{st.tie ? "-" + st.tie : ""} · team power {teamPower(sel)}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+          <div className="md-teamdetail">
+            <div className="md-stath">Meets</div>
+            {st.meets && st.meets.length ? st.meets.map((mm, i) => <div key={i} className="md-statrow"><span className="md-statname">vs {mm.opp}</span><span className="md-statsub">{mm.date}</span><span className={"md-statval " + (mm.margin > 0 ? "green" : mm.margin < 0 ? "red" : "")}>{mm.margin > 0 ? "W" : mm.margin < 0 ? "L" : "T"} {mm.pf}-{mm.pa}</span></div>) : <div className="md-prevempty">No dual-meet records yet.</div>}
+            <div className="md-stath" style={{ marginTop: 12 }}>Swimmers — power ranking</div>
+            {roster.map((s) => (<div key={s.name} className="md-statrow"><span className={"md-gpill " + s.gender.toLowerCase()}>{s.gender[0]}</span><span className="md-statname">{s.name}</span><span className="md-statsub">{ageGroupOf(s.age) || "?"}</span><span className="md-power">{s.power ?? "—"}</span></div>))}
+          </div>
+          <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">League stats</div><div className="md-msub">Standings across saved meets. Tap a team for full stats.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-standings">
+          <div className="md-standhdr"><span>Team</span><span>W-L</span><span>Pts F/A</span><span>Power</span></div>
+          {rows.map((r) => (
+            <button key={r.team} className={"md-standrow" + (r.team === homeTeam ? " mine" : "")} onClick={() => setSel(r.team)}>
+              <span className="md-standteam"><span className="md-lgdot" style={{ background: teamColor(r.team) }} />{TEAM_NAME[r.team] || r.team}</span>
+              <span className="md-standwl">{r.w}-{r.l}{r.tie ? "-" + r.tie : ""}</span>
+              <span className="md-standpf">{r.pf}/{r.pa}</span>
+              <span className="md-standpow">{r.power}<span className="md-cc">›</span></span>
+            </button>
+          ))}
+          {!rows.length && <div className="md-prevempty">No teams yet — import a meet or results.</div>}
+        </div>
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+// Distribution of a swimmer's fractional time change (seed → final) in one
+// stroke, used to turn "improvement rate" into an actual spread instead of a
+// single number. Falls back to a modest, wide-uncertainty guess when there's
+// not enough history to estimate a spread from.
+function swimmerImprovementStats(name, team, stroke, meets) {
+  const deltas = [];
+  meets.forEach((m) => { if (m.mode === "timetrial") return; (m.events || []).forEach((ev, ei) => { if (isRelayEvent(ev.name) || categorize(ev.name) !== stroke) return;
+    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (l.name !== name || l.team !== team) return;
+      const d = (m.data || {})[entryId(ei, hi, l.lane)] || {}; const fs = toSeconds(d.time), ss = toSeconds(l.seed);
+      if (!isNaN(fs) && !isNaN(ss) && ss > 0) deltas.push((ss - fs) / ss);
+    })); }); });
+  const n = deltas.length;
+  const mean = n ? deltas.reduce((s, v) => s + v, 0) / n : 0.012;
+  const variance = n > 1 ? deltas.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1) : 0;
+  const sd = n > 1 ? Math.sqrt(variance) : 0.03;
+  return { mean, sd: Math.max(sd, 0.01), n };
+}
+// Standard normal CDF (Abramowitz & Stegun 7.1.26 approximation) — used to turn
+// a projected-time gap + combined spread into a win probability.
+function normCdf(z) {
+  const sign = z < 0 ? -1 : 1; const x = Math.abs(z) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * x);
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return 0.5 * (1 + sign * y);
+}
+// Project a swimmer's next swim from their current best + their improvement
+// spread: a pinpoint "likely" time, plus a best/conservative case ~1sd out.
+function projectSwimmer(base, stats) {
+  const { mean, sd } = stats;
+  const likely = base * (1 - mean);
+  const best = base * (1 - Math.min(mean + sd, 0.14));
+  const conservative = base * (1 - (mean - sd));
+  return { base, likely, best, conservative, sdTime: base * sd, ...stats };
+}
+
+// Swimmer comparison: pick a team, then age group, then swimmer, for each
+// side. Projects each swimmer's next swim (pinpoint + best/conservative
+// spread) from their own improvement history, then a head-to-head win
+// probability from the gap between projections vs. their combined spread.
+function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam }) {
+  const meets = useMemo(() => [{ meetName: "This meet", mode: "meet", events, data }, ...seasonMeets], [events, data, seasonMeets]);
+  const power = useMemo(() => computePower(meets), [meets]);
+  const people = useMemo(() => Object.values(power).sort((a, b) => a.name.localeCompare(b.name)), [power]);
+  const teams = useMemo(() => [...new Set(people.map((p) => p.team))].sort(), [people]);
+  const [stroke, setStroke] = useState("Free");
+
+  const useSide = (defaultTeam) => {
+    const [team, setTeam] = useState(defaultTeam);
+    const ages = useMemo(() => AGE_GROUPS.filter((g) => people.some((p) => p.team === team && ageGroupOf(p.age) === g)), [team, people]);
+    const [age, setAge] = useState(ages[0] || "");
+    useEffect(() => { if (ages.length && !ages.includes(age)) setAge(ages[0]); }, [ages.join(",")]);
+    const roster = useMemo(() => people.filter((p) => p.team === team && (!age || ageGroupOf(p.age) === age)).sort((a, b) => a.name.localeCompare(b.name)), [team, age, people]);
+    const [name, setName] = useState(roster[0] ? roster[0].name : "");
+    useEffect(() => { if (roster.length && !roster.some((r) => r.name === name)) setName(roster[0].name); }, [roster.map((r) => r.name).join(",")]);
+    return { team, setTeam, age, setAge, ages, name, setName, roster };
+  };
+  const A = useSide(homeTeam || teams[0]);
+  const B = useSide(teams.find((t) => t !== (homeTeam || teams[0])) || teams[0]);
+
+  const proj = (side) => { if (!side.name) return null;
+    const times = swimmerStrokeTimes(side.name, side.team, stroke, meets).map((t) => toSeconds(t.final) || toSeconds(t.seed)).filter((x) => !isNaN(x));
+    if (!times.length) return null;
+    const stats = swimmerImprovementStats(side.name, side.team, stroke, meets);
+    return { name: side.name, team: side.team, ...projectSwimmer(Math.min(...times), stats) };
+  };
+  const pa = proj(A), pb = proj(B);
+  const sdDiff = pa && pb ? Math.sqrt(pa.sdTime ** 2 + pb.sdTime ** 2) || 0.001 : null;
+  const pAwins = pa && pb ? normCdf((pb.likely - pa.likely) / sdDiff) : null;
+
+  const domain = pa && pb ? { min: Math.min(pa.best, pb.best), max: Math.max(pa.conservative, pb.conservative) } : null;
+  const pct = (t) => domain ? Math.min(100, Math.max(0, ((t - domain.min) / (domain.max - domain.min || 1)) * 100)) : 0;
+
+  const sidePicker = (side, label) => (
+    <div className="md-cmpcol">
+      <div className="md-cmppicks">
+        <select className="md-cmpsel" value={side.team} onChange={(e) => side.setTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}</select>
+        <select className="md-cmpsel" value={side.age} onChange={(e) => side.setAge(e.target.value)}>{side.ages.length ? side.ages.map((g) => <option key={g} value={g}>{g}</option>) : <option value="">—</option>}</select>
+        <select className="md-cmpsel" value={side.name} onChange={(e) => side.setName(e.target.value)}>{side.roster.length ? side.roster.map((s) => <option key={s.name} value={s.name}>{s.name}</option>) : <option value="">No swimmers</option>}</select>
+      </div>
+    </div>
+  );
+
+  const spread = (p) => !p ? <div className="md-prevempty">No {stroke} time on record.</div> : (
+    <div className="md-cmpspread">
+      <div className="md-cmptrack">
+        <div className="md-cmpband" style={{ left: pct(p.best) + "%", width: Math.max(2, pct(p.conservative) - pct(p.best)) + "%" }} />
+        <div className="md-cmppin" style={{ left: pct(p.likely) + "%" }} title={`pinpoint ${fmtT(p.likely)}`} />
+      </div>
+      <div className="md-cmpspreadlabels"><span>{fmtT(p.best)}</span><span className="mid">{fmtT(p.likely)}</span><span>{fmtT(p.conservative)}</span></div>
+      <div className="md-cmpspreadcap"><span>best case</span><span className="mid">pinpoint</span><span>conservative</span></div>
+      <div className="md-cmprate">current best {fmtT(p.base)} · trending {(p.mean * 100).toFixed(1)}%/swim{p.n < 3 ? " (thin history)" : ""}</div>
+    </div>
+  );
+
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Swimmer comparison</div><div className="md-msub">Pick a team, age group, then swimmer for each side. Projections use each swimmer's own improvement spread.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-rbctl">
+          <label className="md-ctl">Stroke<select value={stroke} onChange={(e) => setStroke(e.target.value)}>{PROG_STROKES.map((s) => <option key={s}>{s}</option>)}</select></label>
+        </div>
+        <div className="md-cmpwrap">
+          {sidePicker(A, "A")}
+          <div className="md-cmpvs">vs</div>
+          {sidePicker(B, "B")}
+        </div>
+        {pAwins != null && <div className="md-cmpprob">
+          <div className="md-cmpprobbar"><div className="md-cmpprobfill" style={{ width: (pAwins * 100).toFixed(1) + "%" }} /></div>
+          <div className="md-cmpprobrow"><span style={{ color: teamColor(A.team) }}>{A.name || "—"} {(pAwins * 100).toFixed(0)}%</span><span style={{ color: teamColor(B.team) }}>{(100 - pAwins * 100).toFixed(0)}% {B.name || "—"}</span></div>
+        </div>}
+        <div className="md-cmpwrap">
+          <div className="md-cmpcol">{spread(pa)}</div>
+          <div className="md-cmpvs"> </div>
+          <div className="md-cmpcol">{spread(pb)}</div>
+        </div>
+        {pa && pb && <div className="md-cmpwin">Projected (pinpoint): <b style={{ color: teamColor(pa.likely <= pb.likely ? A.team : B.team) }}>{pa.likely <= pb.likely ? A.name : B.name}</b> by {fmtT(Math.abs(pa.likely - pb.likely))} · {(Math.max(pAwins, 1 - pAwins) * 100).toFixed(0)}% confidence</div>}
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+// Projects a relay's total using each swimmer's own improvement spread
+// instead of their raw seed time, and carries the combined uncertainty
+// (variances add for independent legs) needed to simulate the field.
+function projectRelay(relay, meets) {
+  const legs = relay.swimmers.map((sw) => { const stats = swimmerImprovementStats(sw.name, relay.team, "Free", meets); return { name: sw.name, gender: sw.gender, ...projectSwimmer(sw.s, stats) }; });
+  const projTotal = legs.reduce((a, l) => a + l.likely, 0);
+  const sd = Math.sqrt(legs.reduce((a, l) => a + l.sdTime ** 2, 0)) || 0.05;
+  return { ...relay, legs, projTotal, sd };
+}
+function gaussian() { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+// Monte Carlo the field: each team's total is drawn from Normal(projTotal, sd)
+// per trial, fastest wins that trial. Cheap (a few thousand draws) and handles
+// >2 teams naturally, unlike a pairwise normal-CDF comparison.
+function simulateRelayField(projected, iters = 3000) {
+  const wins = {}; projected.forEach((r) => (wins[r.team] = 0));
+  for (let i = 0; i < iters; i++) {
+    let bestTeam = null, bestTime = Infinity;
+    projected.forEach((r) => { const t = r.projTotal + gaussian() * r.sd; if (t < bestTime) { bestTime = t; bestTeam = r.team; } });
+    if (bestTeam) wins[bestTeam]++;
+  }
+  const out = {}; projected.forEach((r) => (out[r.team] = wins[r.team] / iters)); return out;
+}
+
+// Relay builder: fastest 4-swimmer free relay per team, home team highlighted,
+// ranked by projected time (factoring each swimmer's improvement trend, not
+// just raw seed) with a simulated probability of touching first.
+function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
+  const ageGroups = useMemo(() => AGE_GROUPS.filter((g) => events.some((e) => /free/i.test(e.name) && !isRelayEvent(e.name) && evAgeGroup(e.name) === g)), [events]);
+  const [ag, setAg] = useState(ageGroups[0] || "11-12");
+  const [gender, setGender] = useState("Girls");
+  const mixed = MIXED_GROUPS.includes(ag);
+  const relays = useMemo(() => mixed ? buildMixedRelays(events, ag) : buildFreeRelays(events, ag, gender), [events, ag, gender, mixed]);
+  const meets = useMemo(() => [{ meetName: "This meet", mode: "meet", events, data }, ...(seasonMeets || [])], [events, data, seasonMeets]);
+  const projected = useMemo(() => relays.map((r) => projectRelay(r, meets)).sort((a, b) => a.projTotal - b.projTotal), [relays, meets]);
+  const winProb = useMemo(() => simulateRelayField(projected), [projected]);
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Relay builder — fastest free relay</div><div className="md-msub">Best 4 by seed per team, ranked by projected time (improvement trend factored in) with a simulated win probability.{mixed ? " Mixed group." : ""}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-rbctl">
+          <label className="md-ctl">Age<select value={ag} onChange={(e) => setAg(e.target.value)}>{ageGroups.map((a) => <option key={a} value={a}>{a}</option>)}</select></label>
+          {mixed ? <span className="md-mixtag">Mixed</span> : <label className="md-ctl">Gender<select value={gender} onChange={(e) => setGender(e.target.value)}>{["Girls", "Boys"].map((g) => <option key={g} value={g}>{g}</option>)}</select></label>}
+        </div>
+        <div className="md-rblist">
+          {projected.length ? projected.map((r, i) => (
+            <div key={r.team} className={"md-rbteam" + (r.team === homeTeam ? " mine" : "")}>
+              <div className="md-rbhead"><span className="md-rbrank">{i + 1}</span><span className="md-rbteamname" style={{ color: teamColor(r.team) }}>{r.team}</span>
+                <span className="md-rbtotal">{fmtT(r.projTotal)}<span className="md-rbproj">seed {fmtT(r.total)}</span></span>
+                {i > 0 && <span className="md-rbgap">+{fmtT(r.projTotal - projected[0].projTotal)}</span>}
+              </div>
+              <div className="md-rbswimmers">{r.legs.map((l, j) => <span key={j} className="md-rbswim">{l.gender ? <em className={"md-gtick " + l.gender.toLowerCase()}>{l.gender[0]}</em> : null}{l.name} <em>{fmtT(l.likely)}</em></span>)}</div>
+              <div className="md-rbprob"><div className="md-rbprobbar"><div className="md-rbprobfill" style={{ width: ((winProb[r.team] || 0) * 100).toFixed(0) + "%" }} /></div><span className="md-rbprobval">{((winProb[r.team] || 0) * 100).toFixed(0)}%</span></div>
+            </div>
+          )) : <div className="md-prevempty">No full 4-swimmer set found for this group. Try another age, or import the full roster.</div>}
+        </div>
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+// ---- results-sheet parser (single-column Hy-Tek "Results") ----------------
+// Rows: PLACE  Last, First [MI]  AGE  Full Team Name  SeedTime  FinalsTime
+// Finals time = the last decimal time on the row. Relays: PLACE Team A ... time.
+function parseResults(text) {
+  if (!text || !text.trim()) return [];
+  const events = []; let ev = null;
+  for (let raw of text.split(/\r?\n/)) {
+    let line = raw.replace(/\s+/g, " ").trim(); if (!line) continue;
+    const m = line.match(/^\(?event\s+(\d+)\s+(.+?)\)?$/i);
+    if (m && /(free|back|breast|fly|medley|relay|\bim\b)/i.test(line)) { ev = { num: m[1], name: m[2].replace(/\)+$/, "").trim(), relay: /relay/i.test(m[2]), heats: [{ num: 1, lanes: [] }] }; events.push(ev); continue; }
+    if (!ev) continue;
+    if (/^name age team|^team relay|vcsl record|hy-tek|valley cabana|^results|^\d{4} vcsl|meet -|belwood:/i.test(line)) continue;
+    const times = [...line.matchAll(/\b\d{1,2}:\d{2}\.\d{2}\b|\b\d{1,3}\.\d{2}\b/g)].map((x) => x[0]);
+    if (!times.length) continue;
+    const seed = times.length > 1 ? times[0] : "NT", final = times[times.length - 1];
+    if (!ev.relay) {
+      const nm = line.match(/^\*?\d+\s+([A-Za-zÀ-ÿ'’.\-]+,\s*[A-Za-zÀ-ÿ'’.\- ]+?)\s+(\d{1,2})\s+([A-Za-z].*)$/);
+      if (nm) ev.heats[0].lanes.push({ name: nm[1].trim(), age: +nm[2], team: normTeam(nm[3]), seed, finalTime: final, lane: ev.heats[0].lanes.length + 1 });
+    } else {
+      const rm = line.match(/^\*?\d+\s+(.+?)\s+([A-Z])\b/);
+      if (rm) ev.heats[0].lanes.push({ name: normTeam(rm[1]) + " " + rm[2], team: normTeam(rm[1]), relay: rm[2], seed, finalTime: final, lane: ev.heats[0].lanes.length + 1, swimmers: [] });
+    }
+  }
+  return events;
+}
+
+// Turn a parsed results sheet into a full standalone meet (events + final times).
+function resultsToMeet(parsed) {
+  const byNum = {}, order = [];
+  parsed.forEach((ev) => { if (!byNum[ev.num]) { byNum[ev.num] = { num: ev.num, name: ev.name, lanes: [] }; order.push(ev.num); } ev.heats[0].lanes.forEach((l) => byNum[ev.num].lanes.push(l)); });
+  const events = [], data = {};
+  order.forEach((num, i) => { const g = byNum[num]; const lanes = g.lanes.map((l, j) => ({ lane: j + 1, name: l.name, age: l.age || 0, team: l.team, seed: l.seed || "NT", ...(l.relay ? { relay: l.relay, swimmers: [] } : {}) }));
+    events.push({ id: "ev" + i, num: g.num, name: g.name, flat: true, heats: [{ num: 1, lanes }] });
+    g.lanes.forEach((l, j) => { if (l.finalTime) data[entryId(i, 0, j + 1)] = { time: l.finalTime, dqs: [], tags: {}, notes: "" }; });
+  });
+  return { events: events.filter((e) => e.heats[0].lanes.length), data };
+}
+
+// ---- parser tuned to the de-columned Hy-Tek "Meet Program" layout ---------
+function parseHeatSheet(text) {
+  if (!text || !text.trim()) return [];
+  const events = []; let ev = null, heat = null, lastRelay = null;
+  const skip = /^(valley cabana|2026 vcsl|meet program|.*hy-tek|lane (team|name)|.*- page \d)/i;
+  for (let raw of text.split(/\r?\n/)) {
+    let line = raw.replace(/\s+/g, " ").trim(); if (!line) continue;
+    if (skip.test(line)) continue;
+    const m = line.match(/^#(\d+)\s+(.+)$/);
+    if (m && /(free|back|breast|fly|medley|relay|\bim\b)/i.test(line)) { ev = { id: "ev" + events.length, num: m[1], name: m[2].trim(), heats: [] }; events.push(ev); heat = null; lastRelay = null; continue; }
+    const r = line.match(/vcsl record[:\s]+.*?(\d{1,2}:\d{2}\.\d{2}|\d{1,3}\.\d{2})/i);
+    if (r && ev) { ev.record = r[1]; continue; }
+    const h = line.match(/^heat\s+(\d+)/i);
+    if (h) { if (!ev) { ev = { id: "ev0", num: "", name: "Event", heats: [] }; events.push(ev); } heat = { num: +h[1], lanes: [] }; ev.heats.push(heat); lastRelay = null; continue; }
+    if (!ev || !heat) continue;
+    if (isRelayEvent(ev.name)) {
+      const e = line.match(/^(\d{1,2})\s+([A-Z]{2,6})\s+([AB])\s+(NT|X?\d[\d:.]*)/);
+      if (e) { const tc = normTeam(e[2]); lastRelay = { lane: +e[1], team: tc, relay: e[3], name: `${tc} ${e[3]}`, age: 0, seed: e[4].replace(/^X/, ""), swimmers: [] }; heat.lanes.push(lastRelay); continue; }
+      if (/[A-Za-z],/.test(line) && lastRelay) {
+        [...line.matchAll(/([A-Za-zÀ-ÿ'’.\-]+,\s*[A-Za-zÀ-ÿ'’.\- ]+?)\s+([WM]?)(\d{1,2})(?=\s|$)/g)]
+          .forEach((mm) => { if (lastRelay.swimmers.length < 4) lastRelay.swimmers.push({ name: mm[1].trim(), age: +mm[3] }); });
+      }
+      continue;
+    }
+    const s = line.replace(/(\d)([A-Za-z])/g, "$1 $2").replace(/([A-Za-z])(\d)/g, "$1 $2");
+    const e = s.match(/^(\d{1,2})\s+(.+?,\s*.+?)\s+(\d{1,2})\s+([A-Z]{2,6})\s+(NT|X?\d[\d:.]*)\s*$/);
+    if (e) heat.lanes.push({ lane: +e[1], name: e[2].replace(/\s+/g, " ").trim(), age: +e[3], team: normTeam(e[4]), seed: e[5].replace(/^X/, "") });
+  }
+  return events.filter((e) => e.heats.some((h) => h.lanes.length));
+}
+
+// ---- small sample meet (upload the real VCSL PDF via Import) --------------
+const L = (lane, name, team, age, seed, relay, swimmers) => ({ lane, name, team, age, seed, ...(relay ? { relay } : {}), ...(swimmers ? { swimmers } : {}) });
+const SEED_EVENTS = [
+  { id: "e0", num: "19", name: "Girls 9-10 25 Yard Butterfly", record: "13.90", heats: [
+    { num: 1, lanes: [L(3,"Arreola, Casielle","LPAC",10,"31.69"),L(4,"Minister, Addison S","MTVD",9,"28.75"),L(5,"Oswald, Arianna","AGCC",9,"28.58"),L(6,"Desimone, Giavanna","LPAC",9,"28.58"),L(7,"Reyna, Rae R","BDST",9,"31.06"),L(8,"Barnett, Olivia M","SCVCC",9,"32.92")] },
+    { num: 2, lanes: [L(2,"Abrams, Elise","OAK",10,"27.22"),L(3,"Fleming, Heidi","LPAC",9,"25.60"),L(4,"Reichmuth, Gigi L","AGCC",9,"24.50"),L(5,"Syzygy, Kaya","LPAC",10,"24.29"),L(6,"Opp, Audrey","OAK",9,"24.35"),L(7,"Morris, Emerson R","AGCC",9,"24.67")] },
+  ]},
+  { id: "e1", num: "23", name: "Girls 6 & Under 25 Yard Butterfly", record: "19.04", heats: [
+    { num: 1, lanes: [L(3,"McClelland, Paisley","AGCC",4,"1:03.75"),L(4,"Lai, Harper","LPAC",5,"57.50"),L(5,"Donner, Alayna T","SCVCC",6,"52.31"),L(6,"Dally, Brooke","AGCC",6,"53.35"),L(7,"Errecart, Cameron J","BDST",5,"39.52")] },
+  ]},
+  { id: "e2", num: "21", name: "Girls 7-8 25 Yard Butterfly", record: "16.01", heats: [
+    { num: 1, lanes: [L(3,"Marandian, Celine","BDST",8,"33.72"),L(4,"Hadley, Lauren S","MTVD",7,"30.22"),L(5,"Rose, Emma L","MTVD",8,"30.11"),L(6,"Alfaro, Juliette","LPAC",7,"30.11"),L(7,"Preston, Brynlee","AGCC",8,"30.87")] },
+  ]},
+  { id: "e3", num: "63", name: "Girls 11-12 50 Yard Freestyle", record: "26.14", heats: [
+    { num: 7, lanes: [L(1,"Stanley, Caitlyn","AGCC",11,"34.86"),L(2,"Takeuchi, Tessa N","BDST",11,"34.68"),L(3,"Toda, Marion A","BDST",12,"34.61"),L(4,"Keller, Mary","OAK",12,"34.22"),L(5,"Wong, Madelyn","BDST",11,"32.96"),L(6,"Ertell, Ava E","BDST",12,"33.57")] },
+    { num: 8, lanes: [L(1,"Casey, Quinn S","OAK",12,"32.85"),L(2,"Mast, Emma","OAK",11,"31.31"),L(3,"Cendejas, Eva","LPAC",12,"30.79"),L(4,"Gray, Kensie","LPAC",11,"30.61"),L(5,"Caleca, Gigi J","AGCC",11,"30.22"),L(6,"Xie, Lexie","LPAC",11,"30.59")] },
+  ]},
+  { id: "e4", num: "75", name: "Girls 11-12 200 Yard Freestyle Relay", record: "1:54.89", heats: [
+    { num: 1, lanes: [
+      L(3,"SCVCC A","SCVCC",0,"2:35.46","A",[{name:"Kalchuri, Aarika",age:11},{name:"McGugan, Aylie S",age:11},{name:"Bhatia, Alea",age:12},{name:"Alcantara, Ava C",age:12}]),
+      L(4,"LPAC A","LPAC",0,"2:21.70","A",[{name:"Pham, Taylor",age:11},{name:"Gronholm, Amelia",age:11},{name:"Lopez, Hazel",age:12},{name:"Sunderman, Aurora",age:12}]),
+      L(5,"BDST A","BDST",0,"2:05.72","A",[{name:"Wong, Madelyn",age:11},{name:"Grose, Emme D",age:11},{name:"Bek, Geva",age:11},{name:"Wang, Eleanor S",age:12}]),
+      L(6,"OAK A","OAK",0,"2:08.50","A",[{name:"Mast, Emma",age:11},{name:"Casey, Quinn S",age:12},{name:"Westgate, Kaitlyn",age:12},{name:"Kluëck, Cat",age:12}]),
+      L(7,"AGCC A","AGCC",0,"2:23.86","A",[{name:"Hoppock, Hana",age:11},{name:"Fingerman, Cara M",age:12},{name:"Saah, Sophia C",age:12},{name:"Fergus, Addison",age:12}]),
+      L(8,"MTVD A","MTVD",0,"2:40.84","A",[{name:"Holeman, Zoey E",age:12},{name:"Blanchard, Shelby S",age:11},{name:"Singh, Kaashvi N",age:12},{name:"Seiden, Savannah N",age:12}]),
+    ] },
+  ]},
+];
+const INITIAL_RECORDS = Object.fromEntries(SEED_EVENTS.filter((e) => e.record).map((e) => [e.id, e.record]));
+// Event #19 fully scored so the results board shows on load.
+const INITIAL_DATA = {
+  "0:0:3": { time: "30.92", dqs: [], tags: {}, notes: "" },
+  "0:0:4": { time: "28.20", dqs: [], tags: {}, notes: "" },
+  "0:0:5": { time: "28.71", dqs: [], tags: {}, notes: "" },
+  "0:0:6": { time: "27.95", dqs: [], tags: {}, notes: "" },
+  "0:0:7": { time: "29.88", dqs: [], tags: { "Turns: Open turn": true }, notes: "" },
+  "0:0:8": { time: "33.10", dqs: [], tags: {}, notes: "" },
+  "0:1:2": { time: "27.40", dqs: [], tags: {}, notes: "" },
+  "0:1:3": { time: "25.11", dqs: [], tags: {}, notes: "" },
+  "0:1:4": { time: "24.62", dqs: [], tags: {}, notes: "" },
+  "0:1:5": { time: "23.90", dqs: [], tags: {}, notes: "" },
+  "0:1:6": { time: "24.99", dqs: [{ code: "1C", reason: "Scissors kick", group: "Butterfly" }], tags: {}, notes: "" },
+  "0:1:7": { time: "24.30", dqs: [], tags: {}, notes: "" },
+};
+
+export default function App() {
+  const [meetName, setMeetName] = useState("2026 VCSL Championship");
+  const [events, setEvents] = useState(SEED_EVENTS);
+  const [records, setRecords] = useState(INITIAL_RECORDS);
+  const [data, setData] = useState(INITIAL_DATA);
+  const [heatPtr, setHeatPtr] = useState(4);
+  const [homeTeam, setHomeTeam] = useState("BDST");
+  const [hostTeam, setHostTeam] = useState("BDST");
+  const [awayTeam, setAwayTeam] = useState("OAK");
+  const [mode, setMode] = useState("champs");
+  const [dualLanes, setDualLanes] = useState(6);
+  const [dqTarget, setDqTarget] = useState(null);
+  const [dqSwimmer, setDqSwimmer] = useState(null);
+  const [scratchTarget, setScratchTarget] = useState(null);
+  const [relayReplaceTarget, setRelayReplaceTarget] = useState(null);
+  const [modal, setModal] = useState(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [pop, setPop] = useState(null);
+  const [odOpen, setOdOpen] = useState(true);
+  const [prevOpen, setPrevOpen] = useState(true);
+  const [relaySplits, setRelaySplits] = useState(false);
+  const [startedHeats, setStartedHeats] = useState({});
+  const lanesPerHeat = dualLanes;
+  const sheetRef = useRef(null);
+  const evRefs = useRef({});
+
+  const flatHeats = useMemo(() => { const out = []; events.forEach((ev, evIdx) => ev.heats.forEach((ht, htIdx) => out.push({ evIdx, htIdx, evId: ev.id, eventName: ev.name, num: ht.num, lanes: ht.lanes }))); return out; }, [events]);
+  const ptr = Math.min(heatPtr, Math.max(0, flatHeats.length - 1));
+  const current = flatHeats[ptr];
+  const previous = ptr > 0 ? flatHeats[ptr - 1] : null;
+  const onDeck = ptr < flatHeats.length - 1 ? flatHeats[ptr + 1] : null;
+
+  const teamsPresent = useMemo(() => { const s = new Set(); events.forEach((ev) => ev.heats.forEach((h) => h.lanes.forEach((l) => s.add(l.team)))); return [...s]; }, [events]);
+  const filter = mode === "dual" ? [hostTeam, awayTeam] : null;
+  const places = useMemo(() => computePlaces(events, data, filter, mode), [events, data, mode, hostTeam, homeTeam, awayTeam]);
+  const finishedEvents = useMemo(() => events.map((ev, i) => eventFinished(ev, i, data, filter)), [events, data, mode, hostTeam, homeTeam, awayTeam]);
+  const curHeatPlaces = useMemo(() => current ? computeHeatPlaces(events[current.evIdx], current.evIdx, current.htIdx, data, filter) : {}, [events, data, current, mode, hostTeam, homeTeam, awayTeam]);
+  const prevHeatPlaces = useMemo(() => previous ? computeHeatPlaces(events[previous.evIdx], previous.evIdx, previous.htIdx, data, filter) : {}, [events, data, previous, mode, hostTeam, homeTeam, awayTeam]);
+  const scores = useMemo(() => computeScores(events, data, mode, filter), [events, data, mode, hostTeam, homeTeam, awayTeam]);
+
+  // Results ticker shows the PREVIOUS event's results (never the current one).
+  const resultsEvent = useMemo(() => {
+    const start = current ? current.evIdx - 1 : events.length - 1;
+    for (let i = start; i >= 0; i--) if (eventFinished(events[i], i, data, filter)) return { ev: events[i], evIdx: i, live: false };
+    for (let i = start; i >= 0; i--) if (rankedEvent(events[i], i, data, filter).length) return { ev: events[i], evIdx: i, live: true };
+    return null;
+  }, [events, data, current, mode, hostTeam, homeTeam, awayTeam]);
+  const resultsList = useMemo(() => resultsEvent ? rankedEvent(resultsEvent.ev, resultsEvent.evIdx, data, filter).slice(0, mode === "champs" ? 10 : 6) : [], [resultsEvent, data, mode, hostTeam, homeTeam, awayTeam]);
+
+  const get = useCallback((id) => data[id] || { time: "", dqs: [], tags: {}, notes: "" }, [data]);
+  const update = (id, patch) => setData((d) => ({ ...d, [id]: { ...(d[id] || { time: "", dqs: [], tags: {}, notes: "" }), ...patch } }));
+  const curKey = current ? current.evIdx + ":" + current.htIdx : null;
+  const curHasTimes = current ? current.lanes.some((l) => (data[entryId(current.evIdx, current.htIdx, l.lane)] || {}).time) : false;
+  const isStarted = !!(curKey && (startedHeats[curKey] || curHasTimes));
+  const startRace = () => curKey && setStartedHeats((s) => ({ ...s, [curKey]: true }));
+  // Heat is done when every entered lane has a time or DQ (and at least one time).
+  const curHeatComplete = useMemo(() => { if (!current) return false; let entered = 0, done = 0, timed = 0; current.lanes.forEach((l) => { const d = data[entryId(current.evIdx, current.htIdx, l.lane)] || {}; entered++; if (d.time || (d.dqs || []).length) done++; if (d.time) timed++; }); return entered > 0 && timed > 0 && done === entered; }, [current, data]);
+  const autoEnded = useRef({});
+  const seenIncomplete = useRef({});
+  useEffect(() => { if (!curKey) return;
+    if (!curHeatComplete) { seenIncomplete.current[curKey] = true; return; }
+    if (seenIncomplete.current[curKey] && !autoEnded.current[curKey]) { autoEnded.current[curKey] = true; setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1)); }
+  }, [curKey, curHeatComplete, flatHeats.length]);
+  const prevList = useMemo(() => previous ? [...previous.lanes].map((l) => { const id = entryId(previous.evIdx, previous.htIdx, l.lane); return { id, l, time: (data[id] || {}).time, place: prevHeatPlaces[id] }; }).sort((a, b) => (a.place || 99) - (b.place || 99) || a.l.lane - b.l.lane) : [], [previous, data, prevHeatPlaces]);
+  const [toast, setToast] = useState("");
+  const [seasonMeets, setSeasonMeets] = useState([]);
+  const progMeets = useMemo(() => [{ date: "This meet", meetName, events, data }, ...seasonMeets], [meetName, events, data, seasonMeets]);
+  const relayCandidates = useMemo(() => relayReplaceTarget ? relayReplacementCandidates(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, relayReplaceTarget.team) : [], [relayReplaceTarget, events, data]);
+  const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2200); };
+  // Restore last session, then autosave (debounced).
+  useEffect(() => { if (!STORE) return; let live = true; (async () => { try { const r = await STORE.get(CUR_KEY); if (live && r && r.value) { const s = JSON.parse(r.value); if (s.events) { setEvents(s.events); setRecords(s.records || {}); setData(s.data || {}); if (s.meetName) setMeetName(s.meetName); if (s.mode) setMode(s.mode); if (s.homeTeam) setHomeTeam(s.homeTeam); if (s.hostTeam) setHostTeam(s.hostTeam); if (s.awayTeam) setAwayTeam(s.awayTeam); if (s.dualLanes) setDualLanes(s.dualLanes); } } } catch (e) {}
+    try { const r = await STORE.get(INDEX_KEY); if (live && r && r.value) { const arr = []; for (const it of JSON.parse(r.value)) { try { const mr = await STORE.get(it.id); if (mr && mr.value) arr.push(JSON.parse(mr.value)); } catch (e) {} } setSeasonMeets(arr); } } catch (e) {} })(); return () => { live = false; }; }, []);
+  useEffect(() => { if (!STORE) return; const t = setTimeout(() => { STORE.set(CUR_KEY, JSON.stringify({ events, records, data, meetName, mode, homeTeam, hostTeam, awayTeam, dualLanes })).catch(() => {}); }, 2000); return () => clearTimeout(t); }, [events, records, data, meetName, mode, homeTeam, awayTeam, dualLanes]);
+  const saveToSeason = async () => { const today = new Date().toISOString().slice(0, 10); const id = "meetdeck:meet:" + Date.now(); const snap = { id, meetName, mode, date: today, events, data, records, homeTeam, hostTeam, awayTeam, dualLanes };
+    setSeasonMeets((a) => [...a.filter((m) => !(m.meetName === meetName && m.date === today)), snap]);
+    if (!STORE) { flash("Saved to season (this session)"); return; }
+    try { await STORE.set(id, JSON.stringify(snap));
+      let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {}
+      idx = idx.filter((x) => x.meetName !== meetName || x.date !== today); idx.push({ id, meetName, mode, date: today });
+      await STORE.set(INDEX_KEY, JSON.stringify(idx)); flash("Saved to season ✓"); } catch (e) { flash("Saved (storage limit — kept for this session)"); } };
+  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
+  const deleteMeet = async (id) => { if (STORE) { try { await STORE.delete(id); } catch (e) {} try { const r = await STORE.get(INDEX_KEY); if (r && r.value) await STORE.set(INDEX_KEY, JSON.stringify(JSON.parse(r.value).filter((x) => x.id !== id))); } catch (e) {} } setSeasonMeets((a) => a.filter((m) => m.id !== id)); flash("Meet removed"); };
+  const clearData = async () => { if (typeof window !== "undefined" && window.confirm && !window.confirm("Clear all saved meets and reset the board? This can't be undone.")) return;
+    if (STORE) { try { const r = await STORE.get(INDEX_KEY); if (r && r.value) for (const it of JSON.parse(r.value)) { try { await STORE.delete(it.id); } catch (e) {} } } catch (e) {}
+      try { await STORE.delete(INDEX_KEY); } catch (e) {} try { await STORE.delete(CUR_KEY); } catch (e) {} }
+    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setStartedHeats({}); setHeatPtr(4); setModal(null); flash("Data cleared"); };
+  const toggleTag = (id, key) => { const tags = { ...get(id).tags }; tags[key] ? delete tags[key] : (tags[key] = true); update(id, { tags }); };
+  const toggleDqCode = (id, group, code, reason, swimmer) => { const dqs = [...(get(id).dqs || [])]; const i = dqs.findIndex((q) => q.code === code); if (i >= 0) dqs.splice(i, 1); else dqs.push({ code, reason, group, ...(swimmer ? { swimmer } : {}) }); update(id, { dqs }); };
+  const scratchOne = (id) => update(id, { scratched: true });
+  const unscratchOne = (id) => update(id, { scratched: false });
+  // Scratches a swimmer everywhere they appear this meet — solo entries AND
+  // every relay leg they're named on (addressed as entryId + "#" + leg).
+  const scratchAll = (name, team, val = true) => setData((d) => { const nd = { ...d };
+    events.forEach((ev, ei) => ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => {
+      if (l.swimmers) { l.swimmers.forEach((s, leg) => { if (s.name === name && l.team === team) { const id = entryId(ei, hi, l.lane) + "#" + leg; nd[id] = { ...(nd[id] || { time: "", dqs: [], tags: {}, notes: "" }), scratched: val }; } }); return; }
+      if (l.name === name && l.team === team) { const id = entryId(ei, hi, l.lane); nd[id] = { ...(nd[id] || { time: "", dqs: [], tags: {}, notes: "" }), scratched: val }; }
+    })));
+    return nd; });
+  // Swap a new swimmer into a scratched relay leg — edits the roster (events),
+  // not just the results (data), then clears any stale scratched/tag state on
+  // that leg's id since it now belongs to a different swimmer.
+  const swapRelaySwimmer = (evIdx, htIdx, lane, leg, candidate) => {
+    setEvents((evs) => evs.map((ev, ei) => ei !== evIdx ? ev : { ...ev, heats: ev.heats.map((ht, hi) => hi !== htIdx ? ht : { ...ht, lanes: ht.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: l.swimmers.map((s, i) => i !== leg ? s : { name: candidate.name, age: candidate.age || 0 }) }) }) }));
+    update(entryId(evIdx, htIdx, lane) + "#" + leg, { scratched: false, tags: {}, notes: "" });
+    flash(candidate.name + " swapped in for " + (relayReplaceTarget ? relayReplaceTarget.name : "scratched swimmer"));
+    setRelayReplaceTarget(null);
+  };
+
+  const swimmerAt = useCallback((id) => { if (!id) return null; const [base, legStr] = id.split("#"); const [ei, hi, ln] = base.split(":").map(Number); const ev = events[ei], ht = ev?.heats[hi], lane = ht?.lanes.find((l) => l.lane === ln); if (!lane) return null;
+    if (legStr !== undefined && lane.swimmers) { const leg = +legStr, s = lane.swimmers[leg]; return s ? { ei, hi, ln, evId: ev.id, eventName: ev.name, heatNum: ht.num, relayBase: base, leg, sw: { name: s.name, age: s.age || 0, team: lane.team, seed: "" } } : null; }
+    return { ei, hi, ln, evId: ev.id, eventName: ev.name, heatNum: ht.num, sw: lane }; }, [events]);
+  const popInfo = useMemo(() => swimmerAt(pop?.id), [pop, swimmerAt]);
+  const dqInfo = useMemo(() => swimmerAt(dqTarget), [dqTarget, swimmerAt]);
+  const openPop = (id, el) => setPop({ id, rect: el.getBoundingClientRect() });
+  const applyImport = (parsed) => { setEvents(parsed.events); setRecords(Object.fromEntries(parsed.events.filter((e) => e.record).map((e) => [e.id, e.record]))); if (parsed.myTeam) setHomeTeam(parsed.myTeam); setData({}); setPop(null); setHeatPtr(0); setModal(null); };
+  const scrollToEvent = (evId) => { const el = evRefs.current[evId]; if (el && sheetRef.current) sheetRef.current.scrollTo({ top: el.offsetTop - 8, behavior: "smooth" }); };
+  const jumpToCurrent = () => scrollToEvent(current?.evId);
+  // Jump the whole board (heat pointer) to the first heat of an event by index,
+  // and scroll the meet sheet to it — used by the event jump bar's arrows and
+  // typed-number/name lookup.
+  const goToEventIdx = (evIdx) => { if (evIdx < 0 || evIdx >= events.length) return; const fi = flatHeats.findIndex((f) => f.evIdx === evIdx); if (fi < 0) return; setHeatPtr(fi); scrollToEvent(events[evIdx].id); };
+  const [jumpQuery, setJumpQuery] = useState("");
+  const jumpToQuery = () => { const q = jumpQuery.trim(); if (!q) return;
+    let idx = events.findIndex((e) => String(e.num) === q);
+    if (idx < 0) idx = events.findIndex((e) => e.name.toLowerCase().includes(q.toLowerCase()));
+    if (idx >= 0) goToEventIdx(idx); else flash("No matching event"); };
+
+  const slots = (heat, n) => { const out = []; for (let i = 1; i <= n; i++) out.push(heat.lanes.find((l) => l.lane === i) || null); return out; };
+
+  return (
+    <div className="md-root">
+      <style>{CSS}</style>
+
+      <header className="md-top">
+        <div className="md-logowrap">
+          <button className="md-logo" onClick={() => setMenuOpen((o) => !o)} aria-label="Menu">≈</button>
+          {menuOpen && (<>
+            <div className="md-menuscrim" onClick={() => setMenuOpen(false)} />
+            <div className="md-menu">
+              <div className="md-menutitle">Analytics</div>
+              <button className="md-mbtn" onClick={() => { setModal("stats"); setMenuOpen(false); }}>Meet stats</button>
+              <button className="md-mbtn" onClick={() => { setModal("league"); setMenuOpen(false); }}>League stats</button>
+              <button className="md-mbtn" onClick={() => { setModal("season"); setMenuOpen(false); }}>Team stats</button>
+              <div className="md-menutitle">Meet day</div>
+              <button className="md-mbtn" onClick={() => { setModal("participants"); setMenuOpen(false); }}>Scratches</button>
+              <div className="md-menutitle">Meet day analytics</div>
+              <button className="md-mbtn" onClick={() => { setModal("relay"); setMenuOpen(false); }}>Relay builder</button>
+              <button className="md-mbtn" onClick={() => { setModal("compare"); setMenuOpen(false); }}>Swimmer comparison</button>
+              <div className="md-mdiv" />
+              <button className="md-mbtn" onClick={() => { setModal("settings"); setMenuOpen(false); }}>⚙ Settings</button>
+            </div>
+          </>)}
+        </div>
+        <ScoreStrip scores={scores} mode={mode} home={hostTeam} away={awayTeam} teams={teamsPresent} />
+      </header>
+
+      <div className="md-grid">
+        {/* -------- LEFT: fixed stack -------- */}
+        <section className="md-left">
+          <div className="md-panel od">
+            <div className="md-phead"><span className="md-eyebrow">On deck</span>
+              <span className="md-pmeta">{onDeck ? `#${events[onDeck.evIdx].num} ${shortEvent(onDeck.eventName)} · H${onDeck.num}` : "—"}</span></div>
+            <OnDeckStrip heat={onDeck} homeTeam={homeTeam} onPick={openPop} />
+          </div>
+
+          <div className={"md-panel water grow" + (isStarted ? "" : " waiting")}>
+            <div className="md-phead"><span className="md-eyebrow water-e">● In the water{!isStarted && <em className="md-waiting"> · ready</em>}</span>
+              {isStarted
+                ? <button className="md-endrace" onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1} aria-label="Stop / end race" />
+                : <button className="md-startsq" onClick={startRace} aria-label="Start race">▶</button>}
+              <span className="md-pnav"><button onClick={() => setHeatPtr((p) => Math.max(0, p - 1))} disabled={ptr === 0}>‹</button>
+                <span className="md-pmeta">#{events[current.evIdx].num} {shortEvent(current?.eventName)} · H{current?.num}</span>
+                <button onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1}>›</button></span></div>
+            {isStarted && isRelayEvent(current?.eventName) && <button className="md-relaybtn" onClick={() => setRelaySplits(true)}>🏊 Relay splits & legs</button>}
+            <div className={"md-lanes" + (isStarted ? "" : " prestart")}>
+              {slots(current, lanesPerHeat).map((l, i) => l ? (() => { const id = entryId(current.evIdx, current.htIdx, l.lane);
+                return <LaneRow key={id} lane={l} d={get(id)} place={isStarted ? curHeatPlaces[id] : null} rec={records[current.evId]} active={isStarted} mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })} />; })()
+                : <div key={"e" + i} className="md-lane empty"><span className="md-lanenum">{i + 1}</span><span className="md-emptytxt">—</span></div>)}
+            </div>
+          </div>
+
+          <div className={"md-panel prev" + (isStarted ? " racing" : "")}>
+            <div className="md-phead"><span className="md-eyebrow">Previous</span>
+              <span className="md-pmeta">{previous ? `#${events[previous.evIdx].num} ${shortEvent(previous.eventName)} · H${previous.num}` : "—"}</span></div>
+            {previous && (isStarted
+              ? <PreviousSlider list={prevList} homeTeam={homeTeam} onPick={openPop} />
+              : <div className="md-lanes">
+                  {[...previous.lanes].map((l) => ({ l, id: entryId(previous.evIdx, previous.htIdx, l.lane) })).sort((a, b) => (prevHeatPlaces[a.id] || 99) - (prevHeatPlaces[b.id] || 99))
+                    .map(({ l, id }) => <LaneRow key={id} lane={l} d={get(id)} place={prevHeatPlaces[id]} rec={records[previous.evId]} mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })} />)}
+                </div>)}
+          </div>
+        </section>
+
+        {/* -------- RIGHT: results ticker + meet sheet (scrolls) -------- */}
+        <section className="md-right">
+          <ResultsTicker resultsEvent={resultsEvent} list={resultsList} mode={mode} homeTeam={homeTeam} records={records} onPick={openPop} />
+          <div className="md-sheethead"><span className="md-eyebrow">Meet sheet</span>
+            <div className="md-jumpwrap">
+              <div className="md-eventjump">
+                <button onClick={() => goToEventIdx((current?.evIdx ?? 0) - 1)} disabled={!current || current.evIdx <= 0} aria-label="Previous event" title="Previous event">▲</button>
+                <input value={jumpQuery} onChange={(e) => setJumpQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && jumpToQuery()} placeholder="# or name" aria-label="Jump to event" />
+                <button onClick={() => goToEventIdx((current?.evIdx ?? 0) + 1)} disabled={!current || current.evIdx >= events.length - 1} aria-label="Next event" title="Next event">▼</button>
+              </div>
+              <button className="md-jumpgo" onClick={jumpToQuery}>Go</button>
+              <button className="md-jump" onClick={jumpToCurrent}>⌖ Current</button>
+            </div>
+          </div>
+          <div className="md-sheet" ref={sheetRef}>
+            {events.map((ev, evIdx) => {
+              const isCurEv = current && evIdx === current.evIdx;
+              return (
+              <div key={ev.id} ref={(el) => (evRefs.current[ev.id] = el)} className={"md-evblock" + (isCurEv ? " curev" : "")}>
+                <div className="md-evname"><span className="md-evnum">#{ev.num}</span> {ev.name}{isCurEv && <span className="md-nowpill">NOW</span>}<span className="md-evcat">{categorize(ev.name)}</span></div>
+                <div className="md-recordrow"><span className="md-reclabel">Record</span>
+                  <input className="md-recinput" value={records[ev.id] || ""} placeholder="—:—" onChange={(e) => setRecords((r) => ({ ...r, [ev.id]: e.target.value }))} /></div>
+                {ev.heats.map((ht, htIdx) => { const fi = flatHeats.findIndex((f) => f.evIdx === evIdx && f.htIdx === htIdx); const isCur = fi === ptr;
+                  return (
+                    <div key={ht.num} className={"md-heat" + (isCur ? " cur" : "")}>
+                      {!ev.flat && <button className="md-heatbar" onClick={() => setHeatPtr(fi)}><span>Heat {ht.num}</span>{isCur && <span className="md-curpill">On board</span>}</button>}
+                      {ht.lanes.map((l) => { const id = entryId(evIdx, htIdx, l.lane);
+                        return <SheetRow key={id} lane={l} d={get(id)} place={finishedEvents[evIdx] ? places[id] : null} rec={records[ev.id]} mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onSwimmer={(leg, el) => openPop(id + "#" + leg, el)} />; })}
+                    </div>
+                  ); })}
+              </div>
+            ); })}
+          </div>
+        </section>
+      </div>
+
+      {pop && popInfo && (<>
+        <div className="md-povscrim" onClick={() => setPop(null)} />
+        <ActionPopover info={popInfo} d={get(pop.id)} mine={popInfo.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(popInfo.eventName)} hideSplits={popInfo.leg !== undefined} relaySwimmer={popInfo.leg !== undefined} progMeets={progMeets} rect={pop.rect} onClose={() => setPop(null)} onDq={() => { setDqTarget(popInfo.relayBase || pop.id); setDqSwimmer(popInfo.leg !== undefined ? popInfo.sw.name : null); setPop(null); }} onToggle={(k) => toggleTag(pop.id, k)} onSplits={(a) => update(pop.id, { splits: a })} onNotes={(v) => update(pop.id, { notes: v })} onNoShow={() => update(pop.id, { noshow: !isNoShow(get(pop.id)) })}
+          onScratch={() => { setScratchTarget({ id: pop.id, name: popInfo.sw.name, team: popInfo.sw.team, evIdx: popInfo.ei, htIdx: popInfo.hi, lane: popInfo.ln, relay: popInfo.leg !== undefined, leg: popInfo.leg, eventName: popInfo.eventName }); setPop(null); }}
+          onUnscratch={() => unscratchOne(pop.id)} />
+      </>)}
+      {dqInfo && <DQModal info={dqInfo} dqs={get(dqTarget).dqs || []} swimmer={dqSwimmer} onClose={() => { setDqTarget(null); setDqSwimmer(null); }}
+        onClear={() => update(dqTarget, { dqs: [] })}
+        onToggle={(group, code, reason) => toggleDqCode(dqTarget, group, code, reason, dqSwimmer)} />}
+      {modal === "import" && <ImportModal onClose={() => setModal(null)} onApply={applyImport} defaultTeam={homeTeam} />}
+      {modal === "results" && <ResultsModal onClose={() => setModal(null)} events={events} teams={teamsPresent} homeTeam={homeTeam}
+        onApply={(patch) => { setData((d) => { const nd = { ...d }; Object.entries(patch).forEach(([id, p]) => (nd[id] = { ...(nd[id] || { time: "", dqs: [], tags: {}, notes: "" }), ...p })); return nd; }); setModal(null); }}
+        onSaveNew={({ meet, name, mode: mtype, host, away }) => {
+          setEvents(meet.events); setData(meet.data); setRecords({}); setStartedHeats({}); setHeatPtr(0);
+          setMeetName(name); setMode(mtype); if (host) setHostTeam(host); if (away) setAwayTeam(away); setModal(null);
+          const today = new Date().toISOString().slice(0, 10), id = "meetdeck:meet:" + Date.now();
+          const snap = { id, meetName: name, mode: mtype, date: today, events: meet.events, data: meet.data, records: {}, homeTeam, hostTeam: host, awayTeam: away, dualLanes };
+          setSeasonMeets((a) => [...a.filter((m) => !(m.meetName === name && m.date === today)), snap]);
+          if (STORE) { (async () => { try { await STORE.set(id, JSON.stringify(snap)); let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {} idx = idx.filter((x) => x.meetName !== name || x.date !== today); idx.push({ id, meetName: name, mode: mtype, date: today }); await STORE.set(INDEX_KEY, JSON.stringify(idx)); } catch (e) {} })(); }
+          flash("Saved new meet: " + name);
+        }} />}
+      {modal === "stats" && <StatsModal onClose={() => setModal(null)} events={events} data={data} mode={mode} filter={filter} homeTeam={homeTeam} />}
+      {modal === "participants" && <ParticipantsModal onClose={() => setModal(null)} events={events} data={data} homeTeam={homeTeam}
+        onOne={(entry, val) => { update(entry.id, { scratched: val }); if (val && entry.relay) setRelayReplaceTarget({ evIdx: entry.evIdx, htIdx: entry.htIdx, lane: entry.relayLane, leg: entry.leg, name: entry.name, team: entry.team, eventName: events[entry.evIdx]?.name || entry.ev }); }}
+        onAll={(name, team, val) => scratchAll(name, team, val)} />}
+      {modal === "league" && <LeagueModal onClose={() => setModal(null)} meets={seasonMeets} homeTeam={homeTeam} />}
+      {modal === "season" && <SeasonModal onClose={() => setModal(null)} homeTeam={homeTeam} meets={seasonMeets} />}
+      {modal === "meetsetup" && <MeetSetupModal onClose={() => setModal(null)} meetName={meetName} setMeetName={setMeetName} mode={mode} setMode={setMode} dualLanes={dualLanes} setDualLanes={setDualLanes} hostTeam={hostTeam} setHostTeam={setHostTeam} awayTeam={awayTeam} setAwayTeam={setAwayTeam} teams={teamsPresent} onImport={() => setModal("import")} />}
+      {modal === "settings" && <SettingsModal onClose={() => setModal(null)} homeTeam={homeTeam} setHomeTeam={setHomeTeam} teams={teamsPresent} onMeetSetup={() => setModal("meetsetup")} onResults={() => setModal("results")} onSave={() => saveToSeason()} onExport={() => setModal("export")} onClear={clearData} meets={seasonMeets} onLoad={loadMeet} onDelete={deleteMeet} />}
+      {modal === "compare" && <SwimmerCompareModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} />}
+      {scratchTarget && <div className="md-scrim" onClick={() => setScratchTarget(null)}>
+        <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
+          <div className="md-mhead"><div><div className="md-mtitle">Scratch {scratchTarget.name}?</div><div className="md-msub">Scratched swims are crossed out and don't score or place.</div></div><button className="md-x" onClick={() => setScratchTarget(null)}>✕</button></div>
+          <div className="md-scratchbtns">
+            <button className="md-mbtn" onClick={() => { scratchOne(scratchTarget.id); setPop(null); if (scratchTarget.relay) setRelayReplaceTarget({ evIdx: scratchTarget.evIdx, htIdx: scratchTarget.htIdx, lane: scratchTarget.lane, leg: scratchTarget.leg, name: scratchTarget.name, team: scratchTarget.team, eventName: scratchTarget.eventName }); setScratchTarget(null); }}>{scratchTarget.relay ? "Just this relay" : "Just this event"}</button>
+            <button className="md-mbtn danger" onClick={() => { scratchAll(scratchTarget.name, scratchTarget.team); setPop(null); if (scratchTarget.relay) setRelayReplaceTarget({ evIdx: scratchTarget.evIdx, htIdx: scratchTarget.htIdx, lane: scratchTarget.lane, leg: scratchTarget.leg, name: scratchTarget.name, team: scratchTarget.team, eventName: scratchTarget.eventName }); setScratchTarget(null); }}>Whole meet (all events)</button>
+            <button className="md-cancel" onClick={() => setScratchTarget(null)}>Cancel</button>
+          </div>
+        </div>
+      </div>}
+      {relayReplaceTarget && <RelayReplaceModal target={relayReplaceTarget} candidates={relayCandidates} onClose={() => setRelayReplaceTarget(null)}
+        onSwap={(c) => swapRelaySwimmer(relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, c)} />}
+      {toast && <div className="md-toast">{toast}</div>}
+      {modal === "relay" && <RelayBuilderModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} />}
+      {modal === "export" && <ExportModal onClose={() => setModal(null)} events={events} data={data} myTeam={homeTeam} places={places} records={records} meetName={meetName} />}
+      {relaySplits && current && isRelayEvent(current.eventName) && <RelaySplitsPanel heat={current} evIdx={current.evIdx} htIdx={current.htIdx} data={data} homeTeam={homeTeam} onClose={() => setRelaySplits(false)} update={update} get={get} openPop={openPop} />}
+    </div>
+  );
+}
+
+// Collapsed "previous" scoreboard: shows heat place, 2 at a time, auto-sliding.
+// On-deck: horizontal strip of the next heat, auto-sliding left→right (lane 1 → max).
+function OnDeckStrip({ heat, homeTeam, onPick }) {
+  const lanes = heat ? [...heat.lanes].sort((a, b) => a.lane - b.lane) : [];
+  const [idx, setIdx] = useState(0);
+  const hold = useRef(0); const tx = useRef(null);
+  const VIS = 2, maxIdx = Math.max(0, lanes.length - VIS);
+  useEffect(() => { setIdx(0); }, [heat && heat.evIdx, heat && heat.htIdx, lanes.length]);
+  useEffect(() => { if (lanes.length <= VIS) return; const t = setInterval(() => { if (Date.now() < hold.current) return; setIdx((i) => (i >= maxIdx ? 0 : i + 1)); }, 1800); return () => clearInterval(t); }, [lanes.length, maxIdx]);
+  const nudge = (d) => { hold.current = Date.now() + 5000; setIdx((i) => Math.min(maxIdx, Math.max(0, i + d))); };
+  if (!lanes.length) return <div className="md-odempty">No swimmers on deck.</div>;
+  return (
+    <div className="md-odstrip" onTouchStart={(e) => (tx.current = e.touches[0].clientX)} onTouchEnd={(e) => { if (tx.current === null) return; const dx = e.changedTouches[0].clientX - tx.current; tx.current = null; if (Math.abs(dx) > 40) nudge(dx < 0 ? 1 : -1); }}>
+      <div className="md-odwin"><div className="md-odroll" style={{ transform: `translateX(-${idx * (100 / VIS)}%)` }}>
+        {lanes.map((l) => { const id = entryId(heat.evIdx, heat.htIdx, l.lane);
+          return <button key={l.lane} className={"md-odcard" + (l.team === homeTeam ? " mine" : "")} onClick={(e) => onPick(id, e.currentTarget)}>
+            <span className="md-odlane">{l.lane}</span>
+            <span className="md-odcname">{l.name}</span>
+            <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{l.team}{l.age ? " · " + l.age : ""}</span>
+            <span className="md-odcseed">{l.seed}</span>
+          </button>; })}
+      </div></div>
+    </div>
+  );
+}
+
+function PreviousSlider({ list, homeTeam, onPick }) {
+  const [idx, setIdx] = useState(0);
+  const [winH, setWinH] = useState(68);
+  const winRef = useRef(null);
+  const hold = useRef(0); const tx = useRef(null); const ty = useRef(null);
+  const ROW = 34;
+  const vis = Math.max(2, Math.floor(winH / ROW));
+  const maxIdx = Math.max(0, list.length - vis);
+  useLayoutEffect(() => { const el = winRef.current; if (!el) return; const measure = () => setWinH(el.clientHeight); measure(); const ro = new ResizeObserver(measure); ro.observe(el); return () => ro.disconnect(); }, []);
+  useEffect(() => { setIdx((i) => Math.min(i, maxIdx)); }, [maxIdx]);
+  useEffect(() => { if (list.length <= vis) return; const t = setInterval(() => { if (Date.now() < hold.current) return; setIdx((i) => (i >= maxIdx ? 0 : i + 1)); }, 2000); return () => clearInterval(t); }, [list.length, vis, maxIdx]);
+  const nudge = (d) => { hold.current = Date.now() + 6000; setIdx((i) => Math.min(maxIdx, Math.max(0, i + d))); };
+  if (!list.length) return <div className="md-prevslider empty">No times in the previous heat yet.</div>;
+  return (
+    <div className="md-prevslider"
+      onWheel={(e) => nudge(e.deltaY > 0 ? 1 : -1)}
+      onTouchStart={(e) => { tx.current = e.touches[0].clientX; ty.current = e.touches[0].clientY; }}
+      onTouchEnd={(e) => { if (tx.current === null) return; const dx = e.changedTouches[0].clientX - tx.current, dy = e.changedTouches[0].clientY - ty.current; tx.current = null; if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 24) nudge(dy < 0 ? 1 : -1); else if (Math.abs(dx) > 40) nudge(dx < 0 ? 1 : -1); }}>
+      <div className="md-prevwin" ref={winRef}>
+        <div className="md-prevroll" style={{ transform: `translateY(${-idx * ROW}px)` }}>
+          {list.map((e) => (
+            <button key={e.id} className={"md-prevrow" + (e.l.team === homeTeam ? " mine" : "")} style={{ height: ROW }} onClick={(ev2) => onPick(e.id, ev2.currentTarget)}>
+              <span className="md-place">{e.place ? ORD(e.place) : e.l.lane}</span>
+              <span className="md-resname">{e.l.name}</span>
+              <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
+              <span className="md-restime">{e.time || "––.––"}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Last-race live ticker: shows 2 places, auto-slides one place every 2s,
+// loops back to 1st after the last scoring place. Swipe/arrows jump by 2.
+function ResultsTicker({ resultsEvent, list, mode, homeTeam, records, onPick }) {
+  const [idx, setIdx] = useState(0);
+  const holdUntil = useRef(0);
+  const touchX = useRef(null);
+  const maxIdx = Math.max(0, list.length - 2);
+  useEffect(() => { setIdx(0); }, [resultsEvent?.ev?.id]);
+  useEffect(() => {
+    if (list.length <= 2) return;
+    const t = setInterval(() => {
+      if (Date.now() < holdUntil.current) return;
+      setIdx((i) => (i >= maxIdx ? 0 : i + 1));
+    }, 2000);
+    return () => clearInterval(t);
+  }, [list.length, maxIdx]);
+  const nudge = (d) => { holdUntil.current = Date.now() + 5000; setIdx((i) => Math.min(maxIdx, Math.max(0, i + d))); };
+  if (!resultsEvent || !list.length) {
+    return <div className="md-ticker empty"><span className="md-eyebrow gold">🏁 Last race</span><span className="md-tickempty">no finished event yet</span></div>;
+  }
+  const relay = isRelayEvent(resultsEvent.ev.name);
+  const table = mode === "champs" ? CHAMPS : DUAL;
+  const ROW = 30;
+  return (
+    <div className="md-ticker"
+      onTouchStart={(e) => { touchX.current = e.touches[0].clientX; }}
+      onTouchEnd={(e) => { if (touchX.current === null) return; const dx = e.changedTouches[0].clientX - touchX.current; touchX.current = null; if (Math.abs(dx) > 40) nudge(dx < 0 ? 2 : -2); }}>
+      <div className="md-tickhead">
+        <span className="md-eyebrow gold">🏁 Last race</span>
+        <span className="md-tickev">#{resultsEvent.ev.num} {shortEvent(resultsEvent.ev.name)}</span>
+        <span className="md-ticknav">
+          <button onClick={() => nudge(-2)} disabled={idx === 0} aria-label="Back 2 places">‹</button>
+          <span className="md-tickpos">{idx + 1}–{Math.min(idx + 2, list.length)} of {list.length}</span>
+          <button onClick={() => nudge(2)} disabled={idx >= maxIdx} aria-label="Forward 2 places">›</button>
+        </span>
+      </div>
+      <div className="md-tickwin" style={{ height: ROW * 2 }}>
+        <div className="md-tickroll" style={{ transform: `translateY(${-idx * ROW}px)` }}>
+          {list.map((e, i) => {
+            const pts = (table[i + 1] || 0) * (relay ? 2 : 1);
+            const mine = e.l.team === homeTeam;
+            const best = isBest(e.time, e.l.seed), br = brokeRecord(e.time, records[resultsEvent.ev.id]);
+            return (
+              <button key={e.id} className={"md-tickrow" + (mine ? " mine" : "")} style={{ height: ROW }}
+                onClick={(ev2) => onPick(e.id, ev2.currentTarget)}>
+                <span className={"md-resplace p" + (i + 1)}>{ORD(i + 1)}</span>
+                <span className="md-resname">{e.l.name}</span>
+                <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
+                <span className="md-restime">{e.time}{best && <em className="md-best sm">B</em>}{br && <em className="md-br">BR</em>}</span>
+                <span className="md-respts">+{pts}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MeetSetupModal({ onClose, meetName, setMeetName, mode, setMode, dualLanes, setDualLanes, hostTeam, setHostTeam, awayTeam, setAwayTeam, teams, onImport }) {
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Meet set up</div><div className="md-msub">Name, type, teams, lanes &amp; roster</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-setbody">
+          <label className="md-mrow">Meet name<input value={meetName} onChange={(e) => setMeetName(e.target.value)} /></label>
+          <label className="md-mrow">Meet type<select value={mode} onChange={(e) => setMode(e.target.value)}><option value="dual">Dual meet</option><option value="champs">Champs</option><option value="timetrial">Time trials</option></select></label>
+          <div className="md-mrow">Lanes per heat<div className="md-stepper"><button onClick={() => setDualLanes((n) => Math.max(4, n - 1))}>−</button><span>{dualLanes}</span><button onClick={() => setDualLanes((n) => Math.min(12, n + 1))}>＋</button></div></div>
+          {mode === "dual" && <label className="md-mrow">Home team (1st)<select value={hostTeam} onChange={(e) => setHostTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}</select></label>}
+          {mode === "dual" && <label className="md-mrow">Away team (2nd)<select value={awayTeam} onChange={(e) => setAwayTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}</select></label>}
+          <div className="md-mdiv" />
+          <button className="md-mbtn" onClick={onImport}>Import roster / heat sheet (PDF / text)</button>
+        </div>
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete }) {
+  const [pendingDelete, setPendingDelete] = useState(null);
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">⚙ Settings</div><div className="md-msub">Setup, team, saved meets &amp; data</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-setbody">
+          <button className="md-mbtn" onClick={onMeetSetup}>Meet set up</button>
+          <button className="md-mbtn" onClick={onResults}>Results</button>
+          <div className="md-mdiv" />
+          <label className="md-mrow">Main team (yours)<select value={homeTeam} onChange={(e) => setHomeTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}</select></label>
+          <button className="md-mbtn" onClick={onSave}>💾 Save this meet to season</button>
+          <button className="md-mbtn primary" onClick={onExport}>Export to Google Sheets</button>
+          <div className="md-mdiv" />
+          <div className="md-menutitle">Saved meets ({(meets || []).length})</div>
+          <div className="md-savedmeets">
+            {(meets || []).length ? [...meets].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((m) => (
+              <div key={m.id} className="md-meetrow">
+                <div className="md-meetinfo"><div className="md-meetname">{m.meetName}</div><div className="md-meetmeta">{m.date} · {m.mode === "timetrial" ? "Time trials" : m.mode === "champs" ? "Champs" : "Dual"}</div></div>
+                <button className="md-meetload" onClick={() => onLoad(m)}>Load</button>
+                <button className="md-meetdel" onClick={() => setPendingDelete(m)} aria-label="Delete">🗑</button>
+              </div>
+            )) : <div className="md-prevempty">No saved meets yet.</div>}
+          </div>
+          <div className="md-mdiv" />
+          <button className="md-mbtn danger" onClick={onClear}>🗑 Clear all data &amp; reset</button>
+        </div>
+        {pendingDelete && <div className="md-confirm" onClick={() => setPendingDelete(null)}>
+          <div className="md-confirmbox" onClick={(e) => e.stopPropagation()}>
+            <div className="md-confirmq">Delete “{pendingDelete.meetName}” ({pendingDelete.date})? This can't be undone.</div>
+            <div className="md-confirmbtns"><button className="md-cancel" onClick={() => setPendingDelete(null)}>Cancel</button><button className="md-confirmyes" onClick={() => { onDelete(pendingDelete.id); setPendingDelete(null); }}>Yes, delete</button></div>
+          </div>
+        </div>}
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+function ScoreStrip({ scores, mode, home, away, teams }) {
+  if (mode === "timetrial") return <div className="md-strip"><span className="md-ttlabel">⏱ Time trials — no scoring</span></div>;
+  const row = (t) => { const sw = scores.swims[t] || 0, im = scores.imp[t] || 0; return { t, pts: scores.pts[t] || 0, pct: sw ? Math.round((im / sw) * 100) : 0 }; };
+  if (mode === "dual") { const H = row(home), A = row(away); return <div className="md-strip dual"><TeamScore r={H} big /><span className="md-vs">vs</span><TeamScore r={A} big /></div>; }
+  const rows = teams.map(row).sort((a, b) => b.pts - a.pts);
+  return <div className="md-strip">{rows.map((r) => <TeamScore key={r.t} r={r} />)}</div>;
+}
+function TeamScore({ r, big }) {
+  return <span className={"md-tscore" + (big ? " big" : "")}><span className="md-tsdot" style={{ background: teamColor(r.t) }} /><span className="md-tscode">{r.t}</span><span className="md-tspts">{r.pts}</span><span className="md-tspct">{r.pct}%<small>imp</small></span></span>;
+}
+
+function LaneRow({ lane, d, place, rec, active, mine, selected, onSelect, onTime }) {
+  const best = isBest(d.time, lane.seed), br = brokeRecord(d.time, rec), dq = hasDq(d), scr = isScratched(d), ns = isNoShow(d), off = scr || ns, tagCount = Object.keys(d.tags || {}).length;
+  return (
+    <div className={"md-lane clickable" + (selected ? " sel" : "") + (dq ? " dq" : "") + (off ? " scr" : "") + (mine ? " mine" : "")} onClick={(e) => onSelect(e.currentTarget)}>
+      <span className="md-lanenum">{lane.lane}</span>
+      <span className="md-laneid"><span className="md-laneswimmer">{lane.name}{br && !dq && !off && <span className="md-br">BR</span>}</span><span className="md-laneteam" style={{ color: teamColor(lane.team) }}>{lane.team}{lane.age ? " · " + lane.age : ""}</span></span>
+      <span className="md-lanemarks">
+        {ns && <span className="md-scrbadge">NS</span>}
+        {place && !dq && !off && <span className="md-place">{ORD(place)}</span>}
+        {dq && <span className="md-dqbadge">DQ {dqLabel(d)}</span>}
+        {tagCount > 0 && <span className="md-tagcount">{tagCount}</span>}
+      </span>
+      <span className="md-timewrap">{off ? <span className="md-timex">{ns ? "NS" : "X"}</span> : <>{best && !dq && <span className="md-best">B</span>}{active ? <input className="md-timein" value={d.time} placeholder="––.––" inputMode="decimal" onClick={(e) => e.stopPropagation()} onChange={(e) => onTime(e.target.value)} /> : <span className="md-timeout">{d.time || "––.––"}</span>}</>}</span>
+    </div>
+  );
+}
+
+function SheetRow({ lane, d, place, rec, mine, selected, onSelect, onSwimmer }) {
+  const best = isBest(d.time, lane.seed), br = brokeRecord(d.time, rec), dq = hasDq(d), scr = isScratched(d), ns = isNoShow(d), off = scr || ns, tags = Object.keys(d.tags || {});
+  const fs = toSeconds(d.time), ss = toSeconds(lane.seed);
+  const delta = !isNaN(fs) && !isNaN(ss) ? fs - ss : null; // negative = improved
+  const deltaStr = delta === null ? null : (delta < 0 ? "−" : "+") + Math.abs(delta).toFixed(2);
+  return (
+    <div className={"md-srowwrap" + (lane.swimmers ? " relay" : "")}>
+      <button className={"md-swim" + (dq ? " dq" : "") + (off ? " scr" : "") + (selected ? " sel" : "") + (mine ? " mine" : "")} onClick={(e) => onSelect(e.currentTarget)}>
+        <span className="md-slane">{lane.lane}</span>
+        <span className="md-sid"><span className="md-sname">{lane.name}{br && !dq && !off && <span className="md-br">BR</span>}</span>
+          <span className="md-steam" style={{ color: teamColor(lane.team) }}>{lane.team}{lane.age ? " · " + lane.age : ""}<em className="md-seed">seed {lane.seed}</em></span></span>
+        <span className="md-smeta">
+          {ns && <span className="md-scrbadge">NS</span>}
+          {deltaStr && !dq && !off && <span className={"md-delta" + (delta < 0 ? " neg" : " pos")}>{deltaStr}</span>}
+          {place && !dq && !off && <span className="md-place">{ORD(place)}</span>}
+          {dq && <span className="md-dqbadge sm">DQ {dqLabel(d)}</span>}
+          {tags.slice(0, 2).map((t) => <span key={t} className="md-minitag">{t.split(":").pop().trim()}</span>)}
+          {tags.length > 2 && <span className="md-more">+{tags.length - 2}</span>}
+          {best && !dq && !off && <span className="md-best">B</span>}
+          {off ? <span className="md-stime scrx">{ns ? "NS" : "X"}</span> : (d.time && <span className="md-stime">{d.time}</span>)}
+        </span>
+      </button>
+      {lane.swimmers && <div className="md-relayswim">{lane.swimmers.map((s, i) => <button key={i} className="md-rswim btn" onClick={(e) => onSwimmer && onSwimmer(i, e.currentTarget)}><b>{i + 1}</b> {s.name}{s.age ? ` (${s.age})` : ""}</button>)}</div>}
+    </div>
+  );
+}
+
+function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progMeets, rect, onClose, onDq, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState({ top: rect.bottom + 10, left: rect.left, above: false, caret: 24 });
+  const [openCat, setOpenCat] = useState(null);
+  const [showSplits, setShowSplits] = useState(false);
+  const [imStroke, setImStroke] = useState("Fly");
+  const [showProg, setShowProg] = useState(false);
+  const [progStroke, setProgStroke] = useState("Free");
+  const tags = TAG_TREE.filter((c) => !(c.minAge && info.sw.age && info.sw.age < c.minAge && !imEvent));
+  const progTimes = showProg ? swimmerStrokeTimes(info.sw.name, info.sw.team, progStroke, progMeets || []) : [];
+  useLayoutEffect(() => {
+    const W = 320, m = 10, vw = window.innerWidth, vh = window.innerHeight, h = ref.current ? ref.current.offsetHeight : 300;
+    let above = false, top = rect.bottom + 10;
+    if (top + h > vh - m) { const up = rect.top - h - 10; if (up > m) { top = up; above = true; } else top = Math.max(m, vh - h - m); }
+    const left = Math.min(Math.max(m, rect.left), vw - W - m);
+    setPos({ top, left, above, caret: Math.min(Math.max(16, rect.left + rect.width / 2 - left), W - 24) });
+  }, [rect]);
+  const dq = hasDq(d), ns = isNoShow(d), scr = isScratched(d);
+  return (
+    <div ref={ref} className={"md-pov" + (pos.above ? " above" : "")} style={{ top: pos.top, left: pos.left }} role="dialog">
+      <span className="md-caret" style={{ left: pos.caret }} />
+      <div className="md-povhead"><div><div className="md-povname">{info.sw.name} {info.sw.age > 0 && <span className="md-agechip">{info.sw.age}</span>}<span className="md-povteam" style={{ color: teamColor(info.sw.team) }}>{info.sw.team}</span></div><div className="md-povmeta">{shortEvent(info.eventName)} · H{info.heatNum} · Lane {info.ln}{info.sw.seed ? ` · seed ${info.sw.seed}` : ""}</div></div><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-povtop">
+        <button className={"md-dq" + (dq ? " on" : "")} onClick={onDq}>{dq ? `DQ ${dqLabel(d)}` : "Record DQ(s)"}</button>
+      </div>
+      <div className="md-povtop" style={{ marginTop: 8, marginBottom: 4 }}>
+        <button className={"md-nsbtn" + (ns ? " on" : "")} onClick={onNoShow}>{ns ? "NS — no-show" : "No-show (NS)"}</button>
+        <button className={"md-nsbtn" + (scr ? " on" : "")} onClick={() => (scr ? onUnscratch() : onScratch())}>{scr ? "X — tap to restore" : "Scratch"}</button>
+      </div>
+
+      {mine ? (<>
+        {imEvent && <div className="md-imrow"><span className="md-imlabel">IM leg:</span>{IM_STROKES.map((s) => <button key={s} className={"md-imchip" + (imStroke === s ? " on" : "")} onClick={() => setImStroke(s)}>{s}</button>)}</div>}
+        {relaySwimmer && <div className="md-imrow"><span className="md-imlabel">Relay spot:</span>{RELAY_POSITION.map((s) => { const key = "Spot: " + s, on = !!(d.tags && d.tags[key]); return <button key={s} className={"md-imchip" + (on ? " on" : "")} onClick={() => onToggle(key)}>{s}</button>; })}</div>}
+        <div className="md-workhdr">Work on{imEvent ? ` (${imStroke})` : ""}:</div>
+        <div className="md-worktags">{tags.map((t) => { const key = imEvent ? `${imStroke} · ${t.label}` : t.label, on = !!(d.tags && d.tags[key]); return <button key={t.label} className={"md-worktag" + (on ? " on" : "")} style={on ? { background: t.color, borderColor: t.color, color: "#fff" } : {}} onClick={() => onToggle(key)}>{t.label}</button>; })}</div>
+        {!hideSplits && <button className={"md-splitbtn" + (showSplits ? " on" : "")} onClick={() => setShowSplits((s) => !s)}>⏱ Splits {(d.splits && d.splits.length) ? `(${d.splits.filter(Boolean).length})` : ""}</button>}
+        {!hideSplits && showSplits && <input className="md-notearea one" placeholder="Splits e.g. 13.2  27.9  42.1" value={(d.splits || []).join("  ")} onChange={(e) => onSplits(e.target.value.split(/[\s,]+/).filter(Boolean))} />}
+        <textarea className="md-notearea" placeholder={`Notes on ${info.sw.name.split(",")[0]}…`} value={d.notes || ""} onChange={(e) => onNotes(e.target.value)} />
+      </>) : (
+        <div className="md-otherteam">Other team — DQ and no-show only.</div>
+      )}
+      <button className={"md-progbtn" + (showProg ? " on" : "")} onClick={() => setShowProg((s) => !s)}>📈 Progression by stroke</button>
+      {showProg && <div className="md-progwrap">
+        <div className="md-imrow">{PROG_STROKES.map((s) => <button key={s} className={"md-imchip" + (progStroke === s ? " on" : "")} onClick={() => setProgStroke(s)}>{s}</button>)}</div>
+        <div className="md-proglist">{progTimes.length ? progTimes.map((t, i) => (
+          <div key={i} className="md-progrow"><span className="md-progev">{t.ev}</span><span className="md-progt">{t.seed}{t.final ? ` → ${t.final}` : ""}</span><span className="md-progm">{t.meet || t.date}</span></div>
+        )) : <div className="md-progempty">No {progStroke} swims on record yet.</div>}</div>
+      </div>}
+    </div>
+  );
+}
+
+// Multi-select DQ modal with tiered age warnings.
+function DQModal({ info, dqs, swimmer, onClose, onClear, onToggle }) {
+  const age = info.sw.age;
+  useEffect(() => { const h = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose]);
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Record DQ — select all that apply</div><div className="md-msub">{swimmer ? `${swimmer} (relay) · ` : ""}{info.sw.name} · {info.sw.team}{age > 0 ? ` · age ${age}` : ""} · {shortEvent(info.eventName)} · Lane {info.ln}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        {age > 0 && age <= 6 && <div className="md-warn red">🚩 <b>6 &amp; under — CHALLENGE this DQ.</b> 6u swimmers should not be getting DQed. Talk to the referee before accepting; only record what was clearly and directly observed.</div>}
+        {age >= 7 && age <= 8 && <div className="md-warn amber">⚠︎ <b>7–8 — review before accepting.</b> Double-check the call with the official; benefit of the doubt goes to the swimmer.</div>}
+        <div className="md-codes">{Object.entries(DQ_CODES).map(([group, codes]) => (<div key={group} className="md-cgroup"><div className="md-cglabel">{group}</div><div className="md-cgrid">{codes.map(([code, reason]) => { const on = dqs.some((q) => q.code === code); return <button key={code} className={"md-code" + (on ? " on" : "")} onClick={() => onToggle(group, code, reason)} title={reason}><span className="md-ccode">{code}</span><span className="md-creason">{reason}</span></button>; })}</div></div>))}</div>
+        <div className="md-mfoot">
+          {dqs.length > 0 && <button className="md-clear" onClick={onClear}>Clear all ({dqs.length})</button>}
+          <button className="md-apply" onClick={onClose}>Done{dqs.length ? ` — ${dqs.length} selected` : ""}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportModal({ onClose, onApply, defaultTeam }) {
+  const [text, setText] = useState(""); const [busy, setBusy] = useState("");
+  const parsed = useMemo(() => parseHeatSheet(text), [text]);
+  const teams = useMemo(() => { const s = new Set(); parsed.forEach((ev) => ev.heats.forEach((h) => h.lanes.forEach((l) => s.add(l.team)))); return [...s]; }, [parsed]);
+  const [team, setTeam] = useState(defaultTeam);
+  useEffect(() => { const b = teams.find((t) => /bdst/i.test(t)); if (b) setTeam(b); }, [teams]);
+  const count = parsed.reduce((n, ev) => n + ev.heats.reduce((m, h) => m + h.lanes.length, 0), 0);
+  const onFile = async (e) => { const f = e.target.files?.[0]; if (!f) return;
+    if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") { setBusy("Reading PDF…"); try { setText(await pdfToText(f)); setBusy(""); } catch { setBusy("Couldn't read the PDF here — paste the text instead."); } }
+    else { const r = new FileReader(); r.onload = () => setText(String(r.result || "")); r.readAsText(f); } };
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Import roster</div><div className="md-msub">Upload the VCSL meet program PDF (or paste text). Preview shows what was read.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,.tsv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy || "PDF, .txt or .csv"}</span></div>
+        <div className="md-impgrid">
+          <textarea className="md-imparea" placeholder={"Paste here…\n\n#13 Girls 15-18 50 Yard Butterfly\nVCSL Record: 26.69 2018 Chelsea Huffman\nHeat 1 of 5 Finals\n3 Greenberg, Maayan 15 BDST 47.78"} value={text} onChange={(e) => setText(e.target.value)} />
+          <div className="md-preview">
+            <div className="md-prevtop"><span>{parsed.length} events · {count} entries</span>{teams.length > 0 && <label className="md-ctl sm">Team<select value={team} onChange={(e) => setTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>}</div>
+            <div className="md-prevbody">{parsed.length === 0 ? <div className="md-prevempty">Nothing parsed yet — upload the meet program PDF and the preview fills in.</div>
+              : parsed.map((ev) => <div key={ev.id} className="md-prevev"><div className="md-prevevname">#{ev.num} {ev.name}{ev.record ? <em> · rec {ev.record}</em> : ""}</div>{ev.heats.map((h, i) => <div key={i} className="md-prevheat"><div className="md-prevheatn">Heat {h.num}</div>{h.lanes.map((l, j) => <div key={j} className={"md-prevlane" + (l.team === team ? " mine" : "")}><span>{l.lane}</span><span>{l.name}{l.swimmers ? ` (+${l.swimmers.length})` : ""}</span><span>{l.team}</span><span>{l.age || ""}</span><span>{l.seed}</span></div>)}</div>)}</div>)}</div>
+          </div>
+        </div>
+        <div className="md-mfoot"><button className="md-cancel" onClick={onClose}>Cancel</button><button className="md-apply" disabled={count === 0} onClick={() => onApply({ events: parsed, myTeam: team })}>Load {count > 0 ? `${count} entries` : "meet"}</button></div>
+      </div>
+    </div>
+  );
+}
+
+function ExportModal({ onClose, events, data, myTeam, places, records, meetName }) {
+  const matrix = useMemo(() => buildGrid(events, data, myTeam, places, records), [events, data, myTeam, places, records]);
+  const [msg, setMsg] = useState("");
+  const copy = async () => { try { await navigator.clipboard.writeText(toTSV(matrix)); setMsg("Copied — paste into a blank Google Sheet (Ctrl/Cmd+V)."); } catch { setMsg("Clipboard blocked here — use Download CSV."); } };
+  const download = () => { try { const blob = new Blob([toCSV(matrix)], { type: "text/csv" }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `${meetName.replace(/\s+/g, "_")}_${myTeam}.csv`; a.click(); URL.revokeObjectURL(url); setMsg("CSV downloaded — File ▸ Import in Google Sheets."); } catch { setMsg("Download blocked here — use Copy."); } };
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Export to Google Sheets — {myTeam}</div><div className="md-msub">Roster down the side, strokes across the top. Cells show place, time (B best · BR record), DQ codes, comments.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-exwrap"><table className="md-extable"><thead><tr>{matrix[0].map((h, i) => <th key={i}>{h}</th>)}</tr></thead><tbody>{matrix.slice(1).map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j} className={j === 0 ? "nm" : ""}>{c}</td>)}</tr>)}{matrix.length === 1 && <tr><td colSpan={matrix[0].length} className="md-exempty">No {myTeam} entries yet.</td></tr>}</tbody></table></div>
+        {msg && <div className="md-exmsg">{msg}</div>}
+        <div className="md-mfoot"><button className="md-cancel" onClick={onClose}>Close</button><button className="md-ghost2" onClick={download}>Download CSV</button><button className="md-apply" onClick={copy}>Copy for Google Sheets</button></div>
+      </div>
+    </div>
+  );
+}
+
+const CSS = `
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+.md-root { --ink:#0a1628; --line:#1e3a5f; --cyan:#22d3ee; --muted:#7d93b0; --text:#e8f0fb; --sheet:#f4f7fb; --card:#fff; --sline:#e2e8f0; --sink:#0f2036; --dq:#ef4444; --amber:#f59e0b; --green:#10b981; --rec:#e0b400;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color:var(--sink); background:var(--sheet); height:100vh; display:flex; flex-direction:column; overflow:hidden; -webkit-font-smoothing:antialiased; }
+.md-lanenum,.md-timein,.md-timeout,.md-stime,.md-tspts,.md-restime { font-variant-numeric:tabular-nums; }
+.md-top { display:flex; align-items:center; gap:14px; padding:8px 14px; background:var(--ink); color:var(--text); border-bottom:1px solid var(--line); flex:none; }
+.md-logowrap { position:relative; flex:none; }
+.md-logo { width:40px; height:40px; display:grid; place-items:center; font-size:25px; color:var(--ink); background:var(--cyan); border:none; border-radius:11px; font-weight:800; cursor:pointer; }
+.md-logo:hover { background:#5fe3f5; }
+.md-menuscrim { position:fixed; inset:0; z-index:30; }
+.md-menu { position:absolute; top:48px; left:0; z-index:31; width:290px; max-height:76vh; overflow-y:auto; background:#fff; color:var(--sink); border-radius:14px; box-shadow:0 24px 60px -16px rgba(0,0,0,.5); padding:10px; display:flex; flex-direction:column; gap:8px; }
+.md-menutitle { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.1em; color:#94a3b8; padding:2px 2px 0; }
+.md-mrow { display:flex; flex-direction:column; gap:4px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:#64748b; }
+.md-mrow input, .md-mrow select { font-size:14px; font-weight:600; text-transform:none; letter-spacing:0; color:var(--sink); padding:8px 10px; border:1px solid var(--sline); border-radius:9px; background:#fff; }
+.md-mrow input:disabled { background:#f1f5f9; color:#94a3b8; }
+.md-mdiv { height:1px; background:var(--sline); margin:2px 0; }
+.md-mbtn { text-align:left; padding:10px 12px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:13.5px; cursor:pointer; color:var(--sink); }
+.md-mbtn.danger { border-color:#fecaca; color:#b42318; } .md-mbtn.danger:hover { background:#fef2f2; }
+.md-mbtn:hover { background:#f1f5f9; } .md-mbtn.primary { background:var(--cyan); border-color:var(--cyan); color:#062a33; }
+.md-strip { display:flex; align-items:center; gap:8px; flex-wrap:wrap; overflow-x:auto; }
+.md-strip.dual { gap:14px; }
+.md-tscore { display:inline-flex; align-items:center; gap:6px; background:#0c1c33; border:1px solid var(--line); border-radius:10px; padding:5px 10px; }
+.md-tscore.big { padding:7px 14px; border-radius:12px; }
+.md-tsdot { width:10px; height:10px; border-radius:50%; }
+.md-tscode { font-weight:800; font-size:12.5px; } .md-tscore.big .md-tscode { font-size:15px; }
+.md-tspts { font-weight:800; font-size:18px; color:var(--cyan); } .md-tscore.big .md-tspts { font-size:25px; }
+.md-tspct { display:flex; flex-direction:column; align-items:flex-end; line-height:1; font-weight:800; font-size:11.5px; color:var(--green); }
+.md-tspct small { color:var(--muted); font-size:8.5px; } .md-vs { color:var(--muted); font-weight:800; font-size:12px; }
+
+.md-grid { flex:1; min-height:0; display:grid; grid-template-columns:400px 1fr; gap:12px; padding:12px; }
+.md-left { min-height:0; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; }
+.md-eyebrow { text-transform:uppercase; letter-spacing:.12em; font-size:9.5px; font-weight:800; color:var(--muted); }
+.md-eyebrow.gold { color:var(--rec); }
+.md-panel { background:var(--ink); border:1px solid var(--line); border-radius:13px; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
+.md-panel.od { flex:none; max-height:118px; overflow:hidden; }
+.md-panel.water { flex:none; border-color:#1f6b7d; box-shadow:0 0 0 1px rgba(34,211,238,.25) inset; }
+.md-panel.water.grow { flex:none; }
+.md-panel.water .md-lanes { overflow:visible; }
+.md-panel.water .md-lanes.prestart { overflow-y:auto; max-height:246px; }
+.md-panel.prev { flex:1 1 auto; min-height:76px; }
+.md-panel.prev .md-lanes { flex:1 1 auto; min-height:0; }
+.md-panel.results { flex:none; max-height:30vh; border-color:#6b5b13; box-shadow:0 0 0 1px rgba(224,180,0,.2) inset; }
+.md-phead { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 11px; background:linear-gradient(180deg,#122b4d,#0d2038); border-bottom:1px solid var(--line); flex:none; }
+.water-e { color:var(--cyan); } .md-pmeta { color:var(--muted); font-size:11.5px; font-weight:700; text-align:right; }
+.md-pnav { display:flex; align-items:center; gap:7px; }
+.md-pnav button { width:26px; height:26px; border-radius:7px; border:1px solid var(--line); background:#0c1c33; color:var(--text); font-size:16px; line-height:1; cursor:pointer; }
+.md-pnav button:disabled { opacity:.3; } .md-pnav button:hover:not(:disabled){ border-color:var(--cyan); }
+.md-lanes { padding:4px; display:flex; flex-direction:column; gap:2px; overflow-y:auto; }
+.md-lanes.noscroll { overflow:visible; }
+.md-lane { display:grid; grid-template-columns:26px 1fr auto 80px; align-items:center; gap:8px; padding:4px 8px; border-radius:8px; color:var(--text); background:#0c1c33; border:1px solid transparent; }
+.md-lane.mine { cursor:pointer; } .md-lane.mine:hover { background:#112741; }
+.md-lane.sel { border-color:var(--cyan); background:#102b47; } .md-lane.dq { background:#2a1116; } .md-lane.dq.sel { border-color:var(--dq); }
+.md-lane.empty { opacity:.35; } .md-emptytxt { color:var(--muted); }
+.md-lanenum { width:26px; height:26px; display:grid; place-items:center; font-weight:800; font-size:13px; background:#0a1628; border:1px solid var(--line); border-radius:7px; }
+.md-laneid { display:flex; flex-direction:column; min-width:0; line-height:1.15; }
+.md-laneswimmer { font-weight:700; font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; gap:5px; }
+.md-laneteam { font-size:9.5px; font-weight:700; }
+.md-lanemarks { display:flex; align-items:center; gap:4px; }
+.md-place { background:#0b3a55; color:var(--cyan); border:1px solid #12557a; font-size:9.5px; font-weight:800; padding:1px 5px; border-radius:5px; }
+.md-br { background:var(--rec); color:#3a2e00; font-size:9px; font-weight:900; padding:1px 4px; border-radius:4px; font-style:normal; }
+.md-dqbadge { background:var(--dq); color:#fff; font-size:9.5px; font-weight:800; padding:1px 6px; border-radius:5px; white-space:nowrap; } .md-dqbadge.sm { font-size:9px; }
+.md-tagcount { min-width:17px; height:17px; padding:0 4px; display:grid; place-items:center; background:var(--amber); color:#3a2600; font-size:10px; font-weight:800; border-radius:6px; }
+.md-timewrap { display:flex; align-items:center; justify-content:flex-end; gap:4px; }
+.md-best { background:var(--green); color:#04241a; font-size:10px; font-weight:900; width:16px; height:16px; display:grid; place-items:center; border-radius:4px; font-style:normal; }
+.md-best.sm { width:15px; height:15px; }
+.md-timein { width:64px; height:28px; text-align:center; border-radius:7px; border:1px solid var(--line); background:#0a1628; color:var(--cyan); font-weight:700; font-size:12.5px; }
+.md-timein:focus { outline:2px solid var(--cyan); outline-offset:1px; } .md-timeout { color:var(--cyan); font-weight:700; font-size:12.5px; }
+.md-odlist { padding:6px; display:flex; flex-wrap:wrap; gap:4px; }
+.md-odstrip { padding:5px; }
+.md-odwin { overflow:hidden; }
+.md-odroll { display:flex; transition:transform .5s ease; }
+.md-odcard { flex:0 0 50%; box-sizing:border-box; display:flex; flex-direction:column; gap:1px; padding:6px 10px; background:#0c1c33; border:none; border-right:2px solid var(--ink); color:var(--text); text-align:left; cursor:pointer; border-radius:7px; }
+.md-odcard.mine { box-shadow:inset 3px 0 0 #facc15; }
+.md-odcard:hover { background:#112741; }
+.md-odlane { font-size:11px; font-weight:900; color:var(--cyan); }
+.md-odcname { font-size:12.5px; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-odcteam { font-size:10px; font-weight:700; white-space:nowrap; }
+.md-odcseed { font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.md-odempty { padding:12px; color:var(--muted); font-size:12px; }
+.md-odchip { background:#0c1c33; border:1px solid var(--line); color:var(--text); font-size:10.5px; padding:3px 7px; border-radius:14px; }
+.md-odchip.mine { border-color:var(--cyan); background:#102b47; }
+.md-odchip b { color:var(--muted); margin-right:3px; } .md-odchip i { font-style:normal; font-weight:700; margin-left:3px; }
+
+.md-reslist { display:flex; flex-direction:column; gap:2px; padding:4px; overflow-y:auto; }
+.md-resrow { display:grid; grid-template-columns:38px 1fr auto auto 34px; align-items:center; gap:8px; padding:4px 8px; border:none; border-radius:8px; background:#0c1c33; color:var(--text); text-align:left; cursor:pointer; }
+.md-resrow.mine:hover { background:#112741; } .md-resrow.locked { cursor:default; opacity:.62; }
+.md-resplace { font-weight:900; font-size:11px; color:var(--muted); background:#0a1628; border:1px solid var(--line); border-radius:6px; padding:2px 0; text-align:center; }
+.md-resplace.p1 { color:#3a2e00; background:var(--rec); border-color:var(--rec); }
+.md-resplace.p2 { color:#1c2430; background:#c8d3e0; border-color:#c8d3e0; }
+.md-resplace.p3 { color:#3a2007; background:#d98c4a; border-color:#d98c4a; }
+.md-resname { font-weight:700; font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-resteam { font-size:10px; font-weight:800; }
+.md-restime { font-weight:800; font-size:12.5px; color:var(--cyan); display:flex; align-items:center; gap:4px; }
+.md-respts { font-weight:800; font-size:11px; color:var(--green); text-align:right; }
+
+.md-phead.clickable { width:100%; text-align:left; border:none; cursor:pointer; }
+.md-phead.clickable:hover { background:linear-gradient(180deg,#16345c,#0f2544); }
+.md-chev { font-style:normal; color:var(--cyan); margin-left:7px; }
+
+.md-ticker { flex:none; background:var(--ink); border-bottom:1px solid var(--line); color:var(--text); overflow:hidden; touch-action:pan-y; }
+.md-ticker.empty { display:flex; align-items:center; gap:10px; padding:9px 14px; }
+.md-tickempty { color:var(--muted); font-size:12px; font-weight:600; }
+.md-tickhead { display:flex; align-items:center; gap:10px; padding:7px 12px 5px; }
+.md-tickev { font-weight:800; font-size:12px; color:var(--text); flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-ticknav { display:flex; align-items:center; gap:6px; }
+.md-ticknav button { width:24px; height:24px; border-radius:6px; border:1px solid var(--line); background:#0c1c33; color:var(--text); font-size:14px; line-height:1; cursor:pointer; }
+.md-ticknav button:disabled { opacity:.3; } .md-ticknav button:hover:not(:disabled) { border-color:var(--cyan); }
+.md-tickpos { color:var(--muted); font-size:10px; font-weight:800; }
+.md-tickwin { overflow:hidden; margin:0 8px 8px; border-radius:9px; }
+.md-tickroll { display:flex; flex-direction:column; transition:transform .45s ease; }
+.md-tickrow { display:grid; grid-template-columns:38px 1fr auto auto 34px; align-items:center; gap:8px; padding:0 8px; border:none; background:#0c1c33; color:var(--text); text-align:left; cursor:pointer; border-bottom:1px solid #0a1628; }
+.md-tickrow.mine:hover { background:#112741; } .md-tickrow.locked { cursor:default; opacity:.62; }
+
+.md-seed { font-style:normal; color:#94a3b8; font-weight:700; margin-left:8px; }
+.md-delta { font-weight:900; font-size:11.5px; padding:2px 7px; border-radius:6px; font-variant-numeric:tabular-nums; }
+.md-delta.neg { background:#dcfce7; color:#166534; }
+.md-delta.pos { background:#fee2e2; color:#b42318; }
+
+.md-right { min-height:0; background:var(--card); border:1px solid var(--sline); border-radius:13px; display:flex; flex-direction:column; overflow:hidden; }
+.md-sheethead { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 14px; border-bottom:1px solid var(--sline); background:#fbfdff; flex:none; }
+.md-jump { display:inline-flex; align-items:center; gap:5px; background:var(--cyan); color:#062a33; border:none; border-radius:8px; padding:7px 12px; font-weight:800; font-size:12.5px; cursor:pointer; white-space:nowrap; }
+.md-jump:hover { background:#5fe3f5; }
+.md-jumpwrap { display:flex; align-items:center; gap:6px; }
+.md-eventjump { display:flex; align-items:center; gap:2px; background:#fff; border:1px solid var(--sline); border-radius:8px; padding:2px; }
+.md-eventjump button { width:22px; height:24px; display:grid; place-items:center; border:none; background:transparent; border-radius:5px; font-size:10px; color:#475569; cursor:pointer; }
+.md-eventjump button:hover:not(:disabled) { background:#f1f5f9; color:#0e7490; }
+.md-eventjump button:disabled { opacity:.3; cursor:default; }
+.md-eventjump input { width:74px; height:24px; border:none; text-align:center; font-size:12px; font-weight:700; color:var(--sink); background:transparent; }
+.md-eventjump input:focus { outline:none; }
+.md-jumpgo { background:#0f2036; color:#fff; border:none; border-radius:8px; padding:7px 10px; font-weight:800; font-size:12px; cursor:pointer; }
+.md-jumpgo:hover { background:#1a3050; }
+.md-sheet { flex:1; min-height:0; overflow-y:auto; padding:8px; scroll-behavior:smooth; }
+.md-evblock { margin-bottom:12px; border-radius:12px; }
+.md-evblock.curev { outline:2px solid var(--cyan); outline-offset:2px; background:#f4fbff; }
+.md-evname { font-weight:800; font-size:13.5px; color:var(--sink); padding:8px 8px 4px; display:flex; align-items:center; gap:8px; }
+.md-evnum { color:#94a3b8; }
+.md-nowpill { background:var(--cyan); color:#08303a; font-size:9.5px; font-weight:900; padding:2px 8px; border-radius:14px; letter-spacing:.05em; }
+.md-evcat { margin-left:auto; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:#0e7490; background:#e0f2fe; padding:2px 8px; border-radius:16px; }
+.md-recordrow { display:flex; align-items:center; gap:8px; padding:0 8px 8px; }
+.md-reclabel { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:#a8842a; background:#fdf6e3; border:1px solid #f2e3b3; padding:3px 8px; border-radius:6px; }
+.md-recinput { width:110px; font-size:12.5px; font-weight:700; color:#7a611a; padding:4px 8px; border:1px solid var(--sline); border-radius:7px; background:#fff; font-variant-numeric:tabular-nums; }
+.md-recinput:focus { outline:2px solid var(--rec); outline-offset:1px; }
+.md-heat { border:1px solid var(--sline); border-radius:11px; overflow:hidden; margin:0 4px 8px; background:#fff; }
+.md-heat.cur { border-color:var(--cyan); box-shadow:0 0 0 1px var(--cyan) inset; }
+.md-heatbar { width:100%; display:flex; align-items:center; justify-content:space-between; padding:7px 12px; background:#eef4fb; border:none; border-bottom:1px solid var(--sline); font-weight:700; font-size:12px; color:#334155; cursor:pointer; }
+.md-heatbar:hover { background:#e3edf9; }
+.md-curpill { background:var(--cyan); color:#08303a; font-size:10px; font-weight:800; padding:2px 8px; border-radius:16px; }
+.md-srowwrap { border-bottom:1px solid #eef2f7; } .md-srowwrap:last-child { border-bottom:none; }
+.md-srowwrap.relay { background:#fafcff; }
+.md-swim { width:100%; display:grid; grid-template-columns:26px 1fr auto; align-items:center; gap:10px; padding:9px 12px; background:transparent; border:none; cursor:pointer; text-align:left; }
+.md-swim:hover { background:#f7fafd; } .md-swim.sel { background:#eaf6ff; box-shadow:inset 3px 0 0 var(--cyan); }
+.md-swim.locked { cursor:default; opacity:.5; } .md-swim.locked:hover { background:transparent; } .md-swim.dq { background:#fef4f4; }
+.md-slane { font-size:13px; font-weight:800; color:#64748b; text-align:center; }
+.md-sid { display:flex; flex-direction:column; min-width:0; }
+.md-sname { font-weight:700; font-size:14px; color:var(--sink); display:flex; align-items:center; gap:6px; } .md-steam { font-size:10.5px; font-weight:800; }
+.md-smeta { display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+.md-minitag { background:#fff7e6; color:#a15c00; border:1px solid #fde3ac; font-size:10px; font-weight:700; padding:2px 7px; border-radius:6px; max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.md-more { color:#94a3b8; font-size:10.5px; font-weight:800; }
+.md-stime { font-weight:800; font-size:14px; color:#0e7490; }
+.md-relayswim { display:flex; flex-wrap:wrap; gap:6px 14px; padding:0 12px 9px 48px; }
+.md-rswim { font-size:11.5px; color:#64748b; } .md-rswim b { color:#94a3b8; margin-right:3px; }
+
+.md-povscrim { position:fixed; inset:0; z-index:60; }
+.md-pov { position:fixed; z-index:61; width:320px; max-height:74vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:12px; }
+.md-caret { position:absolute; top:-8px; width:16px; height:16px; background:#fff; border-left:1px solid var(--sline); border-top:1px solid var(--sline); transform:rotate(45deg); }
+.md-pov.above .md-caret { top:auto; bottom:-8px; transform:rotate(225deg); }
+.md-povhead { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:10px; }
+.md-povname { font-weight:800; font-size:16px; display:flex; align-items:center; gap:7px; }
+.md-agechip { background:#eef4fb; color:#33608a; font-size:11px; font-weight:800; padding:2px 7px; border-radius:16px; }
+.md-povmeta { font-size:12px; color:#64748b; margin-top:1px; }
+.md-x { width:34px; height:34px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-size:15px; cursor:pointer; flex:none; } .md-x.sm { width:28px; height:28px; font-size:13px; } .md-x:hover { background:#f1f5f9; }
+.md-dq { width:100%; padding:12px; border-radius:11px; border:2px solid var(--dq); background:#fff; color:var(--dq); font-weight:800; font-size:14px; cursor:pointer; margin-bottom:10px; text-align:left; line-height:1.3; }
+.md-dq:hover { background:#fef2f2; } .md-dq.on { background:var(--dq); color:#fff; }
+.md-povtags { display:flex; flex-direction:column; gap:6px; }
+.md-catbtn { width:100%; display:flex; align-items:center; gap:9px; padding:10px 11px; border-radius:10px; border:1.5px solid var(--sline); background:#fff; font-weight:700; font-size:13.5px; color:#334155; cursor:pointer; }
+.md-catbtn:hover { border-color:#94a3b8; } .md-catbtn.has { background:#fbfdff; }
+.md-catdot { width:9px; height:9px; border-radius:50%; flex:none; } .md-catnum { color:#fff; font-size:11px; font-weight:800; padding:1px 7px; border-radius:16px; } .md-cc { margin-left:auto; color:#94a3b8; }
+.md-subs { display:flex; flex-wrap:wrap; gap:6px; padding:8px 2px 4px; }
+.md-sub { padding:7px 10px; border-radius:8px; border:1.5px solid var(--sline); background:#fff; color:#334155; font-weight:600; font-size:12.5px; cursor:pointer; }
+.md-sub:hover { border-color:#94a3b8; } .md-sub.on { color:#fff; }
+
+.md-scrim { position:fixed; inset:0; background:rgba(6,14,28,.6); backdrop-filter:blur(2px); display:grid; place-items:center; padding:16px; z-index:50; }
+.md-modal { position:relative; background:#fff; border-radius:18px; width:min(680px,96vw); max-height:92vh; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 30px 80px -20px rgba(0,0,0,.5); }
+.md-imp { width:min(940px,96vw); }
+.md-mhead { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:16px 18px; border-bottom:1px solid var(--sline); }
+.md-mtitle { font-weight:800; font-size:17px; } .md-msub { font-size:12.5px; color:#64748b; margin-top:2px; }
+.md-warn { margin:14px 18px 0; border-radius:12px; padding:12px 14px; font-size:13.5px; line-height:1.5; }
+.md-warn.red { background:#fef2f2; border:1px solid #fecaca; color:#b42318; }
+.md-warn.amber { background:#fffbeb; border:1px solid #fde68a; color:#92600a; }
+.md-codes { overflow-y:auto; padding:14px 18px; }
+.md-cgroup { margin-bottom:14px; } .md-cglabel { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.1em; color:#64748b; margin-bottom:7px; }
+.md-cgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:7px; }
+.md-code { display:flex; align-items:center; gap:8px; text-align:left; padding:9px 10px; border-radius:9px; border:1px solid var(--sline); background:#fff; cursor:pointer; } .md-code:hover { border-color:var(--dq); background:#fff6f6; }
+.md-code.on { border-color:var(--dq); background:var(--dq); } .md-code.on .md-creason,.md-code.on .md-ccode { color:#fff; }
+.md-ccode { font-weight:900; font-size:12px; color:var(--dq); background:#fef2f2; border-radius:6px; padding:2px 6px; flex:none; } .md-code.on .md-ccode { background:rgba(255,255,255,.2); }
+.md-creason { font-size:12.5px; font-weight:600; color:#334155; line-height:1.25; }
+.md-mfoot { display:flex; justify-content:flex-end; gap:8px; padding:12px 18px; border-top:1px solid var(--sline); flex-wrap:wrap; }
+.md-clear { padding:10px 14px; border-radius:9px; border:1.5px solid var(--dq); background:#fff; color:var(--dq); font-weight:800; font-size:13px; cursor:pointer; margin-right:auto; }
+.md-cancel { padding:10px 14px; border-radius:9px; border:1px solid var(--sline); background:#fff; color:#334155; font-weight:700; font-size:13px; cursor:pointer; }
+.md-apply { padding:10px 16px; border-radius:9px; border:none; background:var(--cyan); color:#062a33; font-weight:800; font-size:13px; cursor:pointer; } .md-apply:disabled { opacity:.4; cursor:default; }
+.md-ghost2 { padding:10px 14px; border-radius:9px; border:1px solid var(--sline); background:#fff; color:#0e7490; font-weight:800; font-size:13px; cursor:pointer; }
+.md-impbar { display:flex; align-items:center; gap:10px; padding:12px 18px 0; }
+.md-filebtn { background:#0f2036; color:#fff; padding:8px 14px; border-radius:9px; font-weight:700; font-size:13px; cursor:pointer; } .md-impnote { font-size:12px; color:#94a3b8; }
+.md-impgrid { display:grid; grid-template-columns:1fr 1fr; min-height:0; flex:1; margin-top:12px; }
+@media (max-width:720px){ .md-impgrid{ grid-template-columns:1fr; } }
+.md-imparea { border:none; border-top:1px solid var(--sline); border-right:1px solid var(--sline); padding:14px 16px; font-size:13px; font-family:ui-monospace,Menlo,monospace; resize:none; min-height:280px; line-height:1.5; }
+.md-imparea:focus { outline:none; background:#fbfdff; }
+.md-preview { display:flex; flex-direction:column; min-height:0; background:#f8fafc; border-top:1px solid var(--sline); }
+.md-prevtop { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--sline); font-size:12px; font-weight:700; color:#475569; }
+.md-ctl { display:flex; align-items:center; gap:6px; font-size:10.5px; color:#64748b; font-weight:700; text-transform:uppercase; }
+.md-ctl select { background:#fff; color:#0f2036; border:1px solid var(--sline); border-radius:8px; padding:6px 8px; font-size:13px; font-weight:700; }
+.md-prevbody { overflow-y:auto; padding:10px 14px; }
+.md-prevempty { color:#94a3b8; font-size:12.5px; line-height:1.55; }
+.md-prevev { margin-bottom:10px; } .md-prevevname { font-weight:800; font-size:12.5px; color:#0f2036; margin-bottom:4px; } .md-prevevname em { color:#a8842a; font-style:normal; font-weight:700; }
+.md-prevheat { margin:0 0 6px 6px; } .md-prevheatn { font-size:10.5px; font-weight:700; color:#94a3b8; text-transform:uppercase; }
+.md-prevlane { display:grid; grid-template-columns:22px 1fr auto auto auto; gap:8px; font-size:12px; padding:3px 0; color:#475569; }
+.md-prevlane.mine { color:#0e7490; font-weight:700; }
+.md-exwrap { overflow:auto; padding:10px 14px; }
+.md-extable { border-collapse:collapse; width:100%; font-size:12px; }
+.md-extable th { position:sticky; top:0; background:#0f2036; color:#fff; text-align:left; padding:8px 10px; font-size:11px; text-transform:uppercase; white-space:nowrap; }
+.md-extable td { border:1px solid var(--sline); padding:7px 10px; vertical-align:top; color:#334155; min-width:120px; }
+.md-extable td.nm { font-weight:800; color:#0f2036; background:#f8fafc; white-space:nowrap; position:sticky; left:0; }
+.md-exempty { text-align:center; color:#94a3b8; padding:22px; }
+.md-exmsg { margin:0 18px; padding:10px 12px; background:#ecfeff; border:1px solid #a5f3fc; color:#0e7490; border-radius:10px; font-size:13px; font-weight:600; }
+.md-relaybtn { margin:5px 5px 0; padding:8px; border-radius:9px; border:1px solid #1f6b7d; background:#0e2c3a; color:var(--cyan); font-weight:800; font-size:12px; cursor:pointer; }
+.md-relaybtn:hover { background:#123a4c; }
+.md-lane.mine { box-shadow:inset 3px 0 0 #facc15; } .md-swim.mine { box-shadow:inset 3px 0 0 #facc15; }
+.md-povteam { font-size:11px; font-weight:800; margin-left:6px; }
+.md-splitbtn { width:100%; margin-top:8px; padding:9px; border-radius:9px; border:1.5px solid var(--sline); background:#fff; color:#0e7490; font-weight:800; font-size:13px; cursor:pointer; }
+.md-splitbtn.on { background:#ecfeff; border-color:#67e8f9; }
+.md-notearea { width:100%; min-height:62px; margin-top:8px; resize:vertical; border-radius:10px; border:1px solid #cfe0f2; background:#fff; padding:9px 11px; font-size:13.5px; font-family:inherit; color:var(--sink); line-height:1.4; }
+.md-notearea.one { min-height:0; height:38px; }
+.md-notearea:focus { outline:2px solid var(--cyan); outline-offset:1px; border-color:var(--cyan); }
+.md-otherteam { font-size:12.5px; color:#64748b; background:#f8fafc; border:1px solid var(--sline); border-radius:10px; padding:10px 12px; line-height:1.5; }
+
+.md-splitscrim { position:fixed; inset:0; background:rgba(6,14,28,.45); display:grid; place-items:center; padding:16px; z-index:45; }
+.md-splitpanel { width:min(760px,96vw); max-height:82vh; background:#0a1628; border:1px solid var(--line); border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 30px 80px -20px rgba(0,0,0,.6); }
+.md-splithead { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; color:var(--text); font-weight:800; font-size:14px; border-bottom:1px solid var(--line); background:linear-gradient(180deg,#122b4d,#0d2038); }
+.md-splitgrid { padding:12px; display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; overflow-y:auto; }
+.md-splitcard { background:#0c1c33; border:1px solid var(--line); border-radius:12px; padding:10px; }
+.md-splitcard.mine { box-shadow:inset 3px 0 0 #facc15; }
+.md-splitcardhead { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+.md-splitlane { font-size:11px; font-weight:800; color:var(--muted); }
+.md-splitteam { font-weight:800; font-size:13px; flex:1; }
+.md-splittime { width:70px; height:28px; text-align:center; border-radius:7px; border:1px solid var(--line); background:#0a1628; color:var(--cyan); font-weight:700; font-size:12.5px; }
+.md-legs { display:flex; flex-direction:column; gap:3px; }
+.md-leg { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:8px; border:1px solid transparent; background:#0a1628; color:var(--muted); opacity:.55; }
+.md-leg.done { opacity:.8; } .md-leg.cur { opacity:1; background:#102b47; border-color:var(--cyan); color:var(--text); }
+.md-legsel { flex:1; display:flex; align-items:center; gap:8px; background:none; border:none; color:inherit; cursor:pointer; text-align:left; padding:0; }
+.md-legnote { flex:none; width:24px; height:24px; border-radius:6px; border:1px solid var(--line); background:#0c1c33; color:var(--cyan); font-size:12px; cursor:pointer; }
+.md-legnote:hover { border-color:var(--cyan); }
+.md-mixtag { font-size:12px; font-weight:800; color:#7c3aed; background:#f3e8ff; border:1px solid #ddd6fe; padding:6px 12px; border-radius:9px; }
+.md-gtick { font-style:normal; font-weight:900; font-size:9px; color:#fff; padding:1px 4px; border-radius:4px; margin-right:4px; }
+.md-gtick.girls { background:#ec4899; } .md-gtick.boys { background:#3b82f6; }
+.md-ttlabel { font-weight:800; font-size:14px; color:var(--cyan); }
+.md-legnum { width:18px; height:18px; display:grid; place-items:center; font-size:10px; font-weight:800; border-radius:5px; background:#0c1c33; border:1px solid var(--line); flex:none; }
+.md-leg.cur .md-legname { font-size:14px; font-weight:800; } .md-legname { font-size:12px; font-weight:600; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-legsplit { font-size:11px; font-weight:800; color:var(--cyan); font-variant-numeric:tabular-nums; }
+.md-splitrow { display:flex; gap:6px; margin-top:8px; }
+.md-nextleg { flex:none; padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:#0e2c3a; color:var(--cyan); font-weight:800; font-size:11.5px; cursor:pointer; }
+.md-splitin { flex:1; height:30px; border-radius:8px; border:1px solid var(--line); background:#0a1628; color:var(--text); padding:0 9px; font-size:12.5px; }
+
+.md-teamsel { display:flex; gap:5px; flex-wrap:wrap; margin-left:auto; }
+.md-teamchip { padding:5px 10px; border-radius:16px; border:1.5px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:12px; cursor:pointer; }
+
+.md-statwrap { display:grid; grid-template-columns:1fr 1fr; gap:0; overflow:hidden; flex:1; min-height:0; }
+@media (max-width:720px){ .md-statwrap { grid-template-columns:1fr; overflow-y:auto; } }
+.md-statcol { overflow-y:auto; padding:12px 16px; border-right:1px solid var(--sline); }
+.md-statcol:last-child { border-right:none; }
+.md-stath { font-weight:800; font-size:13px; margin-bottom:8px; color:var(--sink); position:sticky; top:0; background:#fff; padding-bottom:4px; }
+.md-statrow { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #f1f5f9; }
+.md-statrank { width:20px; text-align:center; font-weight:800; color:#94a3b8; font-size:12px; }
+.md-statname { font-weight:700; font-size:13px; color:var(--sink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-statsub { font-size:11px; color:#94a3b8; }
+.md-statval { font-weight:900; font-size:14px; } .md-statval.gold { color:#a8842a; } .md-statval.green { color:#166534; }
+.md-agegrp { margin-bottom:10px; } .md-agehdr { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#0e7490; margin:6px 0 2px; }
+.md-gpill { width:18px; height:18px; display:grid; place-items:center; border-radius:50%; font-size:10px; font-weight:900; color:#fff; }
+.md-gpill.girls { background:#ec4899; } .md-gpill.boys { background:#3b82f6; } .md-gpill.mixed { background:#8b5cf6; }
+
+.md-rbctl { display:flex; gap:14px; padding:12px 18px; border-bottom:1px solid var(--sline); }
+.md-rblist { overflow-y:auto; padding:12px 16px; }
+.md-rbteam { border:1px solid var(--sline); border-radius:12px; padding:10px 12px; margin-bottom:8px; }
+.md-rbteam.mine { border-color:#facc15; box-shadow:0 0 0 1px #facc15 inset; background:#fffdf0; }
+.md-rbhead { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+.md-rbrank { width:22px; height:22px; display:grid; place-items:center; border-radius:6px; background:#0f2036; color:#fff; font-weight:900; font-size:12px; }
+.md-rbteamname { font-weight:800; font-size:15px; flex:1; }
+.md-rbtotal { font-weight:900; font-size:16px; color:#0e7490; font-variant-numeric:tabular-nums; }
+.md-rbgap { font-size:11px; font-weight:800; color:#b42318; }
+.md-rbswimmers { display:flex; flex-wrap:wrap; gap:6px 12px; }
+.md-rbswim { font-size:12px; color:#475569; font-weight:600; } .md-rbswim em { color:#94a3b8; font-style:normal; font-variant-numeric:tabular-nums; }
+.md-rbproj { font-size:11px; color:#0e7490; font-weight:700; margin-left:4px; }
+.md-rbprob { display:flex; align-items:center; gap:8px; margin-top:6px; }
+.md-rbprobbar { flex:1; height:8px; border-radius:5px; background:#eef2f7; overflow:hidden; }
+.md-rbprobfill { height:100%; background:#10b981; }
+.md-rbprobval { font-size:11px; font-weight:800; color:#166534; width:34px; text-align:right; }
+
+.md-cmpwrap { display:flex; align-items:flex-start; gap:14px; padding:14px 18px; }
+.md-cmpcol { flex:1; min-width:0; }
+.md-cmpvs { flex:none; align-self:center; font-weight:900; font-size:13px; color:#94a3b8; padding-top:14px; }
+.md-cmppicks { display:flex; flex-direction:column; gap:6px; }
+.md-cmpsel { width:100%; padding:9px 10px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:13.5px; color:var(--sink); }
+.md-cmpprob { padding:0 18px 10px; }
+.md-cmpprobbar { height:10px; border-radius:6px; background:#fee2e2; overflow:hidden; }
+.md-cmpprobfill { height:100%; background:#10b981; }
+.md-cmpprobrow { display:flex; justify-content:space-between; font-size:12px; font-weight:800; margin-top:5px; color:#334155; }
+.md-cmpspread { padding:4px 2px 0; }
+.md-cmptrack { position:relative; height:10px; border-radius:6px; background:#eef2f7; margin:10px 2px 6px; }
+.md-cmpband { position:absolute; top:0; bottom:0; border-radius:6px; background:#bae6fd; }
+.md-cmppin { position:absolute; top:-4px; width:3px; height:18px; background:#0e7490; border-radius:2px; transform:translateX(-1.5px); }
+.md-cmpspreadlabels { display:flex; justify-content:space-between; font-size:12.5px; font-weight:800; color:#0f2036; font-variant-numeric:tabular-nums; }
+.md-cmpspreadlabels .mid { color:#0e7490; }
+.md-cmpspreadcap { display:flex; justify-content:space-between; font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:#94a3b8; margin-top:1px; }
+.md-cmpspreadcap .mid { color:#0e7490; }
+.md-cmprate { font-size:11px; color:#64748b; margin-top:6px; }
+.md-cmpwin { margin:0 18px 12px; padding:10px 12px; background:#f0fdfa; border:1px solid #99f6e4; border-radius:10px; font-size:13px; font-weight:700; color:#0f2036; }
+
+.md-imrow { display:flex; align-items:center; gap:6px; margin-bottom:8px; flex-wrap:wrap; }
+.md-imlabel { font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; }
+.md-imchip { padding:5px 11px; border-radius:16px; border:1.5px solid var(--sline); background:#fff; color:#334155; font-weight:800; font-size:12px; cursor:pointer; }
+.md-imchip.on { background:#0ea5e9; border-color:#0ea5e9; color:#fff; }
+.md-rswim.btn { border:1px solid var(--sline); background:#fff; cursor:pointer; padding:3px 8px; border-radius:14px; }
+.md-rswim.btn:hover { border-color:#facc15; background:#fffdf0; }
+
+.md-lgcount { margin-left:auto; font-size:12px; font-weight:800; color:#64748b; }
+.md-lglist { overflow-y:auto; padding:8px 12px; flex:1; min-height:0; }
+.md-lgitem { border:1px solid var(--sline); border-radius:11px; margin-bottom:6px; overflow:hidden; }
+.md-lgitem.mine { border-color:#facc15; }
+.md-lgrow { width:100%; display:grid; grid-template-columns:auto 1fr auto auto auto; align-items:center; gap:9px; padding:9px 12px; background:#fff; border:none; cursor:pointer; text-align:left; }
+.md-lgrow:hover { background:#f8fafc; }
+.md-lgdot { width:9px; height:9px; border-radius:50%; }
+.md-lgname { font-weight:800; font-size:13.5px; color:var(--sink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-lgmeta { font-size:11px; color:#94a3b8; font-weight:700; white-space:nowrap; }
+.md-lgpts { font-weight:900; font-size:15px; color:#0e7490; } .md-lgpts small { font-size:9px; color:#94a3b8; margin-left:2px; }
+.md-lgdetail { padding:6px 12px 10px; background:#fbfdff; border-top:1px solid var(--sline); }
+.md-lgev { display:flex; align-items:center; gap:8px; padding:4px 0; font-size:12px; border-bottom:1px solid #eef2f7; }
+.md-lgev:last-child { border-bottom:none; }
+.md-lgevname { font-weight:700; color:#334155; min-width:96px; }
+.md-lgevseed { color:#64748b; font-variant-numeric:tabular-nums; flex:1; }
+.md-lgevplace { font-weight:800; color:#0e7490; } .md-lgevpts { font-weight:800; color:#166534; }
+
+.md-panel.prev.grow { flex:2; } .md-panel.water.prestart { flex:none; }
+.md-waiting { font-style:normal; color:var(--muted); font-weight:700; }
+.md-prestartbox { padding:12px; display:flex; flex-direction:column; gap:10px; }
+.md-startbtn { padding:14px; border-radius:12px; border:none; background:var(--cyan); color:#062a33; font-weight:900; font-size:16px; cursor:pointer; letter-spacing:.02em; }
+.md-startbtn:hover { background:#5fe3f5; }
+.md-prevslider { padding:4px; flex:1 1 auto; min-height:0; display:flex; flex-direction:column; } .md-prevslider.empty { padding:12px; color:var(--muted); font-size:12px; }
+.md-prevwin { overflow:hidden; flex:1 1 auto; min-height:68px; }
+.md-prevroll { display:flex; flex-direction:column; transition:transform .45s ease; }
+.md-prevrow { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:0 8px; border:none; background:#0c1c33; color:var(--text); text-align:left; cursor:pointer; border-bottom:1px solid #0a1628; }
+.md-prevrow.mine { box-shadow:inset 3px 0 0 #facc15; }
+
+.md-statrow.mine { background:#fffdf0; box-shadow:inset 3px 0 0 #facc15; border-radius:6px; }
+.md-toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); z-index:80; background:#0f2036; color:#fff; padding:12px 20px; border-radius:12px; font-weight:800; font-size:14px; box-shadow:0 16px 40px -12px rgba(0,0,0,.6); }
+
+.md-gear { position:fixed; left:16px; bottom:16px; z-index:35; width:52px; height:52px; border-radius:50%; border:none; background:#0f2036; color:#fff; font-size:24px; cursor:pointer; box-shadow:0 10px 30px -8px rgba(0,0,0,.6); }
+.md-gear:hover { background:#1a3050; }
+.md-settings { width:min(560px,96vw); }
+.md-setbody { padding:16px 18px; overflow-y:auto; display:flex; flex-direction:column; gap:10px; }
+.md-fixed { font-size:13px; color:#94a3b8; font-weight:700; padding:8px 0; }
+.md-stepper { display:inline-flex; align-items:center; gap:2px; }
+.md-stepper button { width:38px; height:38px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-size:20px; font-weight:800; color:#0f2036; cursor:pointer; }
+.md-stepper button:hover { background:#f1f5f9; border-color:#94a3b8; }
+.md-stepper span { min-width:44px; text-align:center; font-size:17px; font-weight:900; font-variant-numeric:tabular-nums; }
+.md-endrace { width:26px; height:26px; background:#ef4444; border:none; border-radius:7px; cursor:pointer; margin-left:auto; box-shadow:0 1px 4px rgba(239,68,68,.5); }
+.md-endrace:hover { background:#dc2626; } .md-endrace:disabled { opacity:.4; cursor:default; }
+.md-startsq { width:26px; height:26px; margin-left:auto; border:none; border-radius:7px; background:var(--cyan); color:#062a33; font-weight:900; font-size:12px; cursor:pointer; display:grid; place-items:center; box-shadow:0 1px 4px rgba(34,211,238,.4); }
+.md-startsq:hover { background:#5fe3f5; }
+.md-panel.water.waiting { max-height:290px; }
+.md-lanes.prestart { max-height:246px; overflow-y:auto; }
+.md-progbtn { width:100%; margin-top:8px; padding:9px; border-radius:9px; border:1.5px solid var(--sline); background:#fff; color:#7c3aed; font-weight:800; font-size:13px; cursor:pointer; }
+.md-progbtn.on { background:#f3e8ff; border-color:#ddd6fe; }
+.md-progwrap { margin-top:8px; }
+.md-proglist { margin-top:6px; max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:3px; }
+.md-progrow { display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center; padding:6px 8px; background:#f8fafc; border-radius:8px; font-size:12px; }
+.md-progev { font-weight:700; color:#334155; } .md-progt { font-weight:800; color:#0e7490; font-variant-numeric:tabular-nums; } .md-progm { font-size:10px; color:#94a3b8; }
+.md-progempty { font-size:12px; color:#94a3b8; padding:8px; }
+
+.md-seasontabs { display:flex; gap:6px; padding:10px 18px 0; }
+.md-seasontab { flex:1; padding:9px; border-radius:9px; border:1.5px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:13px; cursor:pointer; }
+.md-seasontab.on { background:#0f2036; border-color:#0f2036; color:#fff; }
+.md-meetlist { flex:1; min-height:0; overflow-y:auto; padding:12px 16px; display:flex; flex-direction:column; gap:8px; }
+.md-meetrow { display:flex; align-items:center; gap:10px; padding:11px 12px; border:1px solid var(--sline); border-radius:11px; background:#fff; }
+.md-meetinfo { flex:1; min-width:0; }
+.md-meetname { font-weight:800; font-size:14px; color:var(--sink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-meetmeta { font-size:11.5px; color:#94a3b8; margin-top:1px; }
+.md-meetload { flex:none; padding:8px 14px; border-radius:8px; border:none; background:var(--cyan); color:#062a33; font-weight:800; font-size:13px; cursor:pointer; }
+.md-meetload:hover { background:#5fe3f5; }
+.md-meetdel { flex:none; width:34px; height:34px; border-radius:8px; border:1px solid #fecaca; background:#fff; color:#b42318; font-size:14px; cursor:pointer; }
+.md-meetdel:hover { background:#fef2f2; }
+
+.md-onlymine { display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:700; color:#475569; padding:2px 2px 8px; }
+.md-onlymine input { width:16px; height:16px; }
+.md-confirm { position:absolute; inset:0; background:rgba(6,14,28,.55); display:grid; place-items:center; z-index:70; border-radius:18px; }
+.md-confirmbox { background:#fff; border-radius:14px; padding:18px; width:min(360px,90%); box-shadow:0 20px 50px -16px rgba(0,0,0,.5); }
+.md-confirmq { font-size:14px; font-weight:700; color:var(--sink); line-height:1.5; margin-bottom:14px; }
+.md-confirmbtns { display:flex; justify-content:flex-end; gap:8px; }
+.md-confirmyes { padding:10px 16px; border-radius:9px; border:none; background:var(--dq); color:#fff; font-weight:800; font-size:13px; cursor:pointer; }
+.md-confirmyes:hover { background:#dc2626; }
+
+.md-lane.scr .md-laneswimmer, .md-swim.scr .md-sname { text-decoration:line-through; opacity:.6; }
+.md-lane.scr, .md-swim.scr { opacity:.72; }
+.md-scrbadge { background:#ef4444; color:#fff; font-size:9px; font-weight:900; padding:1px 5px; border-radius:4px; letter-spacing:.03em; }
+.md-timex { width:64px; text-align:center; color:#ef4444; font-weight:900; font-size:16px; }
+.md-povtop { display:flex; gap:8px; }
+.md-povtop .md-dq { flex:1; width:auto; margin:0; }
+.md-nsbtn { flex:1; padding:11px; border-radius:11px; border:1.5px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:13px; cursor:pointer; }
+.md-nsbtn:hover { border-color:#94a3b8; } .md-nsbtn.on { background:#fee2e2; border-color:#fca5a5; color:#b42318; }
+.md-workhdr { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#64748b; margin:10px 0 6px; }
+.md-worktags { display:flex; flex-wrap:wrap; gap:6px; }
+.md-worktag { padding:7px 12px; border-radius:16px; border:1.5px solid var(--sline); background:#fff; color:#334155; font-weight:700; font-size:12.5px; cursor:pointer; }
+.md-worktag:hover { border-color:#94a3b8; }
+.md-stime.scrx { color:#ef4444; font-weight:900; }
+.md-lgitem.scr { border-color:#fecaca; }
+.md-partev { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:5px 0; border-bottom:1px solid #eef2f7; }
+.md-partev:last-child { border-bottom:none; }
+.md-partname { font-size:12.5px; font-weight:700; color:#334155; }
+.md-relaytag { font-style:normal; font-weight:700; color:#0e7490; }
+.md-partname.scr { text-decoration:line-through; color:#94a3b8; }
+.md-partbtn { padding:5px 12px; border-radius:8px; border:1px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:12px; cursor:pointer; }
+.md-partbtn:hover { border-color:#ef4444; color:#b42318; } .md-partbtn.on { background:#fee2e2; border-color:#fecaca; color:#b42318; }
+.md-scratchbtn { width:100%; padding:11px; border-radius:11px; border:1.5px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:13.5px; cursor:pointer; margin-bottom:10px; }
+.md-scratchbtn:hover { background:#f1f5f9; } .md-scratchbtn.on { background:#e2e8f0; border-color:#94a3b8; color:#334155; }
+.md-scratchmodal { width:min(400px,94vw); }
+.md-scratchbtns { padding:14px 18px; display:flex; flex-direction:column; gap:8px; }
+
+.md-newmeetform { padding:16px 18px; display:flex; flex-direction:column; gap:10px; overflow-y:auto; }
+.md-newmeetnote { font-size:12px; color:#64748b; background:#f8fafc; border:1px solid var(--sline); border-radius:9px; padding:9px 11px; }
+
+@media (max-width:900px){ .md-root { height:auto; min-height:100vh; overflow:visible; } .md-grid { grid-template-columns:1fr; } .md-left { overflow:visible; } .md-sheet { overflow-y:visible; } .md-gear { bottom:12px; left:12px; } }
+@media (prefers-reduced-motion: reduce){ * { transition:none !important; scroll-behavior:auto !important; } }
+`;
