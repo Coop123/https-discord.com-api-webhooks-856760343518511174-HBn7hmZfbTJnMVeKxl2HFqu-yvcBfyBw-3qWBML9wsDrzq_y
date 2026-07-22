@@ -14,6 +14,16 @@ const TEAMS = [
 const TEAM_NAME = Object.fromEntries(TEAMS.map((t) => [t.code, t.name]));
 const TEAM_COLOR = { BDST: "#facc15", AGCC: "#22c55e", MTVD: "#ef4444", OAK: "#1e40af", LPAC: "#38bdf8", SCVCC: "#14b8a6" };
 const teamColor = (t) => TEAM_COLOR[t] || "#7c93b0";
+// Ultra-compact 2-letter fallback team codes, used only when even the normal
+// team code (BDST, AGCC, ...) won't fit in a tight pre-start lane card.
+const TEAM_MICRO = { BDST: "BD", OAK: "OT", AGCC: "AG", LPAC: "LP", MTVD: "MV", SCVCC: "SC" };
+// "Last, First" → first-initial + last-initial (e.g. "Wong, Madelyn" → "MW"),
+// the fallback when a lane card is too narrow for the full swimmer name.
+function abbrevName(name) {
+  const m = (name || "").split(",").map((s) => s.trim());
+  if (m.length < 2 || !m[0] || !m[1]) return name;
+  return (m[1][0] + m[0][0]).toUpperCase();
+}
 const STORE = (typeof window !== "undefined" && window.storage) ? window.storage : null;
 const CUR_KEY = "meetdeck:current:v1";
 const INDEX_KEY = "meetdeck:index:v1";
@@ -583,6 +593,14 @@ function computeParticipants(events, data) {
         (sw[key] || (sw[key] = { name: s.name, team: l.team, age: s.age, entries: [] }));
         if (s.age) sw[key].age = s.age;
         sw[key].entries.push({ id, ev: shortEvent(ev.name), scratched: isScratched(data[id] || {}), relay: true, relayLabel: l.relay, evIdx: ei, htIdx: hi, relayLane: l.lane, leg });
+        // A swap leaves the outgoing swimmer off the roster entirely — surface
+        // a read-only "scratched, replaced by X" entry for them too.
+        const sub = (data[id] || {}).subFor;
+        if (sub && sub.name) {
+          const gkey = sub.name + "|" + l.team;
+          (sw[gkey] || (sw[gkey] = { name: sub.name, team: l.team, age: sub.age, entries: [] }));
+          sw[gkey].entries.push({ id: id + ":ghost", ev: shortEvent(ev.name), scratched: true, relay: true, relayLabel: l.relay, ghost: true, replacedBy: s.name });
+        }
       });
       return;
     }
@@ -629,6 +647,38 @@ function relaySlotsByTeam(events, team) {
       l.swimmers.forEach((s, leg) => { if (s.name) slots.set(s.name, { evIdx: ei, htIdx: hi, lane: l.lane, leg, eventName: ev.name }); }); })); });
   return slots;
 }
+// Would pulling `name` out of their other relay (backfilling it with the next
+// best available teammate) cost that relay's seed-based place in its event?
+// Compares the field's seed-time ranking before vs. after the swap so a
+// "move" suggestion never sacrifices ground on a relay we're already seeded
+// to hold. Missing data (no seed, no backfill option) errs toward allowing
+// the move rather than blocking on incomplete information.
+function relayMoveIsSafe(events, data, name, team, fromSlot) {
+  const ev = events[fromSlot.evIdx]; if (!ev) return true;
+  const donorLane = ev.heats[fromSlot.htIdx] && ev.heats[fromSlot.htIdx].lanes.find((l) => l.lane === fromSlot.lane);
+  if (!donorLane) return true;
+  const field = [];
+  ev.heats.forEach((ht) => ht.lanes.forEach((l) => { if (!l.swimmers) return; const s = toSeconds(l.seed); if (!isNaN(s)) field.push({ team: l.team, v: s }); }));
+  const currentIdx = field.findIndex((f) => f.team === team);
+  if (currentIdx < 0) return true;
+  const currentPlace = [...field].sort((a, b) => a.v - b.v).findIndex((f) => f.team === team) + 1;
+  const stroke = /medley/i.test(ev.name) ? (MEDLEY_LEGS[fromSlot.leg] || "Free") : "Free";
+  const nameLegTime = bestStrokeSeed(events, data, name, team, stroke);
+  const donorSeed = toSeconds(donorLane.seed);
+  if (nameLegTime == null || isNaN(donorSeed)) return true;
+  const backfill = relayReplacementCandidatesRaw(events, data, fromSlot.evIdx, fromSlot.htIdx, fromSlot.lane, fromSlot.leg, team)[0];
+  const newTotal = backfill && backfill.best != null ? donorSeed - nameLegTime + backfill.best : Infinity;
+  const newField = field.map((f) => f.team === team ? { ...f, v: newTotal } : f).sort((a, b) => a.v - b.v);
+  const newPlace = newField.findIndex((f) => f.team === team) + 1;
+  return newPlace <= currentPlace;
+}
+// Drops any roster candidate who's on a different relay this meet UNLESS
+// moving them is "safe" per relayMoveIsSafe — used to gate both the flat
+// candidate list and the medley full-reoptimization pool.
+function filterSafeMoveCandidates(events, data, roster, team) {
+  const otherSlots = relaySlotsByTeam(events, team);
+  return roster.filter((c) => { const other = otherSlots.get(c.name); return !other || relayMoveIsSafe(events, data, c.name, team, other); });
+}
 // Teammates eligible to swap into a relay leg: same team, same natural age group,
 // same gender as the event (when known), not already swimming this relay — ranked
 // fastest-first by their best time in the relevant stroke (medley legs swim in
@@ -636,8 +686,9 @@ function relaySlotsByTeam(events, team) {
 // unverified same-team list (flagged) if nobody fits the strict rule, so a coach
 // always has a couple of options rather than a dead end. Candidates already
 // tied up in a different relay are marked "move" — swapping them in also
-// vacates their old slot, which the caller should offer to backfill.
-function relayReplacementCandidates(events, data, evIdx, htIdx, lane, leg, team) {
+// vacates their old slot, which the caller should offer to backfill. Only
+// offered at all when relayMoveIsSafe() says it won't cost that relay ground.
+function relayReplacementCandidatesRaw(events, data, evIdx, htIdx, lane, leg, team) {
   const ev = events[evIdx]; const ht = ev && ev.heats[htIdx];
   const relayLane = ht && ht.lanes.find((l) => l.lane === lane);
   if (!relayLane || !relayLane.swimmers) return [];
@@ -653,18 +704,23 @@ function relayReplacementCandidates(events, data, evIdx, htIdx, lane, leg, team)
   if (strict.length) return strict.slice(0, 3);
   return rank(pool).slice(0, 3).map((c) => ({ ...c, verified: false }));
 }
+function relayReplacementCandidates(events, data, evIdx, htIdx, lane, leg, team) {
+  return relayReplacementCandidatesRaw(events, data, evIdx, htIdx, lane, leg, team).filter((c) => !c.moveFrom || relayMoveIsSafe(events, data, c.name, team, c.moveFrom));
+}
 // Re-optimizes a medley relay's full 4-leg lineup for THIS meet's roster
 // (mixed or single-gender), excluding the scratched swimmer — a scratch here
 // can shuffle who swims what (not just a 1-for-1 swap), same idea as the
-// season-wide relay builder but scoped to who's actually entered today.
+// season-wide relay builder but scoped to who's actually entered today. The
+// pool excludes anyone whose move would cost their other relay ground.
 function medleyReplacementPlan(events, data, evIdx, htIdx, lane, excludeName) {
   const ev = events[evIdx]; if (!ev || !/medley/i.test(ev.name)) return null;
   const ht = ev.heats[htIdx]; const relayLane = ht && ht.lanes.find((l) => l.lane === lane);
   if (!relayLane) return null;
   const team = relayLane.team, group = evAgeGroup(ev.name), evg = evGender(ev.name);
   const genderMap = swimmerGenderMap(events);
-  const roster = teamRoster(events, team).filter((c) => c.name !== excludeName && ageGroupOf(c.age) === group)
+  const rosterRaw = teamRoster(events, team).filter((c) => c.name !== excludeName && ageGroupOf(c.age) === group)
     .map((c) => ({ ...c, gender: genderMap[c.name + "|" + team] }));
+  const roster = filterSafeMoveCandidates(events, data, rosterRaw, team);
   const timeOf = (name, stroke) => bestStrokeSeed(events, data, name, team, stroke);
   return evg === "Mixed" ? optimalMixedMedley(roster, timeOf) : optimalMedley(roster.filter((c) => !c.gender || c.gender === evg), timeOf);
 }
@@ -697,7 +753,8 @@ function ParticipantsModal({ onClose, events, data, homeTeam, onOne, onAll }) {
                 {p.entries.map((e) => (
                   <div key={e.id} className="md-partev">
                     <span className={"md-partname" + (e.scratched ? " scr" : "")}>{e.ev}{e.relay && <em className="md-relaytag"> · relay {e.relayLabel}</em>}</span>
-                    <button className={"md-partbtn" + (e.scratched ? " on" : "")} onClick={() => onOne({ ...e, name: p.name, team: p.team }, !e.scratched)}>{e.scratched ? "X — tap to restore" : "Scratch"}</button>
+                    {e.ghost ? <span className="md-partghost">✕ scratched — replaced by {e.replacedBy}</span>
+                      : <button className={"md-partbtn" + (e.scratched ? " on" : "")} onClick={() => onOne({ ...e, name: p.name, team: p.team }, !e.scratched)}>{e.scratched ? "X — tap to restore" : "Scratch"}</button>}
                   </div>
                 ))}
               </div>}
@@ -1326,8 +1383,9 @@ export default function App() {
   // already swimming a different relay ("move" candidate), vacate that old
   // slot and chain straight into a replacement popup for it.
   const swapRelaySwimmer = (evIdx, htIdx, lane, leg, candidate) => {
+    const outgoing = events[evIdx]?.heats[htIdx]?.lanes.find((l) => l.lane === lane)?.swimmers[leg];
     setEvents((evs) => evs.map((ev, ei) => ei !== evIdx ? ev : { ...ev, heats: ev.heats.map((ht, hi) => hi !== htIdx ? ht : { ...ht, lanes: ht.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: l.swimmers.map((s, i) => i !== leg ? s : { name: candidate.name, age: candidate.age || 0 }) }) }) }));
-    update(entryId(evIdx, htIdx, lane) + "#" + leg, { scratched: false, tags: {}, notes: "" });
+    update(entryId(evIdx, htIdx, lane) + "#" + leg, { scratched: false, tags: {}, notes: "", subFor: outgoing ? { name: outgoing.name, age: outgoing.age || 0 } : null });
     flash(candidate.name + " swapped in for " + (relayReplaceTarget ? relayReplaceTarget.name : "scratched swimmer"));
     if (candidate.moveFrom) {
       const slot = candidate.moveFrom;
@@ -1345,7 +1403,7 @@ export default function App() {
     const team = relayLane.team, before = relayLane.swimmers.map((s) => s.name);
     const otherSlots = relaySlotsByTeam(events, team);
     setEvents((evs) => evs.map((e, ei) => ei !== evIdx ? e : { ...e, heats: e.heats.map((h, hi) => hi !== htIdx ? h : { ...h, lanes: h.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: plan.legs.map((leg) => ({ name: leg.name, age: leg.age || 0 })) }) }) }));
-    plan.legs.forEach((leg, i) => update(entryId(evIdx, htIdx, lane) + "#" + i, { scratched: false, tags: {}, notes: "" }));
+    plan.legs.forEach((leg, i) => update(entryId(evIdx, htIdx, lane) + "#" + i, { scratched: false, tags: {}, notes: "", subFor: before[i] && before[i] !== leg.name ? { name: before[i], age: 0 } : null }));
     const conflictLeg = plan.legs.find((leg) => !before.includes(leg.name) && otherSlots.has(leg.name));
     if (conflictLeg) {
       const slot = otherSlots.get(conflictLeg.name);
@@ -1474,7 +1532,7 @@ export default function App() {
                     <div key={ht.num} className={"md-heat" + (isCur ? " cur" : "")}>
                       {!ev.flat && <button className="md-heatbar" onClick={() => setHeatPtr(fi)}><span>Heat {ht.num}</span>{isCur && <span className="md-curpill">On board</span>}</button>}
                       {ht.lanes.map((l) => { const id = entryId(evIdx, htIdx, l.lane);
-                        return <SheetRow key={id} lane={l} d={get(id)} place={finishedEvents[evIdx] ? places[id] : null} rec={records[ev.id]} mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onSwimmer={(leg, el) => openPop(id + "#" + leg, el)} />; })}
+                        return <SheetRow key={id} lane={l} d={get(id)} place={finishedEvents[evIdx] ? places[id] : null} rec={records[ev.id]} mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onSwimmer={(leg, el) => openPop(id + "#" + leg, el)} legData={l.swimmers ? l.swimmers.map((s, i) => get(id + "#" + i)) : null} />; })}
                     </div>
                   ); })}
               </div>
@@ -1534,30 +1592,28 @@ export default function App() {
   );
 }
 
-// Collapsed "previous" scoreboard: shows heat place, 2 at a time, auto-sliding.
-// On-deck: horizontal strip of the next heat, auto-sliding left→right (lane 1 → max).
-// On Deck only ever shows the home team's own swimmers in the upcoming heat.
+// On-deck: horizontal strip of the home team's swimmers in the next heat —
+// all shown at once (shrinking to fit, same tight-space fallback as the
+// pre-start strip) rather than a sliding carousel, since it's already
+// filtered to just the home team and usually only a handful of cards.
 function OnDeckStrip({ heat, homeTeam, onPick }) {
   const lanes = heat ? [...heat.lanes].filter((l) => l.team === homeTeam).sort((a, b) => a.lane - b.lane) : [];
-  const [idx, setIdx] = useState(0);
-  const hold = useRef(0); const tx = useRef(null);
-  const VIS = 2, maxIdx = Math.max(0, lanes.length - VIS);
-  useEffect(() => { setIdx(0); }, [heat && heat.evIdx, heat && heat.htIdx, lanes.length]);
-  useEffect(() => { if (lanes.length <= VIS) return; const t = setInterval(() => { if (Date.now() < hold.current) return; setIdx((i) => (i >= maxIdx ? 0 : i + 1)); }, 1800); return () => clearInterval(t); }, [lanes.length, maxIdx]);
-  const nudge = (d) => { hold.current = Date.now() + 5000; setIdx((i) => Math.min(maxIdx, Math.max(0, i + d))); };
   if (!heat) return <div className="md-odempty">No swimmers on deck.</div>;
   if (!lanes.length) return <div className="md-odempty">No {homeTeam} swimmers in this heat.</div>;
+  const n = lanes.length;
+  const cardW = (400 - 10 - Math.max(0, n - 1) * 3) / n;
+  const tightName = cardW < 70, tightTeam = cardW < 46;
   return (
-    <div className="md-odstrip" onTouchStart={(e) => (tx.current = e.touches[0].clientX)} onTouchEnd={(e) => { if (tx.current === null) return; const dx = e.changedTouches[0].clientX - tx.current; tx.current = null; if (Math.abs(dx) > 40) nudge(dx < 0 ? 1 : -1); }}>
-      <div className="md-odwin"><div className="md-odroll" style={{ transform: `translateX(-${idx * (100 / VIS)}%)` }}>
-        {lanes.map((l) => { const id = entryId(heat.evIdx, heat.htIdx, l.lane);
-          return <button key={l.lane} className="md-odcard mine" onClick={(e) => onPick(id, e.currentTarget)}>
-            <span className="md-odlane">{l.lane}</span>
-            <span className="md-odcname">{l.name}</span>
-            <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{l.team}{l.age ? " · " + l.age : ""}</span>
-            <span className="md-odcseed">{l.seed}</span>
-          </button>; })}
-      </div></div>
+    <div className="md-odstrip all">
+      {lanes.map((l) => { const id = entryId(heat.evIdx, heat.htIdx, l.lane);
+        const teamLabel = tightTeam ? (TEAM_MICRO[l.team] || l.team.slice(0, 2)) : l.team;
+        const nameLabel = tightName ? abbrevName(l.name) : l.name;
+        return <button key={l.lane} className="md-odcard mine sm" title={`${l.name} · ${l.team}${l.age ? " · " + l.age : ""} · seed ${l.seed}`} onClick={(e) => onPick(id, e.currentTarget)}>
+          <span className="md-odlane">{l.lane}</span>
+          <span className="md-odcname">{nameLabel}</span>
+          <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{teamLabel}{l.age ? " · " + l.age : ""}</span>
+          <span className="md-odcseed">{l.seed}</span>
+        </button>; })}
     </div>
   );
 }
@@ -1565,16 +1621,24 @@ function OnDeckStrip({ heat, homeTeam, onPick }) {
 // Pre-start preview of the heat that's about to swim: every lane laid out in
 // one horizontal row, sized to fit the on-deck-sized box without scrolling —
 // distinct from OnDeckStrip's 2-card carousel, which only shows the home team.
+// Falls back to tighter labels (name → initials, team → 2-letter code) once
+// the estimated per-card width can't fit the full versions, rather than
+// scrolling or clipping — full info is still available via the tooltip.
 function AllLanesStrip({ heat, homeTeam, onPick }) {
   const lanes = heat ? [...heat.lanes].sort((a, b) => a.lane - b.lane) : [];
   if (!lanes.length) return <div className="md-odempty">No swimmers in this heat.</div>;
+  const n = lanes.length;
+  const cardW = (400 - 10 - Math.max(0, n - 1) * 3) / n; // panel is 400px wide (see .md-grid)
+  const tightName = cardW < 58, tightTeam = cardW < 42;
   return (
     <div className="md-allstrip">
       {lanes.map((l) => { const id = entryId(heat.evIdx, heat.htIdx, l.lane);
-        return <button key={l.lane} className={"md-odcard allfit" + (l.team === homeTeam ? " mine" : "")} onClick={(e) => onPick(id, e.currentTarget)}>
+        const teamLabel = tightTeam ? (TEAM_MICRO[l.team] || l.team.slice(0, 2)) : l.team;
+        const nameLabel = tightName ? abbrevName(l.name) : l.name;
+        return <button key={l.lane} className={"md-odcard allfit" + (l.team === homeTeam ? " mine" : "")} title={`${l.name} · ${l.team}`} onClick={(e) => onPick(id, e.currentTarget)}>
           <span className="md-odlane">{l.lane}</span>
-          <span className="md-odcname">{l.name}</span>
-          <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{l.team}</span>
+          <span className="md-odcname">{nameLabel}</span>
+          <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{teamLabel}</span>
         </button>; })}
     </div>
   );
@@ -1764,7 +1828,7 @@ function LaneRow({ lane, d, place, rec, active, mine, selected, onSelect, onTime
   );
 }
 
-function SheetRow({ lane, d, place, rec, mine, selected, onSelect, onSwimmer }) {
+function SheetRow({ lane, d, place, rec, mine, selected, onSelect, onSwimmer, legData }) {
   const best = isBest(d.time, lane.seed), br = brokeRecord(d.time, rec), dq = hasDq(d), scr = isScratched(d), ns = isNoShow(d), off = scr || ns, tags = Object.keys(d.tags || {});
   const fs = toSeconds(d.time), ss = toSeconds(lane.seed);
   const delta = !isNaN(fs) && !isNaN(ss) ? fs - ss : null; // negative = improved
@@ -1786,7 +1850,11 @@ function SheetRow({ lane, d, place, rec, mine, selected, onSelect, onSwimmer }) 
           {off ? <span className="md-stime scrx">{ns ? "NS" : "X"}</span> : (d.time && <span className="md-stime">{d.time}</span>)}
         </span>
       </button>
-      {lane.swimmers && <div className="md-relayswim">{lane.swimmers.map((s, i) => <button key={i} className="md-rswim btn" onClick={(e) => onSwimmer && onSwimmer(i, e.currentTarget)}><b>{i + 1}</b> {s.name}{s.age ? ` (${s.age})` : ""}</button>)}</div>}
+      {lane.swimmers && <div className="md-relayswim">{lane.swimmers.map((s, i) => { const ld = (legData && legData[i]) || {}; const scr = isScratched(ld);
+        return <button key={i} className={"md-rswim btn" + (scr ? " scr" : "")} onClick={(e) => onSwimmer && onSwimmer(i, e.currentTarget)}>
+          <b>{i + 1}</b> {s.name}{s.age ? ` (${s.age})` : ""}{scr && <em className="md-subx"> — scratched</em>}
+          {ld.subFor && <em className="md-subnote"> · subbed for <s>{ld.subFor.name}</s></em>}
+        </button>; })}</div>}
     </div>
   );
 }
@@ -1978,10 +2046,12 @@ html, body, #root { height: 100%; }
 .md-timein:focus { outline:2px solid var(--cyan); outline-offset:1px; } .md-timeout { color:var(--cyan); font-weight:700; font-size:12.5px; }
 .md-odlist { padding:6px; display:flex; flex-wrap:wrap; gap:4px; }
 .md-odstrip { padding:5px; }
-.md-odwin { overflow:hidden; }
-.md-odroll { display:flex; transition:transform .5s ease; }
-.md-odcard { flex:0 0 50%; box-sizing:border-box; display:flex; flex-direction:column; gap:1px; padding:6px 10px; background:#0c1c33; border:none; border-right:2px solid var(--ink); color:var(--text); text-align:left; cursor:pointer; border-radius:7px; }
+.md-odstrip.all { display:flex; gap:3px; }
+.md-odcard { flex:1 1 0; min-width:0; box-sizing:border-box; display:flex; flex-direction:column; gap:1px; padding:6px 10px; background:#0c1c33; border:none; color:var(--text); text-align:left; cursor:pointer; border-radius:7px; }
 .md-odcard.mine { box-shadow:inset 3px 0 0 #facc15; }
+.md-odcard.sm { padding:4px 6px; gap:0; }
+.md-odcard.sm .md-odcname { font-size:11px; }
+.md-odcard.sm .md-odcteam, .md-odcard.sm .md-odcseed { font-size:9px; }
 .md-odcard:hover { background:#112741; }
 .md-odlane { font-size:11px; font-weight:900; color:var(--cyan); }
 .md-odcname { font-size:12.5px; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -2246,6 +2316,9 @@ html, body, #root { height: 100%; }
 .md-imchip.on { background:#0ea5e9; border-color:#0ea5e9; color:#fff; }
 .md-rswim.btn { border:1px solid var(--sline); background:#fff; cursor:pointer; padding:3px 8px; border-radius:14px; }
 .md-rswim.btn:hover { border-color:#facc15; background:#fffdf0; }
+.md-rswim.btn.scr { border-color:#fecaca; background:#fef2f2; }
+.md-subx { font-style:normal; color:#b42318; font-weight:800; }
+.md-subnote { font-style:normal; color:#7c3aed; } .md-subnote s { color:#94a3b8; }
 
 .md-lgcount { margin-left:auto; font-size:12px; font-weight:800; color:#64748b; }
 
@@ -2298,7 +2371,7 @@ html, body, #root { height: 100%; }
 .md-panel.prev.grow { flex:2 1 auto; }
 .md-panel.water.prestart { flex:none; max-height:118px; overflow:hidden; }
 .md-allstrip { display:flex; align-items:stretch; gap:3px; padding:5px; height:100%; overflow:hidden; }
-.md-odcard.allfit { flex:1 1 0; min-width:0; border-right:none; padding:6px 6px; }
+.md-odcard.allfit { padding:6px 6px; }
 .md-odcard.allfit .md-odcname, .md-odcard.allfit .md-odcteam { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .md-waiting { font-style:normal; color:var(--muted); font-weight:700; }
 .md-prestartbox { padding:12px; display:flex; flex-direction:column; gap:10px; }
@@ -2370,6 +2443,7 @@ html, body, #root { height: 100%; }
 .md-worktag:hover { border-color:#94a3b8; }
 .md-stime.scrx { color:#ef4444; font-weight:900; }
 .md-lgitem.scr { border-color:#fecaca; }
+.md-partghost { font-size:11.5px; font-weight:700; color:#94a3b8; font-style:italic; }
 .md-partev { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:5px 0; border-bottom:1px solid #eef2f7; }
 .md-partev:last-child { border-bottom:none; }
 .md-partname { font-size:12.5px; font-weight:700; color:#334155; }
