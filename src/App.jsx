@@ -298,7 +298,11 @@ function buildFreeRelaysSeason(meets, ageGroup, gender, excludeByTeam) {
       const boys = timed.filter((x) => x.gender === "Boys").sort((a, b) => a.s - b.s).slice(0, 2);
       picked = [...girls, ...boys];
       if (picked.length < 4) { const used = new Set(picked.map((p) => p.name)); picked = [...picked, ...timed.filter((x) => !used.has(x.name)).sort((a, b) => a.s - b.s)].slice(0, 4); }
-      picked.sort((a, b) => a.s - b.s);
+      // Anchor (last leg) is always the fastest available boy; girls or boys
+      // can fill the other legs, ordered fastest-to-slowest.
+      const anchorIdx = picked.reduce((best, p, i) => (p.gender === "Boys" && (best < 0 || p.s < picked[best].s) ? i : best), -1);
+      if (anchorIdx >= 0) { const anchor = picked[anchorIdx]; picked = [...picked.filter((_, i) => i !== anchorIdx).sort((a, b) => a.s - b.s), anchor]; }
+      else picked.sort((a, b) => a.s - b.s);
     } else {
       picked = timed.sort((a, b) => a.s - b.s).slice(0, 4);
     }
@@ -709,28 +713,52 @@ function relayReplacementCandidatesRaw(events, data, evIdx, htIdx, lane, leg, te
   const rank = (list) => list.map((c) => { const other = otherSlots.get(c.name);
     return { ...c, best: bestStrokeSeed(events, data, c.name, team, stroke), stroke, moveFrom: other || null }; }).sort((a, b) => (a.best ?? Infinity) - (b.best ?? Infinity));
   const pool = teamRoster(events, team).filter((c) => !already.has(c.name));
-  const strict = rank(pool.filter((c) => ageGroupOf(c.age) === group && (evg === "Mixed" || !genderMap[c.name + "|" + team] || genderMap[c.name + "|" + team] === evg))).map((c) => ({ ...c, verified: true }));
+  // For mixed relays, match the SCRATCHED swimmer's own gender (not "any
+  // gender goes") so the 2-girls/2-boys balance — and the boys-anchor rule —
+  // survives a straight swap instead of needing a reshuffle.
+  const scratchedName = relayLane.swimmers[leg] && relayLane.swimmers[leg].name;
+  const requiredGender = evg === "Mixed" ? genderMap[scratchedName + "|" + team] : evg;
+  const strict = rank(pool.filter((c) => ageGroupOf(c.age) === group && (!requiredGender || !genderMap[c.name + "|" + team] || genderMap[c.name + "|" + team] === requiredGender))).map((c) => ({ ...c, verified: true }));
   if (strict.length) return strict.slice(0, 3);
   return rank(pool).slice(0, 3).map((c) => ({ ...c, verified: false }));
 }
 function relayReplacementCandidates(events, data, evIdx, htIdx, lane, leg, team) {
   return relayReplacementCandidatesRaw(events, data, evIdx, htIdx, lane, leg, team).filter((c) => !c.moveFrom || relayMoveIsSafe(events, data, c.name, team, c.moveFrom));
 }
-// Re-optimizes a medley relay's full 4-leg lineup for THIS meet's roster
-// (mixed or single-gender), excluding the scratched swimmer — a scratch here
-// can shuffle who swims what (not just a 1-for-1 swap), same idea as the
-// season-wide relay builder but scoped to who's actually entered today. The
-// pool excludes anyone whose move would cost their other relay ground.
+// Replaces just the scratched leg of a medley relay for THIS meet's roster,
+// keeping the other 3 swimmers exactly where they are — a scratch should
+// only change the scratched swimmer's slot, not reshuffle everyone. Only
+// falls back to a full reshuffle (may touch every leg) when literally no
+// same-gender teammate is available for that specific stroke — e.g. a mixed
+// relay needs a new girl and none is free, so a boy has to move out to make
+// room. The pool excludes anyone whose move would cost their other relay
+// ground (relayMoveIsSafe).
 function medleyReplacementPlan(events, data, evIdx, htIdx, lane, excludeName) {
   const ev = events[evIdx]; if (!ev || !/medley/i.test(ev.name)) return null;
   const ht = ev.heats[htIdx]; const relayLane = ht && ht.lanes.find((l) => l.lane === lane);
-  if (!relayLane) return null;
+  if (!relayLane || !relayLane.swimmers) return null;
   const team = relayLane.team, group = evAgeGroup(ev.name), evg = evGender(ev.name);
   const genderMap = swimmerGenderMap(events);
+  const legIdx = relayLane.swimmers.findIndex((s) => s.name === excludeName);
+  if (legIdx < 0) return null;
+  const stroke = MEDLEY_LEGS[legIdx] || "Free";
+  const requiredGender = evg === "Mixed" ? genderMap[excludeName + "|" + team] : evg;
+  const already = new Set(relayLane.swimmers.map((s) => s.name));
+  const poolRaw = teamRoster(events, team).filter((c) => !already.has(c.name) && ageGroupOf(c.age) === group)
+    .map((c) => ({ ...c, gender: genderMap[c.name + "|" + team] }));
+  const pool = filterSafeMoveCandidates(events, data, poolRaw, team);
+  const eligible = pool.filter((c) => !requiredGender || !c.gender || c.gender === requiredGender)
+    .map((c) => ({ ...c, s: bestStrokeSeed(events, data, c.name, team, stroke) })).filter((c) => c.s != null).sort((a, b) => a.s - b.s);
+  if (eligible.length) {
+    const pick = eligible[0];
+    const legs = relayLane.swimmers.map((s, i) => { if (i === legIdx) return { name: pick.name, age: pick.age, gender: pick.gender || requiredGender, stroke, s: pick.s };
+      const st = MEDLEY_LEGS[i] || "Free"; return { name: s.name, age: s.age, gender: genderMap[s.name + "|" + team], stroke: st, s: bestStrokeSeed(events, data, s.name, team, st) ?? 0 }; });
+    return { legs, total: legs.reduce((a, l) => a + l.s, 0) };
+  }
   const rosterRaw = teamRoster(events, team).filter((c) => c.name !== excludeName && ageGroupOf(c.age) === group)
     .map((c) => ({ ...c, gender: genderMap[c.name + "|" + team] }));
   const roster = filterSafeMoveCandidates(events, data, rosterRaw, team);
-  const timeOf = (name, stroke) => bestStrokeSeed(events, data, name, team, stroke);
+  const timeOf = (name, s) => bestStrokeSeed(events, data, name, team, s);
   return evg === "Mixed" ? optimalMixedMedley(roster, timeOf) : optimalMedley(roster.filter((c) => !c.gender || c.gender === evg), timeOf);
 }
 
@@ -1232,6 +1260,46 @@ function simulateRelayField(projected, iters = 3000) {
   const out = {}; projected.forEach((r) => (out[r.team] = wins[r.team] / iters)); return out;
 }
 
+// Drag-and-drop lineup editor for one team's relay: 4 leg slots plus a bench
+// of the rest of the team's roster. Drop a bench chip onto a leg to swap
+// them in; drop a leg chip onto another leg to swap the two swimmers'
+// positions. Built on Pointer Events (not native HTML5 drag-and-drop, which
+// iOS/iPadOS Safari doesn't support for touch) with setPointerCapture so the
+// gesture keeps tracking the finger/cursor regardless of what's underneath;
+// the actual drop target is resolved via elementFromPoint since captured
+// pointers don't fire hover/enter events on other elements.
+function RelayLegDragBoard({ legs, bench, relayType, onAssign }) {
+  const dragRef = useRef(null);
+  const [overLeg, setOverLeg] = useState(null);
+  const [draggingName, setDraggingName] = useState(null);
+  const legAt = (x, y) => { const el = document.elementFromPoint(x, y); const slot = el && el.closest && el.closest("[data-leg-idx]"); return slot ? Number(slot.getAttribute("data-leg-idx")) : null; };
+  const onDown = (e, name, source, legIdx) => { dragRef.current = { name, source, legIdx }; setDraggingName(name); e.currentTarget.setPointerCapture(e.pointerId); e.preventDefault(); };
+  const onMove = (e) => { if (!dragRef.current) return; setOverLeg(legAt(e.clientX, e.clientY)); };
+  const endDrag = (e) => { if (!dragRef.current) return; const idx = legAt(e.clientX, e.clientY); if (idx != null) onAssign(dragRef.current, idx); dragRef.current = null; setDraggingName(null); setOverLeg(null); };
+  const chip = (name, age, gender, source, legIdx, cls) => (
+    <button key={name} type="button" className={"md-rbchip" + (cls ? " " + cls : "") + (draggingName === name ? " dragging" : "")} style={{ touchAction: "none" }}
+      onPointerDown={(e) => onDown(e, name, source, legIdx)} onPointerMove={onMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
+      {gender && <em className={"md-gtick " + gender.toLowerCase()}>{gender[0]}</em>}{name}{age ? ` (${age})` : ""}
+    </button>
+  );
+  return (
+    <div className="md-rbdrag">
+      <div className="md-rbdraglegs">
+        {legs.map((l, i) => (
+          <div key={i} data-leg-idx={i} className={"md-rbdragleg" + (overLeg === i ? " over" : "")}>
+            {relayType === "Medley" && <span className="md-rbeditstroke">{l.stroke}</span>}
+            {chip(l.name, l.age, l.gender, "leg", i)}
+          </div>
+        ))}
+      </div>
+      <div className="md-rbbenchlabel">Drag a name onto a leg to swap it in — drag between legs to swap positions</div>
+      <div className="md-rbbench">
+        {bench.length ? bench.map((c) => chip(c.name, c.age, c.gender, "bench", null, "bench")) : <span className="md-rbbenchempty">No one else on the roster for this age group.</span>}
+      </div>
+    </div>
+  );
+}
+
 // Relay builder: fastest 4-swimmer relay per team built from the WHOLE
 // SEASON (not just the loaded meet) — Free or Medley, home team highlighted,
 // ranked by projected time (each swimmer's improvement trend factored in)
@@ -1257,7 +1325,14 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const genderMap = useMemo(() => seasonGenderMap(meets), [meets]);
   const keyFor = (team, type) => (type || relayType) + "|" + ag + "|" + team;
   const otherType = relayType === "Free" ? "Medley" : "Free";
-  const excludeByTeam = (team) => { const other = locked[keyFor(team, otherType)]; return other ? new Set(other.swimmers.map((s) => s.name)) : null; };
+  // If a team doesn't have 8+ swimmers in this age group, there just aren't
+  // enough people for two fully-distinct A squads — let someone swim both
+  // instead of leaving a relay short. Only enforce "one A relay per person"
+  // when the roster is deep enough to reasonably expect it.
+  const excludeByTeam = (team) => { const other = locked[keyFor(team, otherType)]; if (!other) return null;
+    const depth = seasonRoster(meets, team).filter((c) => ageGroupOf(c.age) === ag).length;
+    if (depth < 8) return null;
+    return new Set(other.swimmers.map((s) => s.name)); };
   const baseRelays = useMemo(() => relayType === "Medley" ? buildMedleyRelaysSeason(meets, ag, gender, excludeByTeam) : buildFreeRelaysSeason(meets, ag, gender, excludeByTeam), [meets, ag, gender, relayType, locked]);
   const relays = useMemo(() => baseRelays.map((r) => { const key = keyFor(r.team); if (locked[key]) return locked[key]; return applyRelayOverride(r, overrides[key], meets, ag, genderMap); }).sort((a, b) => a.total - b.total), [baseRelays, overrides, locked, meets, ag, genderMap, relayType]);
   const projected = useMemo(() => relays.map((r) => projectRelay(r, meets)).sort((a, b) => a.projTotal - b.projTotal), [relays, meets]);
@@ -1266,6 +1341,10 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const setLeg = (team, legIdx, name) => { const key = keyFor(team); setOverrides((o) => { const cur = (o[key] || [null, null, null, null]).slice(); cur[legIdx] = name || null; return { ...o, [key]: cur }; });
     setLocked((l) => { if (!l[key]) return l; const { [key]: _, ...rest } = l; return rest; }); };
   const toggleLock = (r) => { const key = keyFor(r.team); setLocked((l) => { if (l[key]) { const { [key]: _, ...rest } = l; return rest; } return { ...l, [key]: r }; }); };
+  const onAssign = (r, drag, targetIdx) => {
+    if (drag.source === "leg") { if (drag.legIdx === targetIdx) return; setLeg(r.team, targetIdx, drag.name); setLeg(r.team, drag.legIdx, r.legs[targetIdx].name); }
+    else setLeg(r.team, targetIdx, drag.name);
+  };
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
@@ -1287,15 +1366,12 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
               </div>
               {editing === r.team ? (
                 <div className="md-rbeditgrid">
-                  {r.legs.map((l, j) => (
-                    <label key={j} className="md-rbeditleg">
-                      {relayType === "Medley" && <span className="md-rbeditstroke">{l.stroke}</span>}
-                      <select value={l.name} onChange={(e) => setLeg(r.team, j, e.target.value)}>
-                        <option value={l.name}>{l.name}{l.age ? ` (${l.age})` : ""}</option>
-                        {roster.filter((c) => c.name !== l.name).map((c) => <option key={c.name} value={c.name}>{c.name}{c.age ? ` (${c.age})` : ""}{genderMap[c.name + "|" + r.team] ? " · " + genderMap[c.name + "|" + r.team][0] : ""}</option>)}
-                      </select>
-                    </label>
-                  ))}
+                  <RelayLegDragBoard
+                    legs={r.legs}
+                    bench={roster.filter((c) => !r.legs.some((l) => l.name === c.name)).map((c) => ({ ...c, gender: genderMap[c.name + "|" + r.team] }))}
+                    relayType={relayType}
+                    onAssign={(drag, targetIdx) => onAssign(r, drag, targetIdx)}
+                  />
                   {hasOverride && <button className="md-rbreset" onClick={() => setOverrides((o) => ({ ...o, [key]: null }))}>↺ Reset to auto-picked</button>}
                 </div>
               ) : (
@@ -1491,6 +1567,9 @@ export default function App() {
   }, [curKey, curHeatComplete, flatHeats.length]);
   const prevList = useMemo(() => previous ? [...previous.lanes].map((l) => { const id = entryId(previous.evIdx, previous.htIdx, l.lane); return { id, l, time: (data[id] || {}).time, place: prevHeatPlaces[id] }; }).sort((a, b) => (a.place || 99) - (b.place || 99) || a.l.lane - b.l.lane) : [], [previous, data, prevHeatPlaces]);
   const [toast, setToast] = useState("");
+  const [relayUndo, setRelayUndo] = useState(null); // { label, fn }
+  const relayUndoTimer = useRef(null);
+  const pushRelayUndo = (label, fn) => { setRelayUndo({ label, fn }); if (relayUndoTimer.current) clearTimeout(relayUndoTimer.current); relayUndoTimer.current = setTimeout(() => setRelayUndo(null), 8000); };
   const [seasonMeets, setSeasonMeets] = useState([]);
   const progMeets = useMemo(() => [{ date: "This meet", meetName, events, data }, ...seasonMeets], [meetName, events, data, seasonMeets]);
   const relayCandidates = useMemo(() => relayReplaceTarget ? relayReplacementCandidates(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, relayReplaceTarget.team) : [], [relayReplaceTarget, events, data]);
@@ -1535,9 +1614,16 @@ export default function App() {
   // slot and chain straight into a replacement popup for it.
   const swapRelaySwimmer = (evIdx, htIdx, lane, leg, candidate) => {
     const outgoing = events[evIdx]?.heats[htIdx]?.lanes.find((l) => l.lane === lane)?.swimmers[leg];
+    const legId = entryId(evIdx, htIdx, lane) + "#" + leg;
+    const prevLegData = data[legId];
     setEvents((evs) => evs.map((ev, ei) => ei !== evIdx ? ev : { ...ev, heats: ev.heats.map((ht, hi) => hi !== htIdx ? ht : { ...ht, lanes: ht.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: l.swimmers.map((s, i) => i !== leg ? s : { name: candidate.name, age: candidate.age || 0 }) }) }) }));
-    update(entryId(evIdx, htIdx, lane) + "#" + leg, { scratched: false, tags: {}, notes: "", subFor: outgoing ? { name: outgoing.name, age: outgoing.age || 0 } : null });
+    update(legId, { scratched: false, tags: {}, notes: "", subFor: outgoing ? { name: outgoing.name, age: outgoing.age || 0 } : null });
     flash(candidate.name + " swapped in for " + (relayReplaceTarget ? relayReplaceTarget.name : "scratched swimmer"));
+    pushRelayUndo(candidate.name + " swapped in for " + (outgoing ? outgoing.name : "scratched swimmer"), () => {
+      setEvents((evs) => evs.map((ev, ei) => ei !== evIdx ? ev : { ...ev, heats: ev.heats.map((ht, hi) => hi !== htIdx ? ht : { ...ht, lanes: ht.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: l.swimmers.map((s, i) => i !== leg ? s : (outgoing || s)) }) }) }));
+      update(legId, prevLegData || { time: "", dqs: [], tags: {}, notes: "" });
+      flash("Undone");
+    });
     if (candidate.moveFrom) {
       const slot = candidate.moveFrom;
       update(entryId(slot.evIdx, slot.htIdx, slot.lane) + "#" + slot.leg, { scratched: true });
@@ -1551,10 +1637,16 @@ export default function App() {
   // vacate that slot and chain into its replacement popup too.
   const applyRelayPlan = (evIdx, htIdx, lane, plan) => {
     const ev = events[evIdx], ht = ev.heats[htIdx], relayLane = ht.lanes.find((l) => l.lane === lane);
-    const team = relayLane.team, before = relayLane.swimmers.map((s) => s.name);
+    const team = relayLane.team, prevSwimmers = relayLane.swimmers, before = prevSwimmers.map((s) => s.name);
+    const prevLegDatas = prevSwimmers.map((s, i) => data[entryId(evIdx, htIdx, lane) + "#" + i]);
     const otherSlots = relaySlotsByTeam(events, team);
     setEvents((evs) => evs.map((e, ei) => ei !== evIdx ? e : { ...e, heats: e.heats.map((h, hi) => hi !== htIdx ? h : { ...h, lanes: h.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: plan.legs.map((leg) => ({ name: leg.name, age: leg.age || 0 })) }) }) }));
     plan.legs.forEach((leg, i) => update(entryId(evIdx, htIdx, lane) + "#" + i, { scratched: false, tags: {}, notes: "", subFor: before[i] && before[i] !== leg.name ? { name: before[i], age: 0 } : null }));
+    pushRelayUndo("Lineup updated for " + team, () => {
+      setEvents((evs) => evs.map((e, ei) => ei !== evIdx ? e : { ...e, heats: e.heats.map((h, hi) => hi !== htIdx ? h : { ...h, lanes: h.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: prevSwimmers }) }) }));
+      prevLegDatas.forEach((pd, i) => update(entryId(evIdx, htIdx, lane) + "#" + i, pd || { time: "", dqs: [], tags: {}, notes: "" }));
+      flash("Undone");
+    });
     const conflictLeg = plan.legs.find((leg) => !before.includes(leg.name) && otherSlots.has(leg.name));
     if (conflictLeg) {
       const slot = otherSlots.get(conflictLeg.name);
@@ -1573,7 +1665,9 @@ export default function App() {
   const popInfo = useMemo(() => swimmerAt(pop?.id), [pop, swimmerAt]);
   const dqInfo = useMemo(() => swimmerAt(dqTarget), [dqTarget, swimmerAt]);
   const openPop = (id, el) => setPop({ id, rect: el.getBoundingClientRect() });
-  const applyImport = (parsed) => { setEvents(parsed.events); setRecords(Object.fromEntries(parsed.events.filter((e) => e.record).map((e) => [e.id, e.record]))); if (parsed.myTeam) setHomeTeam(parsed.myTeam); setData({}); setPop(null); setHeatPtr(0); setModal(null); };
+  // Return to Meet setup (not closing out entirely) so lanes-per-heat — which
+  // depends on the just-imported roster — can be adjusted right away.
+  const applyImport = (parsed) => { setEvents(parsed.events); setRecords(Object.fromEntries(parsed.events.filter((e) => e.record).map((e) => [e.id, e.record]))); if (parsed.myTeam) setHomeTeam(parsed.myTeam); setData({}); setPop(null); setHeatPtr(0); setModal("meetsetup"); };
   const scrollToEvent = (evId) => { const el = evRefs.current[evId]; if (el && sheetRef.current) sheetRef.current.scrollTo({ top: el.offsetTop - 8, behavior: "smooth" }); };
   const jumpToCurrent = () => scrollToEvent(current?.evId);
   // Jump the whole board (heat pointer) to the first heat of an event by index,
@@ -1716,7 +1810,8 @@ export default function App() {
         }} />}
       {modal === "stats" && <StatsModal onClose={() => setModal(null)} events={events} data={data} mode={mode} filter={filter} homeTeam={homeTeam} />}
       {modal === "participants" && <ParticipantsModal onClose={() => setModal(null)} events={events} data={data} homeTeam={homeTeam}
-        onOne={(entry, val) => { update(entry.id, { scratched: val }); if (val && entry.relay) setRelayReplaceTarget({ evIdx: entry.evIdx, htIdx: entry.htIdx, lane: entry.relayLane, leg: entry.leg, name: entry.name, team: entry.team, eventName: events[entry.evIdx]?.name || entry.ev }); }}
+        onOne={(entry, val) => { update(entry.id, { scratched: val });
+          if (val && entry.relay) { pushRelayUndo("Scratched " + entry.name, () => { update(entry.id, { scratched: false }); flash("Undone"); }); setRelayReplaceTarget({ evIdx: entry.evIdx, htIdx: entry.htIdx, lane: entry.relayLane, leg: entry.leg, name: entry.name, team: entry.team, eventName: events[entry.evIdx]?.name || entry.ev }); } }}
         onAll={(name, team, val) => scratchAll(name, team, val)} />}
       {modal === "league" && <LeagueModal onClose={() => setModal(null)} meets={seasonMeets} homeTeam={homeTeam} liveMeet={{ meetName, mode, events, data }} />}
       {modal === "season" && <SeasonModal onClose={() => setModal(null)} homeTeam={homeTeam} meets={seasonMeets} />}
@@ -1727,8 +1822,12 @@ export default function App() {
         <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
           <div className="md-mhead"><div><div className="md-mtitle">Scratch {scratchTarget.name}?</div><div className="md-msub">Scratched swims are crossed out and don't score or place.</div></div><button className="md-x" onClick={() => setScratchTarget(null)}>✕</button></div>
           <div className="md-scratchbtns">
-            <button className="md-mbtn" onClick={() => { scratchOne(scratchTarget.id); setPop(null); if (scratchTarget.relay) setRelayReplaceTarget({ evIdx: scratchTarget.evIdx, htIdx: scratchTarget.htIdx, lane: scratchTarget.lane, leg: scratchTarget.leg, name: scratchTarget.name, team: scratchTarget.team, eventName: scratchTarget.eventName }); setScratchTarget(null); }}>{scratchTarget.relay ? "Just this relay" : "Just this event"}</button>
-            <button className="md-mbtn danger" onClick={() => { scratchAll(scratchTarget.name, scratchTarget.team); setPop(null); if (scratchTarget.relay) setRelayReplaceTarget({ evIdx: scratchTarget.evIdx, htIdx: scratchTarget.htIdx, lane: scratchTarget.lane, leg: scratchTarget.leg, name: scratchTarget.name, team: scratchTarget.team, eventName: scratchTarget.eventName }); setScratchTarget(null); }}>Whole meet (all events)</button>
+            <button className="md-mbtn" onClick={() => { scratchOne(scratchTarget.id); setPop(null);
+              if (scratchTarget.relay) { pushRelayUndo("Scratched " + scratchTarget.name, () => { unscratchOne(scratchTarget.id); flash("Undone"); }); setRelayReplaceTarget({ evIdx: scratchTarget.evIdx, htIdx: scratchTarget.htIdx, lane: scratchTarget.lane, leg: scratchTarget.leg, name: scratchTarget.name, team: scratchTarget.team, eventName: scratchTarget.eventName }); }
+              setScratchTarget(null); }}>{scratchTarget.relay ? "Just this relay" : "Just this event"}</button>
+            <button className="md-mbtn danger" onClick={() => { scratchAll(scratchTarget.name, scratchTarget.team); setPop(null);
+              if (scratchTarget.relay) { pushRelayUndo("Scratched " + scratchTarget.name + " (whole meet)", () => { scratchAll(scratchTarget.name, scratchTarget.team, false); flash("Undone"); }); setRelayReplaceTarget({ evIdx: scratchTarget.evIdx, htIdx: scratchTarget.htIdx, lane: scratchTarget.lane, leg: scratchTarget.leg, name: scratchTarget.name, team: scratchTarget.team, eventName: scratchTarget.eventName }); }
+              setScratchTarget(null); }}>Whole meet (all events)</button>
             <button className="md-cancel" onClick={() => setScratchTarget(null)}>Cancel</button>
           </div>
         </div>
@@ -1736,7 +1835,8 @@ export default function App() {
       {relayReplaceTarget && <RelayReplaceModal target={relayReplaceTarget} candidates={relayCandidates} plan={medleyPlan} originalLegs={relayOriginalLegs} onClose={() => setRelayReplaceTarget(null)}
         onSwap={(c) => swapRelaySwimmer(relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, c)}
         onApplyPlan={() => applyRelayPlan(relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, medleyPlan)} />}
-      {toast && <div className="md-toast">{toast}</div>}
+      {relayUndo && <div className="md-toast md-toastundo"><span>{relayUndo.label}</span><button className="md-undobtn" onClick={() => { relayUndo.fn(); setRelayUndo(null); }}>Undo</button></div>}
+      {toast && !relayUndo && <div className="md-toast">{toast}</div>}
       {modal === "relay" && <RelayBuilderModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} />}
       {modal === "export" && <ExportModal onClose={() => setModal(null)} events={events} data={data} myTeam={homeTeam} places={places} records={records} meetName={meetName} />}
       {relaySplits && current && isRelayEvent(current.eventName) && <RelaySplitsPanel heat={current} evIdx={current.evIdx} htIdx={current.htIdx} data={data} homeTeam={homeTeam} onClose={() => setRelaySplits(false)} update={update} get={get} openPop={openPop} />}
@@ -2436,11 +2536,19 @@ html, body, #root { height: 100%; }
 .md-rbtab.on { background:#fff; color:#0f2036; box-shadow:0 1px 3px rgba(0,0,0,.15); }
 .md-rbedit { margin-left:auto; padding:4px 9px; border-radius:7px; border:1px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:11px; cursor:pointer; }
 .md-rbedit.on { border-color:#7c3aed; color:#7c3aed; background:#f5f3ff; }
-.md-rbeditgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-bottom:4px; }
-.md-rbeditleg { display:flex; flex-direction:column; gap:2px; }
-.md-rbeditstroke { font-size:9.5px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:#0e7490; }
-.md-rbeditleg select { padding:6px 8px; border-radius:8px; border:1px solid var(--sline); background:#fff; font-size:12.5px; font-weight:600; color:var(--sink); }
-.md-rbreset { grid-column:1/-1; padding:6px; border-radius:8px; border:1px dashed var(--sline); background:#fff; color:#7c3aed; font-weight:700; font-size:11.5px; cursor:pointer; }
+.md-rbeditgrid { display:flex; flex-direction:column; gap:8px; margin-bottom:4px; }
+.md-rbeditstroke { font-size:9.5px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:#0e7490; display:block; margin-bottom:3px; }
+.md-rbreset { padding:6px; border-radius:8px; border:1px dashed var(--sline); background:#fff; color:#7c3aed; font-weight:700; font-size:11.5px; cursor:pointer; }
+.md-rbdrag { background:#f8fafc; border:1px solid var(--sline); border-radius:10px; padding:10px; }
+.md-rbdraglegs { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; margin-bottom:10px; }
+.md-rbdragleg { border:2px dashed transparent; border-radius:9px; padding:2px; transition:border-color .1s; }
+.md-rbdragleg.over { border-color:#0e7490; background:#ecfeff; }
+.md-rbchip { width:100%; display:flex; align-items:center; gap:5px; padding:8px 10px; border-radius:8px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:12.5px; color:var(--sink); cursor:grab; user-select:none; }
+.md-rbchip:active, .md-rbchip.dragging { cursor:grabbing; opacity:.45; box-shadow:0 4px 10px rgba(0,0,0,.15); }
+.md-rbchip.bench { background:#fff; border-style:dashed; color:#475569; font-weight:600; }
+.md-rbbenchlabel { font-size:10.5px; color:#94a3b8; font-weight:700; margin-bottom:6px; }
+.md-rbbench { display:flex; flex-wrap:wrap; gap:6px; }
+.md-rbbenchempty { font-size:12px; color:#94a3b8; }
 .md-rbprob { display:flex; align-items:center; gap:8px; margin-top:6px; }
 .md-rbprobbar { flex:1; height:8px; border-radius:5px; background:#eef2f7; overflow:hidden; }
 .md-rbprobfill { height:100%; background:#10b981; }
@@ -2545,6 +2653,9 @@ html, body, #root { height: 100%; }
 
 .md-statrow.mine { background:#fffdf0; box-shadow:inset 3px 0 0 #facc15; border-radius:6px; }
 .md-toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); z-index:80; background:#0f2036; color:#fff; padding:12px 20px; border-radius:12px; font-weight:800; font-size:14px; box-shadow:0 16px 40px -12px rgba(0,0,0,.6); }
+.md-toastundo { display:flex; align-items:center; gap:14px; }
+.md-undobtn { background:var(--cyan); color:#062a33; border:none; border-radius:8px; padding:6px 12px; font-weight:900; font-size:13px; cursor:pointer; }
+.md-undobtn:hover { background:#5fe3f5; }
 
 .md-gear { position:fixed; left:16px; bottom:16px; z-index:35; width:52px; height:52px; border-radius:50%; border:none; background:#0f2036; color:#fff; font-size:24px; cursor:pointer; box-shadow:0 10px 30px -8px rgba(0,0,0,.6); }
 .md-gear:hover { background:#1a3050; }
