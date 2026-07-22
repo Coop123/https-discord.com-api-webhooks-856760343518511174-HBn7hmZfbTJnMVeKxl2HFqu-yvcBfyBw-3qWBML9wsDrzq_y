@@ -24,6 +24,13 @@ function abbrevName(name) {
   if (m.length < 2 || !m[0] || !m[1]) return name;
   return (m[1][0] + m[0][0]).toUpperCase();
 }
+// "Last, First" → "First" (e.g. "Wong, Madelyn" → "Madelyn"); any remaining
+// overflow is left for CSS text-overflow:ellipsis to truncate.
+function firstNameOnly(name) {
+  const m = (name || "").split(",").map((s) => s.trim());
+  if (m.length < 2 || !m[1]) return name;
+  return m[1].split(" ")[0];
+}
 const STORE = (typeof window !== "undefined" && window.storage) ? window.storage : null;
 const CUR_KEY = "meetdeck:current:v1";
 const INDEX_KEY = "meetdeck:index:v1";
@@ -959,16 +966,16 @@ const LEAGUE_SORTS = {
   power: (a, b) => b.power - a.power,
   pf: (a, b) => b.pf - a.pf,
 };
-function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
+function LeagueModal({ onClose, meets, homeTeam, liveMeet, initialProfile, initialAgeFilter, initialTeam }) {
   const [filterGender, setFilterGender] = useState("All");
-  const [filterAge, setFilterAge] = useState("All");
+  const [filterAge, setFilterAge] = useState(initialAgeFilter || "All");
   const [filterStroke, setFilterStroke] = useState("All");
   const power = useMemo(() => computePower(meets, { gender: filterGender, ageGroup: filterAge, stroke: filterStroke }), [meets, filterGender, filterAge, filterStroke]);
   const standings = useMemo(() => computeStandings(meets), [meets]);
   const teams = useMemo(() => [...new Set(Object.values(power).map((s) => s.team))].sort(), [power]);
   const teamPower = (t) => { const arr = Object.values(power).filter((s) => s.team === t && s.power != null); return arr.length ? Math.round(arr.reduce((a, b) => a + b.power, 0) / arr.length) : 0; };
-  const [sel, setSel] = useState(null);
-  const [profile, setProfile] = useState(null);
+  const [sel, setSel] = useState(initialTeam || (initialProfile && initialProfile.team) || null);
+  const [profile, setProfile] = useState(initialProfile || null);
   const [sort, setSort] = useState("record");
   const [rosterSort, setRosterSort] = useState("power");
   const rows = teams.map((t) => ({ team: t, ...(standings[t] || { w: 0, l: 0, tie: 0, pf: 0, pa: 0, meets: [] }), power: teamPower(t) })).sort(LEAGUE_SORTS[sort]);
@@ -1567,6 +1574,7 @@ export default function App() {
   }, [curKey, curHeatComplete, flatHeats.length]);
   const prevList = useMemo(() => previous ? [...previous.lanes].map((l) => { const id = entryId(previous.evIdx, previous.htIdx, l.lane); return { id, l, time: (data[id] || {}).time, place: prevHeatPlaces[id] }; }).sort((a, b) => (a.place || 99) - (b.place || 99) || a.l.lane - b.l.lane) : [], [previous, data, prevHeatPlaces]);
   const [toast, setToast] = useState("");
+  const [leagueJump, setLeagueJump] = useState(null); // { profile: {name, team} } | { ageFilter } - seeds LeagueModal on open
   const [relayUndo, setRelayUndo] = useState(null); // { label, fn }
   const relayUndoTimer = useRef(null);
   const pushRelayUndo = (label, fn) => { setRelayUndo({ label, fn }); if (relayUndoTimer.current) clearTimeout(relayUndoTimer.current); relayUndoTimer.current = setTimeout(() => setRelayUndo(null), 8000); };
@@ -1790,7 +1798,9 @@ export default function App() {
         <div className="md-povscrim" onClick={() => setPop(null)} />
         <ActionPopover info={popInfo} d={get(pop.id)} mine={popInfo.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(popInfo.eventName)} hideSplits={popInfo.leg !== undefined} relaySwimmer={popInfo.leg !== undefined} progMeets={progMeets} rect={pop.rect} onClose={() => setPop(null)} onDq={() => { setDqTarget(popInfo.relayBase || pop.id); setDqSwimmer(popInfo.leg !== undefined ? popInfo.sw.name : null); setPop(null); }} onToggle={(k) => toggleTag(pop.id, k)} onSplits={(a) => update(pop.id, { splits: a })} onNotes={(v) => update(pop.id, { notes: v })} onNoShow={() => update(pop.id, { noshow: !isNoShow(get(pop.id)) })}
           onScratch={() => { setScratchTarget({ id: pop.id, name: popInfo.sw.name, team: popInfo.sw.team, evIdx: popInfo.ei, htIdx: popInfo.hi, lane: popInfo.ln, relay: popInfo.leg !== undefined, leg: popInfo.leg, eventName: popInfo.eventName }); setPop(null); }}
-          onUnscratch={() => unscratchOne(pop.id)} />
+          onUnscratch={() => unscratchOne(pop.id)}
+          onOpenProfile={() => { setLeagueJump({ profile: { name: popInfo.sw.name, team: popInfo.sw.team } }); setModal("league"); setPop(null); }}
+          onOpenAgeGroup={() => { setLeagueJump({ ageFilter: ageGroupOf(popInfo.sw.age) }); setModal("league"); setPop(null); }} />
       </>)}
       {dqInfo && <DQModal info={dqInfo} dqs={get(dqTarget).dqs || []} swimmer={dqSwimmer} onClose={() => { setDqTarget(null); setDqSwimmer(null); }}
         onClear={() => update(dqTarget, { dqs: [] })}
@@ -1813,7 +1823,7 @@ export default function App() {
         onOne={(entry, val) => { update(entry.id, { scratched: val });
           if (val && entry.relay) { pushRelayUndo("Scratched " + entry.name, () => { update(entry.id, { scratched: false }); flash("Undone"); }); setRelayReplaceTarget({ evIdx: entry.evIdx, htIdx: entry.htIdx, lane: entry.relayLane, leg: entry.leg, name: entry.name, team: entry.team, eventName: events[entry.evIdx]?.name || entry.ev }); } }}
         onAll={(name, team, val) => scratchAll(name, team, val)} />}
-      {modal === "league" && <LeagueModal onClose={() => setModal(null)} meets={seasonMeets} homeTeam={homeTeam} liveMeet={{ meetName, mode, events, data }} />}
+      {modal === "league" && <LeagueModal key={leagueJump ? JSON.stringify(leagueJump) : "plain"} onClose={() => { setModal(null); setLeagueJump(null); }} meets={seasonMeets} homeTeam={homeTeam} liveMeet={{ meetName, mode, events, data }} initialProfile={leagueJump?.profile || null} initialAgeFilter={leagueJump?.ageFilter || null} initialTeam={leagueJump?.profile?.team || null} />}
       {modal === "season" && <SeasonModal onClose={() => setModal(null)} homeTeam={homeTeam} meets={seasonMeets} />}
       {modal === "meetsetup" && <MeetSetupModal onClose={() => setModal(null)} meetName={meetName} setMeetName={setMeetName} meetDate={meetDate} setMeetDate={setMeetDate} mode={mode} setMode={setMode} dualLanes={dualLanes} setDualLanes={setDualLanes} hostTeam={hostTeam} setHostTeam={setHostTeam} awayTeam={awayTeam} setAwayTeam={setAwayTeam} teams={teamsPresent} onImport={() => setModal("import")} />}
       {modal === "settings" && <SettingsModal onClose={() => setModal(null)} homeTeam={homeTeam} setHomeTeam={setHomeTeam} teams={teamsPresent} onMeetSetup={() => setModal("meetsetup")} onResults={() => setModal("results")} onSave={() => saveToSeason()} onExport={() => setModal("export")} onClear={clearData} meets={seasonMeets} onLoad={loadMeet} onDelete={deleteMeet} />}
@@ -1881,12 +1891,12 @@ function AllLanesStrip({ heat, homeTeam, onPick }) {
   if (!lanes.length) return <div className="md-odempty">No swimmers in this heat.</div>;
   const n = lanes.length;
   const cardW = (400 - 10 - Math.max(0, n - 1) * 3) / n; // panel is 400px wide (see .md-grid)
-  const tightName = cardW < 58, tightTeam = cardW < 42;
+  const tightTeam = cardW < 42;
   return (
     <div className="md-allstrip">
       {lanes.map((l) => { const id = entryId(heat.evIdx, heat.htIdx, l.lane);
         const teamLabel = tightTeam ? (TEAM_MICRO[l.team] || l.team.slice(0, 2)) : l.team;
-        const nameLabel = tightName ? abbrevName(l.name) : l.name;
+        const nameLabel = firstNameOnly(l.name);
         return <button key={l.lane} className={"md-odcard allfit" + (l.team === homeTeam ? " mine" : "")} title={`${l.name} · ${l.team}`} onClick={(e) => onPick(id, e.currentTarget)}>
           <span className="md-odlane">{l.lane}</span>
           <span className="md-odcname">{nameLabel}</span>
@@ -2112,7 +2122,7 @@ function SheetRow({ lane, d, place, rec, mine, selected, onSelect, onSwimmer, le
   );
 }
 
-function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progMeets, rect, onClose, onDq, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch }) {
+function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progMeets, rect, onClose, onDq, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenProfile, onOpenAgeGroup }) {
   const ref = useRef(null);
   const [pos, setPos] = useState({ top: rect.bottom + 10, left: rect.left, above: false, caret: 24 });
   const [openCat, setOpenCat] = useState(null);
@@ -2133,7 +2143,7 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progM
   return (
     <div ref={ref} className={"md-pov" + (pos.above ? " above" : "")} style={{ top: pos.top, left: pos.left }} role="dialog">
       <span className="md-caret" style={{ left: pos.caret }} />
-      <div className="md-povhead"><div><div className="md-povname">{info.sw.name} {info.sw.age > 0 && <span className="md-agechip">{info.sw.age}</span>}<span className="md-povteam" style={{ color: teamColor(info.sw.team) }}>{info.sw.team}</span></div><div className="md-povmeta">{shortEvent(info.eventName)} · H{info.heatNum} · Lane {info.ln}{info.sw.seed ? ` · seed ${info.sw.seed}` : ""}</div></div><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-povhead"><div><div className="md-povname"><span className="md-povnamelink" onClick={() => onOpenProfile && onOpenProfile()}>{info.sw.name}</span> {info.sw.age > 0 && <span className="md-agechip" onClick={() => onOpenAgeGroup && onOpenAgeGroup()}>{info.sw.age}</span>}<span className="md-povteam" style={{ color: teamColor(info.sw.team) }}>{info.sw.team}</span></div><div className="md-povmeta">{shortEvent(info.eventName)} · H{info.heatNum} · Lane {info.ln}{info.sw.seed ? ` · seed ${info.sw.seed}` : ""}</div></div><button className="md-x sm" onClick={onClose}>✕</button></div>
       <div className="md-povtop">
         <button className={"md-dq" + (dq ? " on" : "")} onClick={onDq}>{dq ? `DQ ${dqLabel(d)}` : "Record DQ(s)"}</button>
       </div>
@@ -2401,7 +2411,9 @@ html, body, #root { height: 100%; }
 .md-pov.above .md-caret { top:auto; bottom:-8px; transform:rotate(225deg); }
 .md-povhead { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:10px; }
 .md-povname { font-weight:800; font-size:16px; display:flex; align-items:center; gap:7px; }
-.md-agechip { background:#eef4fb; color:#33608a; font-size:11px; font-weight:800; padding:2px 7px; border-radius:16px; }
+.md-agechip { background:#eef4fb; color:#33608a; font-size:11px; font-weight:800; padding:2px 7px; border-radius:16px; cursor:pointer; }
+.md-agechip:hover { background:#dbeafe; }
+.md-povnamelink { cursor:pointer; text-decoration:underline; text-decoration-color:transparent; transition:text-decoration-color .12s; } .md-povnamelink:hover { text-decoration-color:currentColor; }
 .md-povmeta { font-size:12px; color:#64748b; margin-top:1px; }
 .md-x { width:34px; height:34px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-size:15px; cursor:pointer; flex:none; } .md-x.sm { width:28px; height:28px; font-size:13px; } .md-x:hover { background:#f1f5f9; }
 .md-dq { width:100%; padding:12px; border-radius:11px; border:2px solid var(--dq); background:#fff; color:var(--dq); font-weight:800; font-size:14px; cursor:pointer; margin-bottom:10px; text-align:left; line-height:1.3; }
