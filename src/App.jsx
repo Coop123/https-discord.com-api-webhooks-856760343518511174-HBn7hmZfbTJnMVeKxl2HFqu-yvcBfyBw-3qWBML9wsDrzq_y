@@ -1096,6 +1096,33 @@ const LEAGUE_SORTS = {
   power: (a, b) => b.power - a.power,
   pf: (a, b) => b.pf - a.pf,
 };
+// Custom Pointer Events slider (not a native <input type=range>) so dragging
+// is reliable on iPad Safari — same reasoning as the drag boards elsewhere
+// in this file: setPointerCapture keeps tracking the finger regardless of
+// what's underneath, which native range thumbs don't reliably do on iOS.
+function AgeSlider({ idx, onChange }) {
+  const trackRef = useRef(null);
+  const dragging = useRef(false);
+  const n = AGE_GROUPS.length;
+  const pctFor = (i) => (n > 1 ? (i / (n - 1)) * 100 : 0);
+  const idxFromX = (clientX) => {
+    const el = trackRef.current; if (!el) return idx;
+    const r = el.getBoundingClientRect();
+    const pct = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    return Math.round(pct * (n - 1));
+  };
+  const onDown = (e) => { dragging.current = true; e.currentTarget.setPointerCapture(e.pointerId); onChange(idxFromX(e.clientX)); e.preventDefault(); };
+  const onMove = (e) => { if (!dragging.current) return; onChange(idxFromX(e.clientX)); };
+  const endDrag = () => { dragging.current = false; };
+  return (
+    <div ref={trackRef} className="md-agesldr" style={{ touchAction: "none" }}
+      onPointerDown={onDown} onPointerMove={onMove} onPointerUp={endDrag} onPointerCancel={endDrag} role="slider" aria-valuemin={0} aria-valuemax={n - 1} aria-valuenow={idx}>
+      <div className="md-agesldrtrack"><div className="md-agesldrfill" style={{ width: pctFor(idx) + "%" }} /></div>
+      <div className="md-agesldrthumb" style={{ left: pctFor(idx) + "%" }} />
+    </div>
+  );
+}
+
 function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
   const [filterGender, setFilterGender] = useState("All");
   const [filterAge, setFilterAge] = useState("All");
@@ -1258,7 +1285,7 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
           <div className="md-lgsectitle">🏅 Top Kid — {topKidAge} <em className="md-topkidnote">improvement + points, all teams</em></div>
           <div className="md-topkidslider">
             <span className="md-topkidend">6u</span>
-            <input type="range" min="0" max={AGE_GROUPS.length - 1} step="1" value={topKidAgeIdx} onChange={(e) => setTopKidAgeIdx(+e.target.value)} className="md-topkidrange" />
+            <AgeSlider idx={topKidAgeIdx} onChange={setTopKidAgeIdx} />
             <span className="md-topkidend">15-18</span>
           </div>
           {topKids.length ? (
@@ -3477,7 +3504,10 @@ html, body, #root { height: 100%; }
 .md-topkidnote { margin-left:8px; font-style:normal; font-size:11px; font-weight:700; color:#94a3b8; text-transform:none; letter-spacing:0; }
 .md-topkidslider { display:flex; align-items:center; gap:10px; padding:4px 2px 8px; }
 .md-topkidend { font-size:11px; font-weight:800; color:#94a3b8; white-space:nowrap; }
-.md-topkidrange { flex:1; accent-color:#f59e0b; height:22px; cursor:pointer; }
+.md-agesldr { position:relative; flex:1; height:30px; display:flex; align-items:center; cursor:pointer; }
+.md-agesldrtrack { position:relative; width:100%; height:6px; border-radius:4px; background:#fde68a; }
+.md-agesldrfill { position:absolute; left:0; top:0; bottom:0; border-radius:4px; background:#f59e0b; }
+.md-agesldrthumb { position:absolute; top:50%; width:24px; height:24px; margin-left:-12px; margin-top:-12px; border-radius:50%; background:#f59e0b; border:3px solid #fff; box-shadow:0 1px 5px rgba(0,0,0,.35); pointer-events:none; }
 .md-lgtable { width:100%; border-collapse:collapse; font-size:13.5px; }
 .md-lgtable.standings thead th, .md-lgtable.roster thead th { text-align:left; padding:9px 10px; font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; border-bottom:2px solid var(--sline); }
 .md-lgsortable { cursor:pointer; user-select:none; } .md-lgsortable:hover { color:#0e7490; }
