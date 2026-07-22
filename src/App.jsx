@@ -490,10 +490,24 @@ function RelaySplitsPanel({ heat, evIdx, htIdx, scopeLane, data, homeTeam, onClo
     const ns = [...splits]; ns[leg] = fmtT(legSec);
     if (leg >= 3) update(id, { splits: ns, time: fmtT(elapsedSec) }); else update(id, { splits: ns });
   };
+  // Only cover the meet sheet (the .md-right column), not the On Deck / In
+  // The Water / Previous stack on the left — measured live so it tracks the
+  // actual layout instead of a hardcoded pixel offset.
+  const [rect, setRect] = useState(null);
+  useLayoutEffect(() => {
+    const el = document.querySelector(".md-right");
+    if (!el) return;
+    const measure = () => setRect(el.getBoundingClientRect());
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener("resize", measure);
+    return () => { ro.disconnect(); window.removeEventListener("resize", measure); };
+  }, []);
   return (
-    <div className="md-splitscrim" onClick={onClose}>
+    <div className="md-splitscrim" style={rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined} onClick={onClose}>
       <div className="md-splitpanel" onClick={(e) => e.stopPropagation()}>
-        <div className="md-splithead"><span>🏊 Relay splits — {shortEvent(heat.eventName)} · H{heat.num}</span><button className="md-x sm" onClick={onClose}>✕</button></div>
+        <div className="md-splithead"><span>🏊 Relay splits — {shortEvent(heat.eventName)} · H{heat.num}</span>{clockActive && <RaceClockDisplay startedAt={clockActive.startedAt} stopped={false} />}<button className="md-x sm" onClick={onClose}>✕</button></div>
         <div className="md-splitgrid">
           {relays.map((l) => { const id = entryId(evIdx, htIdx, l.lane), d = get(id), splits = d.splits || [];
             return (
@@ -649,6 +663,7 @@ function computeSeason(meets) {
 function SeasonModal({ onClose, homeTeam, meets }) {
   const [gender, setGender] = useState("All");
   const [grp, setGrp] = useState("All");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const list = meets || [];
   const agg = useMemo(() => computeSeason(list), [list]);
   const all = Object.values(agg).filter((s) => s.team === homeTeam);
@@ -659,14 +674,37 @@ function SeasonModal({ onClose, homeTeam, meets }) {
     .forEach((s) => { const g = ageGroupOf(s.age) || "Open"; (impByGrp[g] || (impByGrp[g] = [])).push(s); });
   const hpGroups = AGE_GROUPS.filter((g) => hpByGrp[g]);
   const groups = AGE_GROUPS.filter((g) => impByGrp[g]);
+  // League standing for the banner — same source data (season-wide power +
+  // dual-meet records) as the League page, so the numbers always agree.
+  const standings = useMemo(() => computeStandings(list), [list]);
+  const power = useMemo(() => computePower(list), [list]);
+  const leagueTeams = useMemo(() => [...new Set(Object.values(power).map((s) => s.team))].sort(), [power]);
+  const teamPowerOf = (t) => { const arr = Object.values(power).filter((s) => s.team === t && s.power != null); return arr.length ? Math.round(arr.reduce((a, b) => a + b.power, 0) / arr.length) : 0; };
+  const stRows = useMemo(() => leagueTeams.map((t) => ({ team: t, ...(standings[t] || { w: 0, l: 0, tie: 0, pf: 0, pa: 0 }), power: teamPowerOf(t) })).sort(LEAGUE_SORTS.record), [leagueTeams, standings, power]);
+  const myIdx = stRows.findIndex((r) => r.team === homeTeam);
+  const myRow = myIdx >= 0 ? stRows[myIdx] : null;
+  const filterOn = gender !== "All" || grp !== "All";
   return (
     <div className="md-scrim" onClick={onClose}>
-      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Team stats — {homeTeam}</div><div className="md-msub">Across {list.length} saved meet{list.length === 1 ? "" : "s"} · season</div></div><button className="md-x" onClick={onClose}>✕</button></div>
-        <div className="md-rbctl">
-          <label className="md-ctl">Gender<select value={gender} onChange={(e) => setGender(e.target.value)}><option>All</option><option>Girls</option><option>Boys</option></select></label>
-          <label className="md-ctl">Age group<select value={grp} onChange={(e) => setGrp(e.target.value)}><option>All</option>{AGE_GROUPS.map((g) => <option key={g}>{g}</option>)}</select></label>
+      <div className="md-modal md-imp md-tsmodal" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Team stats</div><div className="md-msub">Across {list.length} saved meet{list.length === 1 ? "" : "s"} · season</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-tsbanner" style={{ background: `linear-gradient(135deg, ${teamColor(homeTeam)}, #0f2036)` }}>
+          <div className="md-tsbannertop">
+            <div className="md-tsbannerteam">{TEAM_NAME[homeTeam] || homeTeam}</div>
+            <button className={"md-statsfilterbtn" + (filterOn ? " on" : "")} onClick={() => setFiltersOpen((o) => !o)}>⚙ Filters{filterOn ? " •" : ""}</button>
+          </div>
+          <div className="md-lgbannerstats">
+            <div className="md-lgstat"><b>{myRow ? ORD(myIdx + 1) : "—"}</b><span>league rank</span></div>
+            <div className="md-lgstat"><b>{myRow ? `${myRow.w}-${myRow.l}${myRow.tie ? "-" + myRow.tie : ""}` : "0-0"}</b><span>record</span></div>
+            <div className="md-lgstat"><b>{myRow ? myRow.power : 0}</b><span>team power</span></div>
+          </div>
         </div>
+        {filtersOpen && (
+          <div className="md-statsfilterpanel">
+            <div className="md-cmpradiogrp"><span className="md-cmpchecklabel">Gender</span>{["All", "Girls", "Boys"].map((g) => <label key={g} className="md-cmpradio"><input type="checkbox" checked={gender === g} onChange={() => setGender(g)} />{g}</label>)}</div>
+            <div className="md-cmpradiogrp"><span className="md-cmpchecklabel">Age group</span>{["All", ...AGE_GROUPS].map((g) => <label key={g} className="md-cmpradio"><input type="checkbox" checked={grp === g} onChange={() => setGrp(g)} />{g}</label>)}</div>
+          </div>
+        )}
         <div className="md-statwrap">
           <div className="md-statcol">
             <div className="md-stath">🏆 High points (season)</div>
@@ -3110,7 +3148,7 @@ html, body, #root { height: 100%; }
 .water-e { color:var(--cyan); } .md-pmeta { color:var(--muted); font-size:11.5px; font-weight:700; text-align:right; }
 .md-splitsdot { display:inline-block; width:10px; height:10px; margin-left:6px; border-radius:50%; background:#2563eb; border:none; padding:0; cursor:pointer; vertical-align:middle; box-shadow:0 0 0 3px rgba(37,99,235,.18); }
 .md-splitsdot:hover { background:#1d4ed8; }
-.md-raceclock { flex:none; padding:4px 11px; text-align:center; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:22px; font-weight:800; letter-spacing:.04em; color:var(--cyan); background:#0a1a2e; border-bottom:1px solid var(--line); }
+.md-raceclock { flex:none; width:fit-content; margin:3px auto 0; padding:2px 10px; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:14px; font-weight:800; letter-spacing:.04em; color:var(--cyan); background:#0a1a2e; border-radius:6px; }
 .md-raceclock.stopped { color:var(--green); }
 .md-pnav { display:flex; align-items:center; gap:7px; }
 .md-pnav button { width:26px; height:26px; border-radius:7px; border:1px solid var(--line); background:#0c1c33; color:var(--text); font-size:16px; line-height:1; cursor:pointer; }
@@ -3333,7 +3371,7 @@ html, body, #root { height: 100%; }
 .md-notearea:focus { outline:2px solid var(--cyan); outline-offset:1px; border-color:var(--cyan); }
 .md-otherteam { font-size:12.5px; color:#64748b; background:#f8fafc; border:1px solid var(--sline); border-radius:10px; padding:10px 12px; line-height:1.5; }
 
-.md-splitscrim { position:fixed; inset:0; background:rgba(6,14,28,.45); display:grid; place-items:center; padding:16px; z-index:45; }
+.md-splitscrim { position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(6,14,28,.45); display:grid; place-items:center; padding:16px; z-index:45; }
 .md-splitpanel { width:min(760px,96vw); max-height:82vh; background:#0a1628; border:1px solid var(--line); border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 30px 80px -20px rgba(0,0,0,.6); }
 .md-splithead { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; color:var(--text); font-weight:800; font-size:14px; border-bottom:1px solid var(--line); background:linear-gradient(180deg,#122b4d,#0d2038); }
 .md-splitgrid { padding:12px; display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; overflow-y:auto; }
@@ -3361,6 +3399,14 @@ html, body, #root { height: 100%; }
 
 .md-statwrap { display:grid; grid-template-columns:1fr 1fr; gap:0; overflow:hidden; flex:1; min-height:0; }
 @media (max-width:720px){ .md-statwrap { grid-template-columns:1fr; overflow-y:auto; } }
+.md-tsmodal { max-width:900px; }
+.md-tsbanner { padding:18px 20px; color:#fff; display:flex; flex-direction:column; gap:12px; }
+.md-tsbannertop { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.md-tsbannerteam { font-size:22px; font-weight:900; }
+.md-statsfilterbtn { padding:7px 14px; border-radius:9px; border:1px solid rgba(255,255,255,.35); background:rgba(255,255,255,.12); color:#fff; font-weight:800; font-size:12.5px; cursor:pointer; }
+.md-statsfilterbtn:hover { background:rgba(255,255,255,.2); }
+.md-statsfilterbtn.on { background:#fff; color:#0f2036; border-color:#fff; }
+.md-statsfilterpanel { display:flex; flex-direction:column; gap:8px; padding:12px 20px; border-bottom:1px solid var(--sline); background:#f8fafc; }
 .md-statcol { overflow-y:auto; padding:12px 16px; border-right:1px solid var(--sline); }
 .md-statcol:last-child { border-right:none; }
 .md-stath { font-weight:800; font-size:13px; margin-bottom:8px; color:var(--sink); position:sticky; top:0; background:#fff; padding-bottom:4px; }
