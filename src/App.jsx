@@ -395,7 +395,13 @@ function mergeResults(parsedEvents, targetEvents, teamsToApply, homeTeam) {
     const id = entryId(hit.evIdx, hit.htIdx, hit.lane);
     // DQ rows only get flagged for our own team — a pending DQ requiring the
     // coach to pick the reason via the usual DQ button, same as a live tap.
-    if (l.dq) { if (hit.team === homeTeam) { patch[id] = { ...(patch[id] || {}), dqs: [{ code: PEND_DQ_CODE, reason: "Reason pending — awaiting DQ slip", group: "Pending" }] }; matched++; } return; }
+    // A DQ'd swim can still have a recorded time on the sheet (the swim
+    // happened, it just didn't count) — keep that time too instead of
+    // discarding it, same as a DQ entered live with a time already typed in.
+    if (l.dq) { if (hit.team === homeTeam) {
+      const dqTime = l.finalTime || l.seed;
+      patch[id] = { ...(patch[id] || {}), ...(!isNaN(toSeconds(dqTime)) ? { time: dqTime } : {}), dqs: [{ code: PEND_DQ_CODE, reason: "Reason pending — awaiting DQ slip", group: "Pending" }] }; matched++;
+    } return; }
     if (toSeconds(l.finalTime || l.seed) && !isNaN(toSeconds(l.finalTime || l.seed))) {
       patch[id] = { ...(patch[id] || {}), time: l.finalTime || l.seed }; matched++;
     }
@@ -483,6 +489,18 @@ function RaceClockDisplay({ startedAt, stopped }) {
 // order, with the four legs vertical, current leg highlighted, split entry.
 function RelaySplitsPanel({ heat, evIdx, htIdx, scopeLane, data, homeTeam, onClose, update, get, openPop, clockActive }) {
   const relays = heat.lanes.filter((l) => l.swimmers && l.team === homeTeam && (scopeLane == null || l.lane === scopeLane)).sort((a, b) => a.lane - b.lane);
+  // Running order across EVERY team in the heat (not just home), from
+  // whatever's been recorded so far: a finished relay ranks on its final
+  // time; an in-progress one ranks by legs completed, then by cumulative
+  // split time as a tiebreak among relays on the same leg.
+  const standings = useMemo(() => {
+    const rankOf = (l) => { const d = get(entryId(evIdx, htIdx, l.lane)); const splits = d.splits || []; const t = toSeconds(d.time);
+      if (!isNaN(t)) return { legs: 4, cum: t, done: true };
+      return { legs: splits.filter(Boolean).length, cum: splits.reduce((s, x) => s + (toSeconds(x) || 0), 0), done: false }; };
+    return heat.lanes.filter((l) => l.swimmers).map((l) => ({ team: l.team, ...rankOf(l) })).filter((x) => x.legs > 0)
+      .sort((a, b) => b.legs - a.legs || a.cum - b.cum);
+  }, [heat, data]);
+  const homePlace = standings.findIndex((x) => x.team === homeTeam) + 1 || null;
   const relayTap = (id, splits) => { if (!clockActive) return;
     const leg = splits.length, elapsedSec = (Date.now() - clockActive.startedAt) / 1000;
     const prevCum = splits.reduce((s, x) => s + (toSeconds(x) || 0), 0);
@@ -490,9 +508,11 @@ function RelaySplitsPanel({ heat, evIdx, htIdx, scopeLane, data, homeTeam, onClo
     const ns = [...splits]; ns[leg] = fmtT(legSec);
     if (leg >= 3) update(id, { splits: ns, time: fmtT(elapsedSec) }); else update(id, { splits: ns });
   };
-  // Only cover the meet sheet (the .md-right column), not the On Deck / In
-  // The Water / Previous stack on the left — measured live so it tracks the
-  // actual layout instead of a hardcoded pixel offset.
+  // Floating, non-blocking popover pinned to the top of the meet sheet (the
+  // .md-right column) — no scrim, so the meet sheet stays scrollable and
+  // tappable underneath. Measured live so it tracks the actual layout
+  // instead of a hardcoded pixel offset, and its own height is clamped so it
+  // never runs off the bottom of the viewport.
   const [rect, setRect] = useState(null);
   useLayoutEffect(() => {
     const el = document.querySelector(".md-right");
@@ -504,31 +524,43 @@ function RelaySplitsPanel({ heat, evIdx, htIdx, scopeLane, data, homeTeam, onClo
     window.addEventListener("resize", measure);
     return () => { ro.disconnect(); window.removeEventListener("resize", measure); };
   }, []);
+  useEffect(() => { const h = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose]);
+  const m = 10, vh = window.innerHeight;
+  const top = rect ? rect.top + m : 60;
+  const style = rect ? { left: rect.left + m, width: rect.width - m * 2, top, maxHeight: Math.max(160, vh - top - m) } : { left: "50%", transform: "translateX(-50%)", top, maxHeight: vh - top - m };
   return (
-    <div className="md-splitscrim" style={rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined} onClick={onClose}>
-      <div className="md-splitpanel" onClick={(e) => e.stopPropagation()}>
-        <div className="md-splithead"><span>🏊 Relay splits — {shortEvent(heat.eventName)} · H{heat.num}</span>{clockActive && <RaceClockDisplay startedAt={clockActive.startedAt} stopped={false} />}<button className="md-x sm" onClick={onClose}>✕</button></div>
-        <div className="md-splitgrid">
-          {relays.map((l) => { const id = entryId(evIdx, htIdx, l.lane), d = get(id), splits = d.splits || [];
-            return (
-              <div key={l.lane} className={"md-splitcard" + (l.team === homeTeam ? " mine" : "")}>
-                <div className="md-splitcardhead"><span className="md-splitlane">L{l.lane}</span><span className="md-splitteam" style={{ color: teamColor(l.team) }}>{l.team} {l.relay}</span>
-                  <input className="md-splittime" inputMode="decimal" placeholder="––.––" value={d.time || ""} onChange={(e) => update(id, { time: e.target.value })} /></div>
-                <div className="md-legs">
-                  {l.swimmers.map((s, i) => (
-                    <div key={i} className="md-leg">
-                      <span className="md-legnum">{i + 1}</span>
-                      <span className="md-legname">{s.name}{s.age ? ` (${s.age})` : ""}</span>
-                      <input className="md-splitbox" inputMode="decimal" placeholder={`#${i + 1}`} value={splits[i] || ""} onChange={(e) => { const ns = splits.slice(); ns[i] = e.target.value; update(id, { splits: ns }); }} />
-                      <button className="md-legnote" title="Notes / tags" onClick={(e) => openPop(id + "#" + i, e.currentTarget)}>✎</button>
-                    </div>
-                  ))}
-                </div>
-                {clockActive && !d.time && <button className="md-nextleg tap" onClick={() => relayTap(id, splits)}>⏱ Tap — leg {splits.length + 1}/4</button>}
+    <div className="md-splitpanel" style={style}>
+      <div className="md-splithead"><span>🏊 Relay splits — {shortEvent(heat.eventName)} · H{heat.num}</span>{clockActive && <RaceClockDisplay startedAt={clockActive.startedAt} stopped={false} />}<button className="md-x sm" onClick={onClose}>✕</button></div>
+      {standings.length > 0 && (
+        scopeLane == null ? (
+          <div className="md-splitstandings">
+            {standings.slice(0, 3).map((s, i) => <span key={s.team} className={"md-standingchip" + (s.team === homeTeam ? " mine" : "")}>{ORD(i + 1)} <b style={{ color: teamColor(s.team) }}>{s.team}</b></span>)}
+            {homePlace && homePlace > 3 && <span className="md-standingchip mine">{ORD(homePlace)} <b style={{ color: teamColor(homeTeam) }}>{homeTeam}</b></span>}
+          </div>
+        ) : (
+          homePlace && <div className="md-splitstandings"><span className="md-standingchip mine">{homeTeam} currently <b>{ORD(homePlace)}</b></span></div>
+        )
+      )}
+      <div className="md-splitgrid">
+        {relays.map((l) => { const id = entryId(evIdx, htIdx, l.lane), d = get(id), splits = d.splits || [];
+          return (
+            <div key={l.lane} className={"md-splitcard" + (l.team === homeTeam ? " mine" : "")}>
+              <div className="md-splitcardhead"><span className="md-splitlane">L{l.lane}</span><span className="md-splitteam" style={{ color: teamColor(l.team) }}>{l.team} {l.relay}</span>
+                <input className="md-splittime" inputMode="decimal" placeholder="––.––" value={d.time || ""} onChange={(e) => update(id, { time: e.target.value })} /></div>
+              <div className="md-legs">
+                {l.swimmers.map((s, i) => (
+                  <div key={i} className="md-leg">
+                    <span className="md-legnum">{i + 1}</span>
+                    <span className="md-legname">{s.name}{s.age ? ` (${s.age})` : ""}</span>
+                    <input className="md-splitbox" inputMode="decimal" placeholder={`#${i + 1}`} value={splits[i] || ""} onChange={(e) => { const ns = splits.slice(); ns[i] = e.target.value; update(id, { splits: ns }); }} />
+                    <button className="md-legnote" title="Notes / tags" onClick={(e) => openPop(id + "#" + i, e.currentTarget)}>✎</button>
+                  </div>
+                ))}
               </div>
-            ); })}
-          {!relays.length && <div className="md-prevempty">No {homeTeam} relay in this heat.</div>}
-        </div>
+              {clockActive && !d.time && <button className="md-nextleg tap" onClick={() => relayTap(id, splits)}>⏱ Tap — leg {splits.length + 1}/4</button>}
+            </div>
+          ); })}
+        {!relays.length && <div className="md-prevempty">No {homeTeam} relay in this heat.</div>}
       </div>
     </div>
   );
@@ -554,7 +586,7 @@ function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Import results sheet</div><div className="md-msub">Merge finals onto a loaded program, or save a whole new meet from results alone.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Import results sheet</div><div className="md-msub">Merge finals onto a loaded program, or save a whole new meet from results alone.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy}</span></div>
         {form ? (
           <div className="md-newmeetform">
@@ -569,7 +601,7 @@ function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
           <div className="md-impgrid">
             <textarea className="md-imparea" placeholder={"Paste results text…"} value={text} onChange={(e) => setText(e.target.value)} />
             <div className="md-preview"><div className="md-prevtop"><span>{parsed.length} events · {count} results · <b>{matched}</b> merge onto loaded meet{dqCount ? <> · <b className="md-impdqnote">{dqCount} DQ{dqCount > 1 ? "s" : ""}</b> found for {homeTeam}</> : null}</span></div>
-              <div className="md-prevbody"><div className="md-prevempty">“Merge” fills finals onto the loaded program by event # + name. Any {homeTeam} row marked DQ on the sheet gets flagged as a pending DQ — pick the reason from the usual DQ button after merging. “Save as new meet” builds and saves a fresh meet from just this results sheet.</div></div></div>
+              <div className="md-prevbody"><div className="md-prevempty">“Merge” fills finals onto the loaded program by event # + name. Any {homeTeam} row marked DQ on the sheet gets flagged as a pending DQ — pick the reason from the usual DQ button after merging — and keeps the time too if the sheet has one. “Save as new meet” builds and saves a fresh meet from just this results sheet.</div></div></div>
           </div>
         )}
         <div className="md-mfoot"><button className="md-cancel" onClick={form ? () => setForm(false) : onClose}>{form ? "Back" : "Cancel"}</button>
@@ -595,7 +627,7 @@ function StatsModal({ onClose, events, data, mode, filter, homeTeam }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Meet stats — {homeTeam}</div><div className="md-msub">{mode === "timetrial" ? "Time trials" : mode === "champs" ? "Champs" : "Dual"} · by age group · live</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Meet stats — {homeTeam}</div><div className="md-msub">{mode === "timetrial" ? "Time trials" : mode === "champs" ? "Champs" : "Dual"} · by age group · live</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-statwrap">
           <div className="md-statcol">
             <div className="md-stath">🏆 High points by age</div>
@@ -665,6 +697,11 @@ function SeasonModal({ onClose, homeTeam, meets }) {
   const [grp, setGrp] = useState("All");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const list = meets || [];
+  // Saved snapshots always carry an id; the live in-progress meet (merged in
+  // by the caller) never does — use that to keep the "N saved meets" count
+  // honest while still letting live data feed the stats below.
+  const savedCount = list.filter((m) => m.id).length;
+  const liveIncluded = list.length > savedCount;
   const agg = useMemo(() => computeSeason(list), [list]);
   const all = Object.values(agg).filter((s) => s.team === homeTeam);
   const match = (s) => (gender === "All" || s.gender === gender) && (grp === "All" || ageGroupOf(s.age) === grp);
@@ -687,7 +724,7 @@ function SeasonModal({ onClose, homeTeam, meets }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp md-tsmodal" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Team stats</div><div className="md-msub">Across {list.length} saved meet{list.length === 1 ? "" : "s"} · season</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Team stats</div><div className="md-msub">Across {savedCount} saved meet{savedCount === 1 ? "" : "s"}{liveIncluded ? " + this meet (live)" : ""} · season</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-tsbanner" style={{ background: `linear-gradient(135deg, ${teamColor(homeTeam)}, #0f2036)` }}>
           <div className="md-tsbannertop">
             <div className="md-tsbannerteam">{TEAM_NAME[homeTeam] || homeTeam}</div>
@@ -830,6 +867,20 @@ function relayMoveIsSafe(events, data, name, team, fromSlot) {
   const impact = relayDonorImpact(events, data, name, team, fromSlot);
   return !impact || impact.newPlace <= impact.oldPlace;
 }
+// How many real (non-pending) DQs a swimmer already has THIS meet — a live
+// risk signal for relay lineup picks (especially medley, where one DQ'd leg
+// takes the whole relay out) that's cheap to compute from what's already on
+// the board, without needing season history threaded through every caller.
+function dqCountThisMeet(events, data, name, team) {
+  let n = 0;
+  events.forEach((ev, ei) => ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => {
+    if (l.swimmers) { l.swimmers.forEach((s, leg) => { if (s.name !== name || l.team !== team) return;
+      const d = data[entryId(ei, hi, l.lane) + "#" + leg] || {}; if (hasDq(d) && !isPendingDq(d)) n++; }); return; }
+    if (l.name !== name || l.team !== team) return;
+    const d = data[entryId(ei, hi, l.lane)] || {}; if (hasDq(d) && !isPendingDq(d)) n++;
+  })));
+  return n;
+}
 // Drops any roster candidate who's on a different relay this meet UNLESS
 // moving them is "safe" per relayMoveIsSafe — used to gate both the flat
 // candidate list and the medley full-reoptimization pool.
@@ -856,7 +907,7 @@ function relayReplacementCandidatesRaw(events, data, evIdx, htIdx, lane, leg, te
   const genderMap = swimmerGenderMap(events);
   const otherSlots = relaySlotsByTeam(events, team);
   const rank = (list) => list.map((c) => { const other = otherSlots.get(c.name);
-    return { ...c, best: bestStrokeSeed(events, data, c.name, team, stroke), stroke, moveFrom: other || null }; }).sort((a, b) => (a.best ?? Infinity) - (b.best ?? Infinity));
+    return { ...c, best: bestStrokeSeed(events, data, c.name, team, stroke), stroke, moveFrom: other || null, dqCount: dqCountThisMeet(events, data, c.name, team) }; }).sort((a, b) => (a.best ?? Infinity) - (b.best ?? Infinity));
   const pool = teamRoster(events, team).filter((c) => !already.has(c.name));
   // For mixed relays, match the SCRATCHED swimmer's own gender (not "any
   // gender goes") so the 2-girls/2-boys balance — and the boys-anchor rule —
@@ -888,23 +939,42 @@ function medleyReplacementPlan(events, data, evIdx, htIdx, lane, excludeName) {
   if (legIdx < 0) return null;
   const stroke = MEDLEY_LEGS[legIdx] || "Free";
   const requiredGender = evg === "Mixed" ? genderMap[excludeName + "|" + team] : evg;
+  // Tags each leg with origName/origTime (the leg's PREVIOUS occupant's time
+  // in that same stroke, if it changed) so the review screen can show a
+  // per-leg time delta, not just the new occupant's raw time.
+  const withOrig = (legs) => legs.map((l, i) => { const wasName = relayLane.swimmers[i] && relayLane.swimmers[i].name;
+    if (!wasName || wasName === l.name) return l;
+    return { ...l, origName: wasName, origTime: bestStrokeSeed(events, data, wasName, team, l.stroke) }; });
   const already = new Set(relayLane.swimmers.map((s) => s.name));
   const poolRaw = teamRoster(events, team).filter((c) => !already.has(c.name) && ageGroupOf(c.age) === group)
     .map((c) => ({ ...c, gender: genderMap[c.name + "|" + team] }));
   const pool = filterSafeMoveCandidates(events, data, poolRaw, team);
   const eligible = pool.filter((c) => !requiredGender || !c.gender || c.gender === requiredGender)
-    .map((c) => ({ ...c, s: bestStrokeSeed(events, data, c.name, team, stroke) })).filter((c) => c.s != null).sort((a, b) => a.s - b.s);
+    .map((c) => ({ ...c, s: bestStrokeSeed(events, data, c.name, team, stroke), dqCount: dqCountThisMeet(events, data, c.name, team) })).filter((c) => c.s != null).sort((a, b) => a.s - b.s);
+  // Minimal-change option: swap in the fastest eligible outsider for just the
+  // vacated leg, leaving the other three swimmers on their original strokes.
+  // A medley DQ takes out the whole relay, so a swimmer who's already been
+  // DQ'd this meet is a real risk — prefer an equally-fast (within 5%) clean
+  // alternative over the raw-fastest pick when one's available.
+  let minimalPlan = null;
   if (eligible.length) {
-    const pick = eligible[0];
-    const legs = relayLane.swimmers.map((s, i) => { if (i === legIdx) return { name: pick.name, age: pick.age, gender: pick.gender || requiredGender, stroke, s: pick.s };
+    const clean = eligible.find((c) => c.dqCount === 0 && c.s <= eligible[0].s * 1.05);
+    const pick = eligible[0].dqCount > 0 && clean ? clean : eligible[0];
+    const legs = relayLane.swimmers.map((s, i) => { if (i === legIdx) return { name: pick.name, age: pick.age, gender: pick.gender || requiredGender, stroke, s: pick.s, dqCount: pick.dqCount };
       const st = MEDLEY_LEGS[i] || "Free"; return { name: s.name, age: s.age, gender: genderMap[s.name + "|" + team], stroke: st, s: bestStrokeSeed(events, data, s.name, team, st) ?? 0 }; });
-    return { legs, total: legs.reduce((a, l) => a + l.s, 0) };
+    minimalPlan = { legs: withOrig(legs), total: legs.reduce((a, l) => a + l.s, 0) };
   }
+  // Full-reshuffle option: also let the three surviving relay members swap
+  // strokes with each other (and with any outsider), in case that's faster
+  // overall than a straight 1-for-1 swap on just the vacated leg.
   const rosterRaw = teamRoster(events, team).filter((c) => c.name !== excludeName && ageGroupOf(c.age) === group)
     .map((c) => ({ ...c, gender: genderMap[c.name + "|" + team] }));
   const roster = filterSafeMoveCandidates(events, data, rosterRaw, team);
   const timeOf = (name, s) => bestStrokeSeed(events, data, name, team, s);
-  return evg === "Mixed" ? optimalMixedMedley(roster, timeOf) : optimalMedley(roster.filter((c) => !c.gender || c.gender === evg), timeOf);
+  const reshuffleRaw = evg === "Mixed" ? optimalMixedMedley(roster, timeOf) : optimalMedley(roster.filter((c) => !c.gender || c.gender === evg), timeOf);
+  const reshufflePlan = reshuffleRaw ? { legs: withOrig(reshuffleRaw.legs), total: reshuffleRaw.total } : null;
+  if (minimalPlan && reshufflePlan) return reshufflePlan.total < minimalPlan.total - 0.001 ? reshufflePlan : minimalPlan;
+  return minimalPlan || reshufflePlan;
 }
 
 // Participants & scratches — all swimmers, filter by team, scratch per event
@@ -918,7 +988,7 @@ function ParticipantsModal({ onClose, events, data, homeTeam, onOne, onAll, reve
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Scratches</div><div className="md-msub">Scratch a swimmer per event — relay legs included — or the whole meet. Any team.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Scratches</div><div className="md-msub">Scratch a swimmer per event — relay legs included — or the whole meet. Any team.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl"><label className="md-ctl">Team<select value={team} onChange={(e) => setTeam(e.target.value)}><option>All</option>{teams.map((t) => <option key={t}>{t}</option>)}</select></label><span className="md-lgcount">{rows.length} swimmers</span></div>
         <div className="md-lglist">
           {rows.map((p) => { const key = p.name + "|" + p.team, anyScr = p.entries.some((e) => e.scratched), allScr = p.entries.every((e) => e.scratched);
@@ -939,7 +1009,14 @@ function ParticipantsModal({ onClose, events, data, homeTeam, onOne, onAll, reve
                       ? (revertible && revertible[e.legId]
                         ? <button className="md-partbtn revert" onClick={() => onRevertSwap(e.legId)}>↺ Revert — restore {p.name}</button>
                         : <span className="md-partghost">✕ scratched — replaced by {e.replacedBy}</span>)
-                      : <button className={"md-partbtn" + (e.scratched ? " on" : "")} onClick={() => onOne({ ...e, name: p.name, team: p.team }, !e.scratched)}>{e.scratched ? "X — tap to restore" : "Scratch"}</button>}
+                      // A relay leg left scratched as the side effect of moving
+                      // this swimmer onto another relay (no one has filled it
+                      // in yet, so it isn't a "ghost" row) still has the same
+                      // full-cascade restoreFn registered under its own id —
+                      // offer that instead of a plain un-scratch toggle.
+                      : (e.scratched && e.relay && revertible && revertible[e.id]
+                        ? <button className="md-partbtn revert" onClick={() => onRevertSwap(e.id)}>↺ Revert — undo this swap</button>
+                        : <button className={"md-partbtn" + (e.scratched ? " on" : "")} onClick={() => onOne({ ...e, name: p.name, team: p.team }, !e.scratched)}>{e.scratched ? "X — tap to restore" : "Scratch"}</button>)}
                   </div>
                 ))}
               </div>}
@@ -975,16 +1052,21 @@ function RelayReplaceModal({ target, candidates, plan, planDelta, originalLegs, 
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Replace {target.name}?</div><div className="md-msub">{shortEvent(target.eventName)} · {target.stroke || (candidates[0] && candidates[0].stroke) || (plan && plan.legs[0].stroke) || ""}{plan ? "" : " leg"} · {target.team}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Replace {target.name}?</div><div className="md-msub">{shortEvent(target.eventName)} · {target.stroke || (candidates[0] && candidates[0].stroke) || (plan && plan.legs[0].stroke) || ""}{plan ? "" : " leg"} · {target.team}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-scratchbtns">
           {plan ? (<>
             <div className="md-planlegs">
               {plan.legs.map((l, i) => { const was = originalLegs[i]; const changed = was && was !== l.name;
+                const legDelta = changed && l.origTime != null ? l.s - l.origTime : null;
                 return (
                   <div key={i} className="md-planleg">
                     <span className="md-planstroke">{l.stroke}</span>
                     <span className="md-planname">{changed ? <><s>{was}</s> → <b>{l.name}</b></> : <b>{l.name}</b>}</span>
                     <span className="md-plantime">{fmtT(l.s)}</span>
+                    <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      {legDelta != null && <span className={"md-delta sm " + (legDelta < 0 ? "pos" : "neg")}>{(legDelta < 0 ? "−" : "+") + Math.abs(legDelta).toFixed(2) + "s"}</span>}
+                      {l.dqCount > 0 && <em style={{ color: "#b42318", fontStyle: "normal", fontSize: 11 }}>⚠ {l.dqCount} DQ{l.dqCount > 1 ? "s" : ""}</em>}
+                    </span>
                   </div>
                 ); })}
             </div>
@@ -995,6 +1077,7 @@ function RelayReplaceModal({ target, candidates, plan, planDelta, originalLegs, 
               <b>{c.name}</b>{c.age ? ` (${c.age})` : ""} — {c.best != null ? fmtT(c.best) : "no time on record"}
               {c.moveFrom && <em style={{ marginLeft: 6, color: "#7c3aed", fontStyle: "normal" }}>currently on {shortEvent(c.moveFrom.eventName)} — moving them leaves a gap there</em>}
               {!c.verified && <em style={{ marginLeft: 6, color: "#a8842a", fontStyle: "normal" }}>unverified age/gender</em>}
+              {c.dqCount > 0 && <em style={{ marginLeft: 6, color: "#b42318", fontStyle: "normal" }}>⚠ {c.dqCount} DQ{c.dqCount > 1 ? "s" : ""} this meet</em>}
               <RelayDeltaLine label="This relay:" d={c.thisDelta} />
               {c.donorDelta && <RelayDeltaLine label={"Their relay (backfilled by " + c.donorDelta.backfillName + "):"} d={c.donorDelta} />}
             </button>
@@ -1028,7 +1111,10 @@ function computePower(meets, filter) {
       const ekey = g + "|" + ag + "|" + cat;
       const placeOf = {}; if (!tt) rankedEvent(ev, ei, data, null).forEach((e, i) => (placeOf[e.id] = i + 1));
       ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { const id = entryId(ei, hi, l.lane); const d = data[id] || {}; const t = toSeconds(d.time); const s = isNaN(t) ? toSeconds(l.seed) : t; if (isNaN(s)) return; const key = l.name + "|" + l.team;
-        (sw[key] || (sw[key] = { name: l.name, team: l.team, age: l.age, gender: g, events: {}, pts: 0, improveSum: 0, improveN: 0 }));
+        // Individual events are always Girls- or Boys-only, but guard anyway
+        // so a swimmer's own gender tick can never come out as "Mixed" (that
+        // describes the relay's makeup, not any one swimmer's gender).
+        (sw[key] || (sw[key] = { name: l.name, team: l.team, age: l.age, gender: g === "Mixed" ? undefined : g, events: {}, pts: 0, improveSum: 0, improveN: 0 }));
         if (l.age) sw[key].age = l.age; sw[key].events[ekey] = Math.min(sw[key].events[ekey] ?? Infinity, s);
         (bestByEv[ekey] || (bestByEv[ekey] = {})); if (bestByEv[ekey][key] === undefined || s < bestByEv[ekey][key]) bestByEv[ekey][key] = s;
         if (!tt) { const p = placeOf[id]; if (p) sw[key].pts += (table[p] || 0); }
@@ -1165,7 +1251,7 @@ function AgeSlider({ idx, onChange }) {
   );
 }
 
-function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
+function LeagueModal({ onClose, meets, homeTeam, liveMeet, initialProfile }) {
   const [filterGender, setFilterGender] = useState("All");
   const [filterAge, setFilterAge] = useState("All");
   const [filterStroke, setFilterStroke] = useState("All");
@@ -1174,7 +1260,10 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
   const teams = useMemo(() => [...new Set(Object.values(power).map((s) => s.team))].sort(), [power]);
   const teamPower = (t) => { const arr = Object.values(power).filter((s) => s.team === t && s.power != null); return arr.length ? Math.round(arr.reduce((a, b) => a + b.power, 0) / arr.length) : 0; };
   const [sel, setSel] = useState(null);
-  const [profile, setProfile] = useState(null);
+  // Jumped straight into a profile (e.g. tapped a name in a popover
+  // elsewhere) has no team-roster context to step back into, so the profile
+  // view's back arrow goes all the way home instead — see the `sel` check below.
+  const [profile, setProfile] = useState(initialProfile || null);
   const [sort, setSort] = useState("record");
   const [rosterSort, setRosterSort] = useState("power");
   const rows = teams.map((t) => ({ team: t, ...(standings[t] || { w: 0, l: 0, tie: 0, pf: 0, pa: 0, meets: [] }), power: teamPower(t) })).sort(LEAGUE_SORTS[sort]);
@@ -1192,6 +1281,7 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const searchMatches = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return [];
@@ -1217,12 +1307,20 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
       )}
     </div>
   );
+  const filterOn = filterGender !== "All" || filterAge !== "All" || filterStroke !== "All";
   const filterBar = (
-    <div className="md-lgfilters">
-      {searchBar}
-      <label className="md-ctl">Gender<select value={filterGender} onChange={(e) => setFilterGender(e.target.value)}><option>All</option><option>Girls</option><option>Boys</option></select></label>
-      <label className="md-ctl">Age group<select value={filterAge} onChange={(e) => setFilterAge(e.target.value)}><option>All</option>{AGE_GROUPS.map((g) => <option key={g}>{g}</option>)}</select></label>
-      <label className="md-ctl">Stroke<select value={filterStroke} onChange={(e) => setFilterStroke(e.target.value)}><option>All</option>{PROG_STROKES.map((s) => <option key={s}>{s}</option>)}</select></label>
+    <div className="md-lgfilterwrap">
+      <div className="md-lgfiltertop">
+        {searchBar}
+        <button className={"md-statsfilterbtn" + (filterOn ? " on" : "")} onClick={() => setFiltersOpen((o) => !o)}>⚙ Filters{filterOn ? " •" : ""}</button>
+      </div>
+      {filtersOpen && (
+        <div className="md-lgfilters">
+          <label className="md-ctl">Gender<select value={filterGender} onChange={(e) => setFilterGender(e.target.value)}><option>All</option><option>Girls</option><option>Boys</option></select></label>
+          <label className="md-ctl">Age group<select value={filterAge} onChange={(e) => setFilterAge(e.target.value)}><option>All</option>{AGE_GROUPS.map((g) => <option key={g}>{g}</option>)}</select></label>
+          <label className="md-ctl">Stroke<select value={filterStroke} onChange={(e) => setFilterStroke(e.target.value)}><option>All</option>{PROG_STROKES.map((s) => <option key={s}>{s}</option>)}</select></label>
+        </div>
+      )}
     </div>
   );
 
@@ -1230,7 +1328,7 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
     const prof = computeSwimmerProfile(profile.name, profile.team, meets, liveMeet);
     return (
       <div className="md-leaguepage" role="dialog">
-        <div className="md-lgtopbar"><button className="md-lgback" onClick={() => setProfile(null)}>← {TEAM_NAME[profile.team] || profile.team}</button><button className="md-x sm" onClick={onClose}>✕</button></div>
+        <div className="md-lgtopbar"><button className="md-lgback" onClick={() => (sel ? setProfile(null) : onClose())}>{sel ? `← ${TEAM_NAME[profile.team] || profile.team}` : "← MeetDeck"}</button><button className="md-x sm" onClick={onClose}>✕</button></div>
         <div className="md-lgbanner" style={{ background: `linear-gradient(135deg, ${teamColor(profile.team)}, #0f2036)` }}>
           <div className="md-lgbannerteam">{profile.name}</div>
           <div className="md-lgbannerstats">
@@ -1319,10 +1417,9 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
       <div className="md-lgtopbar"><button className="md-lgback" onClick={onClose}>← MeetDeck</button><button className="md-x sm" onClick={onClose}>✕</button></div>
       <div className="md-lgheader">
         <h1 className="md-lgtitle">League standings</h1>
-        <p className="md-lgsub">Across {meets.length} saved meet{meets.length === 1 ? "" : "s"} · tap a team for the full profile</p>
+        <p className="md-lgsub">Across {meets.filter((m) => m.id).length} saved meet{meets.filter((m) => m.id).length === 1 ? "" : "s"}{meets.length > meets.filter((m) => m.id).length ? " + this meet (live)" : ""} · tap a team for the full profile</p>
       </div>
       <div className="md-lgbody">
-        {filterBar}
         <div className="md-lgsection md-topkid">
           <div className="md-lgsectitle">🏅 Top Kid — {topKidAge} <em className="md-topkidnote">improvement + points, all teams</em></div>
           <div className="md-topkidslider">
@@ -1370,6 +1467,7 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
           </tbody>
         </table>
         {!rows.length && <div className="md-prevempty">No teams yet — import a meet or results, then save it to the season.</div>}
+        {filterBar}
       </div>
     </div>
   );
@@ -1470,7 +1568,12 @@ function CompareBoard({ people, slots, onAssign, onSwap, onRemove, onProfile }) 
   const chip = (person, source, slotIdx) => {
     const k = keyOf(person.name, person.team);
     return (
-      <div key={k} role="button" tabIndex={0} className={"md-rbchip" + (draggingKey === k ? " dragging" : "") + (isSame(selected, { key: k, source, slotIdx }) ? " selected" : "")} style={{ touchAction: "none" }}
+      <div key={k} role="button" tabIndex={0} className={"md-rbchip" + (draggingKey === k ? " dragging" : "") + (isSame(selected, { key: k, source, slotIdx }) ? " selected" : "")}
+        // Bank chips allow native vertical panning (so the list can still be
+        // scrolled by touch) — dragging into a slot is a horizontal gesture
+        // and there's always the tap-then-tap-target fallback anyway. Slot
+        // chips aren't in a scrolling list, so they keep touch-action:none.
+        style={{ touchAction: source === "bank" ? "pan-y" : "none" }}
         onPointerDown={(e) => onDown(e, k, source, slotIdx)} onPointerMove={onMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
         {person.gender && <em className={"md-gtick " + person.gender.toLowerCase()}>{person.gender[0]}</em>}{person.name}{person.age ? ` (${person.age})` : ""}
         <span className="md-cmpchipteam" style={{ color: teamColor(person.team) }}>{person.team}</span>
@@ -1539,7 +1642,7 @@ function SimplePicker({ idx, people, slot, onAssign, onRemove }) {
   );
 }
 
-function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam, mode, onModeChange }) {
+function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam, mode, onModeChange, onOpenLeague }) {
   const meets = useMemo(() => [{ meetName: "This meet", mode: "meet", events, data }, ...seasonMeets], [events, data, seasonMeets]);
   const power = useMemo(() => computePower(meets), [meets]);
   const people = useMemo(() => Object.values(power).sort((a, b) => a.name.localeCompare(b.name)), [power]);
@@ -1572,7 +1675,7 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam, mod
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp md-cmpmodal" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Swimmer comparison</div><div className="md-msub">{mode === "complex" ? "Drag up to 4 swimmers from the bank into the slots." : "Pick 2 swimmers by team, age and gender."} Projections use each swimmer's own improvement spread.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Swimmer comparison</div><div className="md-msub">{mode === "complex" ? "Drag up to 4 swimmers from the bank into the slots." : "Pick 2 swimmers by team, age and gender."} Projections use each swimmer's own improvement spread.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl">
           <label className="md-ctl">Stroke<select value={stroke} onChange={(e) => setStroke(e.target.value)}>{PROG_STROKES.map((s) => <option key={s}>{s}</option>)}</select></label>
           <button className="md-cmpmodebtn" onClick={toggleMode}>{mode === "complex" ? "Simple" : "Complex"}</button>
@@ -1608,7 +1711,14 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam, mod
         {fastest && filled.length >= 2 && <div className="md-cmpwin">Projected fastest: <b style={{ color: teamColor(fastest.team) }}>{fastest.name}</b> ({fmtT(fastest.likely)}) · {((winProb[simKey(fastest)] || 0) * 100).toFixed(0)}% to touch first</div>}
         <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
       </div>
-      {profilePop && <SwimmerProfilePopover name={profilePop.name} team={profilePop.team} seasonMeets={seasonMeets} liveMeet={{ meetName: "This meet", events, data }} rect={profilePop.rect} depth={0} onClose={() => setProfilePop(null)} />}
+      {profilePop && (
+        // Stops a click on the popover (e.g. its own ✕) from bubbling up to
+        // the .md-scrim's onClick, which would otherwise close the whole
+        // comparison modal along with the popover.
+        <div onClick={(e) => e.stopPropagation()}>
+          <SwimmerProfilePopover name={profilePop.name} team={profilePop.team} seasonMeets={seasonMeets} liveMeet={{ meetName: "This meet", events, data }} rect={profilePop.rect} depth={0} onClose={() => setProfilePop(null)} onOpenLeague={onOpenLeague} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1740,7 +1850,7 @@ function AttendanceToggle({ present, onToggle }) {
     </div>
   );
 }
-function AttendancePopup({ team, roster, isAbsent, onToggle, rect, onClose }) {
+function AttendancePopup({ team, roster, isAbsent, onToggle, onResetAll, rect, onClose }) {
   const ref = useRef(null);
   const [search, setSearch] = useState("");
   const [pos, setPos] = useState({ top: rect.bottom + 10, left: rect.left, caret: 24 });
@@ -1758,7 +1868,7 @@ function AttendancePopup({ team, roster, isAbsent, onToggle, rect, onClose }) {
     <div ref={ref} className="md-attndpov" style={{ top: pos.top, left: pos.left }} role="dialog">
       <span className="md-caret" style={{ left: pos.caret }} />
       <div className="md-agepovhead"><span>Who's coming — {team}</span><button className="md-x sm" onClick={onClose}>✕</button></div>
-      <div className="md-attndsub">{roster.length - absentCount} of {roster.length} present</div>
+      <div className="md-attndsub">{roster.length - absentCount} of {roster.length} present{absentCount > 0 && <button className="md-attndreset" onClick={onResetAll}>Reset — everyone coming</button>}</div>
       <input className="md-attndsearch" placeholder="Search swimmers…" value={search} onChange={(e) => setSearch(e.target.value)} />
       <div className="md-attndlist">
         {filtered.length ? filtered.map((s) => (
@@ -1812,6 +1922,7 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const [attendanceOpen, setAttendanceOpen] = useState(null); // { rect } | null
   const isAbsent = (name, team) => attendance[name + "|" + team] === false;
   const toggleAttendance = (name, team) => setAttendance((a) => ({ ...a, [name + "|" + team]: a[name + "|" + team] === false ? true : false }));
+  const resetAttendance = (team) => setAttendance((a) => { const na = {}; Object.entries(a).forEach(([k, v]) => { if (!k.endsWith("|" + team)) na[k] = v; }); return na; });
   // If a team doesn't have 8+ swimmers in this age group, there just aren't
   // enough people for two fully-distinct A squads — let someone swim both
   // instead of leaving a relay short. Only enforce "one A relay per person"
@@ -1884,14 +1995,14 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Relay builder — fastest {relayType.toLowerCase()} relay</div><div className="md-msub">Built from the whole season ({meets.length} meet{meets.length === 1 ? "" : "s"}) · check off teams to compare against · lock in a lineup to freeze it while comparing.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Relay builder — fastest {relayType.toLowerCase()} relay</div><div className="md-msub">Built from the whole season ({meets.length} meet{meets.length === 1 ? "" : "s"}) · check off teams to compare against · lock in a lineup to freeze it while comparing.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl">
           <div className="md-rbtabs">{["Free", "Medley"].map((t) => <button key={t} className={"md-rbtab" + (relayType === t ? " on" : "")} onClick={() => setRelayType(t)}>{t}</button>)}</div>
           <label className="md-ctl">Age<select value={ag} onChange={(e) => setAg(e.target.value)}>{ageGroups.map((a) => <option key={a} value={a}>{a}</option>)}</select></label>
           {mixed ? <span className="md-mixtag">Mixed</span> : <label className="md-ctl">Gender<select value={gender} onChange={(e) => setGender(e.target.value)}>{["Girls", "Boys"].map((g) => <option key={g} value={g}>{g}</option>)}</select></label>}
           <button className="md-mbtn sm" onClick={(e) => setAttendanceOpen(attendanceOpen ? null : { rect: e.currentTarget.getBoundingClientRect() })}>🧍 Who's coming</button>
         </div>
-        {attendanceOpen && <AttendancePopup team={homeTeam} roster={rosterFor(homeTeam)} isAbsent={(name) => isAbsent(name, homeTeam)} onToggle={(name) => toggleAttendance(name, homeTeam)} rect={attendanceOpen.rect} onClose={() => setAttendanceOpen(null)} />}
+        {attendanceOpen && <AttendancePopup team={homeTeam} roster={rosterFor(homeTeam)} isAbsent={(name) => isAbsent(name, homeTeam)} onToggle={(name) => toggleAttendance(name, homeTeam)} onResetAll={() => resetAttendance(homeTeam)} rect={attendanceOpen.rect} onClose={() => setAttendanceOpen(null)} />}
         <div className="md-impbar"><span className="md-impnote">Compare against:</span>
           <span className="md-teamsel">{allTeams.filter((t) => t !== homeTeam).map((t) => <button key={t} className={"md-teamchip" + (selTeams.includes(t) ? " on" : "")} style={selTeams.includes(t) ? { background: teamColor(t), borderColor: teamColor(t), color: "#0a1628" } : {}} onClick={() => toggleTeam(t)}>{t}</button>)}</span></div>
         {homeRow && <div className="md-rbhometeam">
@@ -2044,6 +2155,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   const [dqTarget, setDqTarget] = useState(null);
   const [dqSwimmer, setDqSwimmer] = useState(null);
   const [dqNsTarget, setDqNsTarget] = useState(null); // leg-specific id for the No-show toggle inside DQModal
+  const [dqAnchorRect, setDqAnchorRect] = useState(null); // where DQModal's caret points
   const [scratchTarget, setScratchTarget] = useState(null);
   const [relayReplaceTarget, setRelayReplaceTarget] = useState(null);
   const [modal, setModal] = useState(null);
@@ -2061,6 +2173,15 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   // remembered the next time the modal is opened, not reset to the default
   // every time. Starts on Simple, the quicker 2-swimmer picker.
   const [cmpMode, setCmpMode] = useState("simple");
+  // Which team the Meet stats modal is focused on — null means "my team"
+  // (homeTeam); tapping a team's score in the top strip focuses that team
+  // instead, same as tapping a swimmer name opens their own profile.
+  const [statsTeam, setStatsTeam] = useState(null);
+  // Set when a swimmer's name is tapped from a profile popover elsewhere
+  // (meet sheet, comparison, age-group list) so League opens straight to
+  // their profile instead of the team roster.
+  const [leagueProfileTarget, setLeagueProfileTarget] = useState(null);
+  const openLeagueProfile = (name, team) => { setLeagueProfileTarget({ name, team }); setModal("league"); setMenuOpen(false); setPop(null); setAgeStack([]); };
   const [startedHeats, setStartedHeats] = useState({});
   const [showFinalizeDqs, setShowFinalizeDqs] = useState(false);
   const autoFinalizeShown = useRef(false);
@@ -2157,9 +2278,19 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   const revertRelaySwap = (legId) => { relaySwapHistory[legId]?.(); };
   const [seasonMeets, setSeasonMeets] = useState([]);
   const progMeets = useMemo(() => [{ date: "This meet", meetName, events, data }, ...seasonMeets], [meetName, events, data, seasonMeets]);
-  // Includes the live in-progress meet (unlike seasonMeets alone) so the
-  // age-group rank popover isn't empty before this meet gets saved to season.
-  const rankMeets = useMemo(() => [{ mode, events, data }, ...seasonMeets], [mode, events, data, seasonMeets]);
+  // Includes the live in-progress meet (unlike seasonMeets alone) so League
+  // stats, Team stats, and swimmer profiles reflect DQs/splits/notes/times
+  // the instant they're entered, without waiting on "Save to season." Skips
+  // the live meet once it's actually been saved (same dedup key saveToSeason
+  // itself uses), so a saved meet is never double-counted. Saved snapshots
+  // always carry an "id" — the live entry never does — so consumers can tell
+  // them apart (e.g. for a "saved meets" count in a subtitle).
+  const liveMeetDateKey = meetDate || new Date().toISOString().slice(0, 10);
+  const liveAlreadySaved = seasonMeets.some((m) => m.meetName === meetName && m.date === liveMeetDateKey);
+  const rankMeets = useMemo(() => {
+    const live = { meetName, mode, date: liveMeetDateKey, events, data, homeTeam, hostTeam, awayTeam, dualLanes };
+    return liveAlreadySaved ? seasonMeets : [live, ...seasonMeets];
+  }, [liveAlreadySaved, meetName, mode, liveMeetDateKey, events, data, homeTeam, hostTeam, awayTeam, dualLanes, seasonMeets]);
   const relayCandidates = useMemo(() => relayReplaceTarget ? relayReplacementCandidates(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, relayReplaceTarget.team) : [], [relayReplaceTarget, events, data]);
   // Time & place +/- for each candidate: this relay's own delta from
   // swapping in their time, plus (for a "move" candidate) the donor relay's
@@ -2190,10 +2321,21 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     return relayPlaceProjection(events, relayReplaceTarget.team, relayReplaceTarget.evIdx, medleyPlan.total - origTotal);
   }, [medleyPlan, relayReplaceTarget, events]);
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2200); };
-  // Restore last session, then autosave (debounced).
+  // Restore last session, then autosave.
   useEffect(() => { if (!STORE) return; let live = true; (async () => { try { const r = await STORE.get(CUR_KEY); if (live && r && r.value) { const s = JSON.parse(r.value); if (s.events) { setEvents(s.events); setRecords(s.records || {}); setData(s.data || {}); if (s.meetName) setMeetName(s.meetName); if (s.meetDate) setMeetDate(s.meetDate); if (s.mode) setMode(s.mode); if (s.homeTeam) setHomeTeam(s.homeTeam); if (s.hostTeam) setHostTeam(s.hostTeam); if (s.awayTeam) setAwayTeam(s.awayTeam); if (s.dualLanes) setDualLanes(s.dualLanes); } } } catch (e) {}
     try { const r = await STORE.get(INDEX_KEY); if (live && r && r.value) { const arr = []; for (const it of JSON.parse(r.value)) { try { const mr = await STORE.get(it.id); if (mr && mr.value) arr.push(JSON.parse(mr.value)); } catch (e) {} } setSeasonMeets(arr); } } catch (e) {} })(); return () => { live = false; }; }, []);
-  useEffect(() => { if (!STORE) return; const t = setTimeout(() => { STORE.set(CUR_KEY, JSON.stringify({ events, records, data, meetName, meetDate, mode, homeTeam, hostTeam, awayTeam, dualLanes })).catch(() => {}); }, 2000); return () => clearTimeout(t); }, [events, records, data, meetName, meetDate, mode, homeTeam, awayTeam, dualLanes]);
+  // Autosave the current draft (for session restore) once the whole current
+  // EVENT finishes — not after every heat/keystroke — so saves land at
+  // natural pause points. A slow idle fallback still covers the case where a
+  // coach steps away mid-event without ever completing it.
+  const evComplete = useMemo(() => { if (!current) return false; const heats = (events[current.evIdx] || {}).heats || [];
+    return heats.length > 0 && heats.every((ht, hi) => { let entered = 0, done = 0, timed = 0; ht.lanes.forEach((l) => { const d = data[entryId(current.evIdx, hi, l.lane)] || {}; entered++; if (d.time || (d.dqs || []).length) done++; if (d.time) timed++; }); return entered > 0 && timed > 0 && done === entered; });
+  }, [current, events, data]);
+  const savedEvtRef = useRef(-1);
+  useEffect(() => { if (!STORE || !evComplete || !current || savedEvtRef.current === current.evIdx) return; savedEvtRef.current = current.evIdx;
+    STORE.set(CUR_KEY, JSON.stringify({ events, records, data, meetName, meetDate, mode, homeTeam, hostTeam, awayTeam, dualLanes })).catch(() => {});
+  }, [evComplete, current, events, records, data, meetName, meetDate, mode, homeTeam, awayTeam, dualLanes]);
+  useEffect(() => { if (!STORE) return; const t = setTimeout(() => { STORE.set(CUR_KEY, JSON.stringify({ events, records, data, meetName, meetDate, mode, homeTeam, hostTeam, awayTeam, dualLanes })).catch(() => {}); }, 8000); return () => clearTimeout(t); }, [events, records, data, meetName, meetDate, mode, homeTeam, awayTeam, dualLanes]);
   // Uses the meet-date field (settable in Meet setup) instead of "today" so
   // importing results from a past meet saves under its actual date.
   const saveToSeason = async () => { const date = meetDate || new Date().toISOString().slice(0, 10); const id = "meetdeck:meet:" + Date.now(); const snap = { id, meetName, mode, date, events, data, records, homeTeam, hostTeam, awayTeam, dualLanes };
@@ -2247,11 +2389,14 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       setEvents((evs) => evs.map((ev, ei) => ei !== evIdx ? ev : { ...ev, heats: ev.heats.map((ht, hi) => hi !== htIdx ? ht : { ...ht, lanes: ht.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: l.swimmers.map((s, i) => i !== leg ? s : (outgoing || s)) }) }) }));
       update(legId, prevLegData || { time: "", dqs: [], tags: {}, notes: "" });
       if (donorLegId) update(donorLegId, { scratched: false });
-      setRelaySwapHistory((h) => { const { [legId]: _, ...rest } = h; return rest; });
+      setRelaySwapHistory((h) => { const rest = { ...h }; delete rest[legId]; if (donorLegId) delete rest[donorLegId]; return rest; });
       flash("Undone");
     };
     pushRelayUndo(candidate.name + " swapped in for " + (outgoing ? outgoing.name : "scratched swimmer"), restoreFn);
-    setRelaySwapHistory((h) => ({ ...h, [legId]: restoreFn }));
+    // Registered under both legs so the Scratches page can offer the same
+    // full revert whether the coach is looking at the relay that gained a
+    // swimmer or the donor relay that lost one.
+    setRelaySwapHistory((h) => ({ ...h, [legId]: restoreFn, ...(donorLegId ? { [donorLegId]: restoreFn } : {}) }));
     // Moving someone in from another relay only touches these two lineups —
     // this one (gaining them) and their old one (now short a leg). Their old
     // slot is left flagged scratched for the coach to fill on their own time
@@ -2288,11 +2433,14 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       setEvents((evs) => evs.map((e, ei) => ei !== evIdx ? e : { ...e, heats: e.heats.map((h, hi) => hi !== htIdx ? h : { ...h, lanes: h.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: prevSwimmers }) }) }));
       prevLegDatas.forEach((pd, i) => update(legIds[i], pd || { time: "", dqs: [], tags: {}, notes: "" }));
       if (donorLegId) update(donorLegId, { scratched: false });
-      setRelaySwapHistory((h) => { const rest = { ...h }; legIds.forEach((id) => delete rest[id]); return rest; });
+      setRelaySwapHistory((h) => { const rest = { ...h }; legIds.forEach((id) => delete rest[id]); if (donorLegId) delete rest[donorLegId]; return rest; });
       flash("Undone");
     };
     pushRelayUndo("Lineup updated for " + team, restoreFn);
-    setRelaySwapHistory((h) => { const nh = { ...h }; legIds.forEach((id) => (nh[id] = restoreFn)); return nh; });
+    // Registered under every leg this plan touched, plus the donor relay's
+    // leg (if a "move" pulled someone in) — so the Scratches page can offer
+    // the same full revert from either relay's row.
+    setRelaySwapHistory((h) => { const nh = { ...h }; legIds.forEach((id) => (nh[id] = restoreFn)); if (donorLegId) nh[donorLegId] = restoreFn; return nh; });
     if (conflictLeg) {
       update(donorLegId, { scratched: true });
       flash(conflictLeg.name + " moved in — their " + shortEvent(otherSlots.get(conflictLeg.name).eventName) + " spot is now open");
@@ -2324,8 +2472,8 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     const info = swimmerAt(id); if (!info) return null;
     const d = get(id);
     return (
-      <ActionPopover key={key} info={info} d={d} mine={info.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(info.eventName)} hideSplits={info.leg !== undefined || !!info.sw.swimmers} relaySwimmer={info.leg !== undefined} progMeets={progMeets} rect={rect} depth={depth} onClose={onCloseThis}
-        onDq={() => { setDqTarget(info.relayBase || id); setDqSwimmer(info.leg !== undefined ? info.sw.name : null); setDqNsTarget(id); setPop(null); setAgeStack([]); }}
+      <ActionPopover key={key} info={info} d={d} mine={info.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(info.eventName)} hideSplits={info.leg !== undefined || !!info.sw.swimmers} relaySwimmer={info.leg !== undefined} relaySplit={info.leg !== undefined ? (get(info.relayBase).splits || [])[info.leg] : null} progMeets={progMeets} rect={rect} depth={depth} onClose={onCloseThis}
+        onDq={() => { setDqTarget(info.relayBase || id); setDqSwimmer(info.leg !== undefined ? info.sw.name : null); setDqNsTarget(id); setDqAnchorRect(rect); setPop(null); setAgeStack([]); }}
         onDqQuick={() => toggleQuickDq(info.relayBase || id, info.leg !== undefined ? info.sw.name : null)}
         onToggle={(k) => toggleTag(id, k)} onSplits={(a) => update(id, { splits: a })} onNotes={(v) => update(id, { notes: v })} onNoShow={() => update(id, { noshow: !isNoShow(get(id)) })}
         onScratch={() => { setScratchTarget({ id, name: info.sw.name, team: info.sw.team, evIdx: info.ei, htIdx: info.hi, lane: info.ln, relay: info.leg !== undefined, leg: info.leg, eventName: info.eventName }); setPop(null); setAgeStack([]); }}
@@ -2361,7 +2509,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
             <div className="md-menuscrim" onClick={() => setMenuOpen(false)} />
             <div className="md-menu">
               <div className="md-menutitle">Analytics</div>
-              <button className="md-mbtn" onClick={() => { setModal("stats"); setMenuOpen(false); }}>Meet stats</button>
+              <button className="md-mbtn" onClick={() => { setStatsTeam(null); setModal("stats"); setMenuOpen(false); }}>Meet stats</button>
               <button className="md-mbtn" onClick={() => { setModal("league"); setMenuOpen(false); }}>League stats</button>
               <button className="md-mbtn" onClick={() => { setModal("season"); setMenuOpen(false); }}>Team stats</button>
               <div className="md-menutitle">Meet day</div>
@@ -2375,7 +2523,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
             </div>
           </>)}
         </div>
-        <ScoreStrip scores={scores} mode={mode} home={hostTeam} away={awayTeam} teams={teamsPresent} />
+        <ScoreStrip scores={scores} mode={mode} home={hostTeam} away={awayTeam} teams={teamsPresent} onTeamClick={(t) => { setStatsTeam(t); setModal("stats"); }} />
       </header>
 
       <div className="md-grid">
@@ -2388,18 +2536,23 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           </div>
 
           <div className={"md-panel water" + (isStarted ? " grow" : " prestart")}>
-            <div className="md-phead"><span className="md-eyebrow water-e">
+            <div className="md-phead">
+              <span className="md-waterhead">
                 {isRelayEvent(current?.eventName)
                   ? <button className="md-splitsdot" onClick={() => setRelaySplitsScope({ evIdx: current.evIdx, htIdx: current.htIdx, lane: null })} aria-label="Open relay splits for the whole team" title="Relay splits — whole team" />
                   : <span className="md-splitsdot static" />}
-                In the water{!isStarted && <em className="md-waiting"> · ready</em>}</span>
+                <span className="md-waterstack">
+                  <span className="md-eyebrow water-e">In the water{!isStarted && <em className="md-waiting"> · ready</em>}</span>
+                  {clockActive && <RaceClockDisplay startedAt={clockActive.startedAt} stopped={curHeatComplete} />}
+                </span>
+              </span>
               {isStarted
                 ? <button className="md-endrace" onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1} aria-label="Stop / end race" />
                 : <button className="md-startsq" onClick={startRace} aria-label="Start race">▶</button>}
               <span className="md-pnav"><button onClick={() => setHeatPtr((p) => Math.max(0, p - 1))} disabled={ptr === 0}>‹</button>
                 <span className="md-pmeta">#{events[current.evIdx].num} {shortEvent(current?.eventName)} · H{current?.num}</span>
-                <button onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1}>›</button></span></div>
-            {clockActive && <RaceClockDisplay startedAt={clockActive.startedAt} stopped={curHeatComplete} />}
+                <button onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1}>›</button></span>
+            </div>
             {isStarted ? (<>
               <div className="md-lanes">
                 {slots(current, lanesPerHeat).map((l, i) => l ? (() => { const id = entryId(current.evIdx, current.htIdx, l.lane);
@@ -2467,11 +2620,11 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           (name, team, rect) => setAgeStack([{ kind: "profile", name, team, rect }]), "base")}
         {ageStack.map((item, i) => item.kind === "age"
           ? <AgeGroupPopover key={"age" + i} ageGroup={item.ageGroup} roster={ageGroupPowerRoster(rankMeets, item.ageGroup)} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} onPick={(name, team, el) => setAgeStack((s) => [...s.slice(0, i + 1), { kind: "profile", name, team, rect: el.getBoundingClientRect() }])} />
-          : <SwimmerProfilePopover key={"pf" + i} name={item.name} team={item.team} seasonMeets={seasonMeets} liveMeet={{ meetName, mode, events, data }} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} />)}
+          : <SwimmerProfilePopover key={"pf" + i} name={item.name} team={item.team} seasonMeets={rankMeets} liveMeet={{ meetName, mode, events, data }} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} onOpenLeague={openLeagueProfile} />)}
       </>)}
       {showFinalizeDqs && <FinalizeDqsPanel list={pendingDqs} onClose={() => setShowFinalizeDqs(false)}
-        onPick={(row) => { setDqTarget(row.id); setDqSwimmer(row.swimmer || null); setDqNsTarget(row.id); }} />}
-      {dqInfo && <DQModal info={dqInfo} dqs={get(dqTarget).dqs || []} swimmer={dqSwimmer} ns={isNoShow(get(dqNsTarget || dqTarget))} onClose={() => { setDqTarget(null); setDqSwimmer(null); setDqNsTarget(null); }}
+        onPick={(row, el) => { setDqTarget(row.id); setDqSwimmer(row.swimmer || null); setDqNsTarget(row.id); setDqAnchorRect(el ? el.getBoundingClientRect() : null); }} />}
+      {dqInfo && <DQModal info={dqInfo} dqs={get(dqTarget).dqs || []} swimmer={dqSwimmer} ns={isNoShow(get(dqNsTarget || dqTarget))} rect={dqAnchorRect} onClose={() => { setDqTarget(null); setDqSwimmer(null); setDqNsTarget(null); setDqAnchorRect(null); }}
         onClear={() => update(dqTarget, { dqs: [] })}
         onNoShow={() => { const id = dqNsTarget || dqTarget; update(id, { noshow: !isNoShow(get(id)) }); }}
         onToggle={(group, code, reason) => toggleDqCode(dqTarget, group, code, reason, dqSwimmer)} />}
@@ -2494,21 +2647,21 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           if (STORE) { (async () => { try { await STORE.set(id, JSON.stringify(snap)); let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {} idx = idx.filter((x) => x.meetName !== name || x.date !== saveDate); idx.push({ id, meetName: name, mode: mtype, date: saveDate }); await STORE.set(INDEX_KEY, JSON.stringify(idx)); } catch (e) {} })(); }
           flash("Saved new meet: " + name);
         }} />}
-      {modal === "stats" && <StatsModal onClose={() => setModal(null)} events={events} data={data} mode={mode} filter={filter} homeTeam={homeTeam} />}
+      {modal === "stats" && <StatsModal onClose={() => { setModal(null); setStatsTeam(null); }} events={events} data={data} mode={mode} filter={filter} homeTeam={statsTeam || homeTeam} />}
       {modal === "participants" && <ParticipantsModal onClose={() => setModal(null)} events={events} data={data} homeTeam={homeTeam}
         onOne={(entry, val) => { update(entry.id, { scratched: val });
           if (val && entry.relay) { pushRelayUndo("Scratched " + entry.name, () => { update(entry.id, { scratched: false }); flash("Undone"); }); setRelayReplaceTarget({ evIdx: entry.evIdx, htIdx: entry.htIdx, lane: entry.relayLane, leg: entry.leg, name: entry.name, team: entry.team, eventName: events[entry.evIdx]?.name || entry.ev }); } }}
         onAll={(name, team, val) => scratchAll(name, team, val)} revertible={relaySwapHistory} onRevertSwap={revertRelaySwap} />}
-      {modal === "league" && <LeagueModal onClose={() => setModal(null)} meets={seasonMeets} homeTeam={homeTeam} liveMeet={{ meetName, mode, events, data }} />}
-      {modal === "season" && <SeasonModal onClose={() => setModal(null)} homeTeam={homeTeam} meets={seasonMeets} />}
+      {modal === "league" && <LeagueModal onClose={() => { setModal(null); setLeagueProfileTarget(null); }} meets={rankMeets} homeTeam={homeTeam} liveMeet={{ meetName, mode, events, data }} initialProfile={leagueProfileTarget} />}
+      {modal === "season" && <SeasonModal onClose={() => setModal(null)} homeTeam={homeTeam} meets={rankMeets} />}
       {modal === "meetsetup" && <MeetSetupModal onClose={() => setModal(null)} meetName={meetName} setMeetName={setMeetName} meetDate={meetDate} setMeetDate={setMeetDate} mode={mode} setMode={setMode} dualLanes={dualLanes} setDualLanes={setDualLanes} hostTeam={hostTeam} setHostTeam={setHostTeam} awayTeam={awayTeam} setAwayTeam={setAwayTeam} teams={teamsPresent} onImport={() => setModal("import")} />}
       {modal === "settings" && <SettingsModal onClose={() => setModal(null)} homeTeam={homeTeam} setHomeTeam={setHomeTeam} teams={teamsPresent} onMeetSetup={() => setModal("meetsetup")} onResults={() => setModal("results")} onSave={() => saveToSeason()} onExport={() => setModal("export")} onClear={clearData} meets={seasonMeets} onLoad={loadMeet} onDelete={deleteMeet}
         session={session} isAdmin={isAdmin} onLogout={onLogout} onManageAccounts={() => setModal("accounts")} />}
       {modal === "accounts" && isAdmin && <AccountsModal onClose={() => setModal(null)} accounts={accounts} onSave={onSaveAccounts} currentUsername={session?.username} />}
-      {modal === "compare" && <SwimmerCompareModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} mode={cmpMode} onModeChange={setCmpMode} />}
+      {modal === "compare" && <SwimmerCompareModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} mode={cmpMode} onModeChange={setCmpMode} onOpenLeague={openLeagueProfile} />}
       {scratchTarget && <div className="md-scrim" onClick={() => setScratchTarget(null)}>
         <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
-          <div className="md-mhead"><div><div className="md-mtitle">Scratch {scratchTarget.name}?</div><div className="md-msub">Scratched swims are crossed out and don't score or place.</div></div><button className="md-x" onClick={() => setScratchTarget(null)}>✕</button></div>
+          <div className="md-mhead"><button className="md-logo sm" onClick={() => setScratchTarget(null)} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Scratch {scratchTarget.name}?</div><div className="md-msub">Scratched swims are crossed out and don't score or place.</div></div><button className="md-x" onClick={() => setScratchTarget(null)}>✕</button></div>
           <div className="md-scratchbtns">
             <button className="md-mbtn" onClick={() => { scratchOne(scratchTarget.id); setPop(null);
               if (scratchTarget.relay) { pushRelayUndo("Scratched " + scratchTarget.name, () => { unscratchOne(scratchTarget.id); flash("Undone"); }); setRelayReplaceTarget({ evIdx: scratchTarget.evIdx, htIdx: scratchTarget.htIdx, lane: scratchTarget.lane, leg: scratchTarget.leg, name: scratchTarget.name, team: scratchTarget.team, eventName: scratchTarget.eventName }); }
@@ -2611,7 +2764,7 @@ function AccountsModal({ onClose, accounts, onSave, currentUsername }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">👤 Manage accounts</div><div className="md-msub">Admin only — add or remove coach logins.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">👤 Manage accounts</div><div className="md-msub">Admin only — add or remove coach logins.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
           {accounts.map((a) => (
             <div key={a.username} className="md-meetrow">
@@ -2781,7 +2934,7 @@ function MeetSetupModal({ onClose, meetName, setMeetName, meetDate, setMeetDate,
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Meet set up</div><div className="md-msub">Name, date, type, teams, lanes &amp; roster</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Meet set up</div><div className="md-msub">Name, date, type, teams, lanes &amp; roster</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
           <label className="md-mrow">Meet name<input value={meetName} onChange={(e) => setMeetName(e.target.value)} /></label>
           <label className="md-mrow">Meet date<input type="date" value={meetDate} onChange={(e) => setMeetDate(e.target.value)} /></label>
@@ -2803,7 +2956,7 @@ function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onR
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">⚙ Settings</div><div className="md-msub">Setup, team, saved meets &amp; data</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">⚙ Settings</div><div className="md-msub">Setup, team, saved meets &amp; data</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
           {session && <div className="md-acctrow"><span>Signed in as <b>{session.username}</b>{isAdmin ? " · admin" : ""}</span><button className="md-mbtn sm" onClick={onLogout}>Log out</button></div>}
           {isAdmin && <button className="md-mbtn" onClick={onManageAccounts}>👤 Manage accounts</button>}
@@ -2840,15 +2993,22 @@ function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onR
   );
 }
 
-function ScoreStrip({ scores, mode, home, away, teams }) {
+function ScoreStrip({ scores, mode, home, away, teams, onTeamClick }) {
   if (mode === "timetrial") return <div className="md-strip"><span className="md-ttlabel">⏱ Time trials — no scoring</span></div>;
   const row = (t) => { const sw = scores.swims[t] || 0, im = scores.imp[t] || 0; return { t, pts: scores.pts[t] || 0, pct: sw ? Math.round((im / sw) * 100) : 0 }; };
-  if (mode === "dual") { const H = row(home), A = row(away); return <div className="md-strip dual"><TeamScore r={H} big /><span className="md-vs">vs</span><TeamScore r={A} big /></div>; }
+  if (mode === "dual") { const H = row(home), A = row(away); return <div className="md-strip dual"><TeamScore r={H} big onClick={onTeamClick} /><span className="md-vs">vs</span><TeamScore r={A} big onClick={onTeamClick} /></div>; }
   const rows = teams.map(row).sort((a, b) => b.pts - a.pts);
-  return <div className="md-strip">{rows.map((r) => <TeamScore key={r.t} r={r} />)}</div>;
+  return <div className="md-strip">{rows.map((r) => <TeamScore key={r.t} r={r} onClick={onTeamClick} />)}</div>;
 }
-function TeamScore({ r, big }) {
-  return <span className={"md-tscore" + (big ? " big" : "")}><span className="md-tsdot" style={{ background: teamColor(r.t) }} /><span className="md-tscode">{r.t}</span><span className="md-tspts">{r.pts}</span><span className="md-tspct">{r.pct}%<small>imp</small></span></span>;
+// Tapping a team's points/improvement pulls up its meet stats — same
+// "tap the summary, get the detail popover" pattern as swimmer names on the
+// meet sheet opening a profile.
+function TeamScore({ r, big, onClick }) {
+  return (
+    <button type="button" className={"md-tscore" + (big ? " big" : "")} onClick={() => onClick && onClick(r.t)}>
+      <span className="md-tsdot" style={{ background: teamColor(r.t) }} /><span className="md-tscode">{r.t}</span><span className="md-tspts">{r.pts}</span><span className="md-tspct">{r.pct}%<small>imp</small></span>
+    </button>
+  );
 }
 
 function LaneRow({ lane, d, place, rec, active, mine, selected, onSelect, onTime, eventName, clockActive, onLap, onSplitEdit }) {
@@ -2929,7 +3089,7 @@ function popoverPos(rect, depth) {
   if (left + W > vw - m) left = Math.max(POV_SAFE_X, vw - W - m);
   return { top, left };
 }
-function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progMeets, rect, depth, onClose, onDq, onDqQuick, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenAgeGroup, onOpenProfile }) {
+function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, relaySplit, progMeets, rect, depth, onClose, onDq, onDqQuick, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenAgeGroup, onOpenProfile }) {
   const ref = useRef(null);
   const lastDqClick = useRef(0);
   const dq = hasDq(d), pend = isPendingDq(d);
@@ -2964,7 +3124,7 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progM
   const ns = isNoShow(d), scr = isScratched(d);
   return (
     <div ref={ref} className="md-pov" style={{ top: pos.top, left: pos.left }} role="dialog">
-      <div className="md-povhead"><div><div className="md-povname"><span className="md-povnamelink" onClick={(e) => onOpenProfile && onOpenProfile(e.currentTarget)}>{info.sw.name}</span> {info.sw.age > 0 && <span className="md-agechip" onClick={(e) => onOpenAgeGroup && onOpenAgeGroup(e.currentTarget)}>{info.sw.age}</span>}<span className="md-povteam" style={{ color: teamColor(info.sw.team) }}>{info.sw.team}</span></div><div className="md-povmeta">{shortEvent(info.eventName)} · H{info.heatNum} · Lane {info.ln}{info.sw.seed ? ` · seed ${info.sw.seed}` : ""}</div></div><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-povhead"><div><div className="md-povname"><button type="button" className="md-povnamelink" onClick={(e) => onOpenProfile && onOpenProfile(e.currentTarget)}>{info.sw.name}</button> {info.sw.age > 0 && <button type="button" className="md-agechip" onClick={(e) => onOpenAgeGroup && onOpenAgeGroup(e.currentTarget)}>{info.sw.age}</button>}<span className="md-povteam" style={{ color: teamColor(info.sw.team) }}>{info.sw.team}</span></div><div className="md-povmeta">{shortEvent(info.eventName)} · H{info.heatNum} · Lane {info.ln}{info.sw.seed ? ` · seed ${info.sw.seed}` : ""}</div></div><button className="md-x sm" onClick={onClose}>✕</button></div>
       <div className="md-povtop">
         <button className={"md-dq" + (dq ? " on" : "") + (pend ? " pend" : "")} onClick={dqClick}>
           {pend ? "DQ — reason pending" : dq ? `DQ ${dqLabel(d)} — tap to see why` : "Tap: DQ · Double-tap: pick reason"}
@@ -2988,6 +3148,7 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progM
             ))}
           </div>
         )}
+        {relaySwimmer && relaySplit && <div className="md-relaysplitread">⏱ Relay split: <b>{relaySplit}</b></div>}
         <textarea className="md-notearea" placeholder={`Notes on ${info.sw.name.split(",")[0]}…`} value={d.notes || ""} onChange={(e) => onNotes(e.target.value)} />
       </>) : (
         <div className="md-otherteam">Other team — DQ and no-show only.</div>
@@ -3039,7 +3200,7 @@ function AgeGroupPopover({ ageGroup, roster, rect, depth, onClose, onPick }) {
 // Rich swimmer profile as a small stacked popup (most improved swims, notes,
 // DQs, season points, last/upcoming meet) — the same content as the League
 // profile page, just reachable without leaving the board.
-function SwimmerProfilePopover({ name, team, seasonMeets, liveMeet, rect, depth, onClose }) {
+function SwimmerProfilePopover({ name, team, seasonMeets, liveMeet, rect, depth, onClose, onOpenLeague }) {
   const ref = useRef(null);
   const [pos, setPos] = useState(() => popoverPos(rect, depth));
   useLayoutEffect(() => {
@@ -3054,7 +3215,10 @@ function SwimmerProfilePopover({ name, team, seasonMeets, liveMeet, rect, depth,
   const prof = useMemo(() => computeSwimmerProfile(name, team, seasonMeets, liveMeet), [name, team, seasonMeets, liveMeet]);
   return (
     <div ref={ref} className="md-profilepov" style={{ top: pos.top, left: pos.left }} role="dialog">
-      <div className="md-agepovhead"><span>{name} <em style={{ color: teamColor(team) }}>{team}</em></span><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-agepovhead">
+        <span>{onOpenLeague ? <button type="button" className="md-povnamelink" onClick={() => onOpenLeague(name, team)}>{name}</button> : name} <em style={{ color: teamColor(team) }}>{team}</em></span>
+        <button className="md-x sm" onClick={onClose}>✕</button>
+      </div>
       <div className="md-profilestats">
         <div className="md-lgstat"><b>{prof.totalPts}</b><span>season pts</span></div>
         <div className="md-lgstat"><b>{prof.improvePct}%</b><span>improvement</span></div>
@@ -3090,21 +3254,34 @@ function pendingDqList(events, data) {
   return out;
 }
 
-function DQModal({ info, dqs, swimmer, ns, onClose, onClear, onToggle, onNoShow }) {
+// Floating, caret-anchored popover (not a full-screen modal) — points back
+// at whichever swimmer/row opened it, same non-blocking pattern as the other
+// popovers, and small enough to sit comfortably next to the Finalize DQs list.
+function DQModal({ info, dqs, swimmer, ns, rect, onClose, onClear, onToggle, onNoShow }) {
   const age = info.sw.age;
+  const ref = useRef(null);
+  const [pos, setPos] = useState({ top: 80, left: 80, caret: null });
+  useLayoutEffect(() => {
+    const W = 340, m = 10, vw = window.innerWidth, vh = window.innerHeight, h = ref.current ? ref.current.offsetHeight : 420;
+    if (!rect) { setPos({ top: Math.max(m, (vh - h) / 2), left: Math.max(m, (vw - W) / 2), caret: null }); return; }
+    let top = rect.bottom + 10;
+    if (top + h > vh - m) top = Math.max(m, vh - h - m);
+    const left = Math.min(Math.max(m, rect.left), vw - W - m);
+    setPos({ top, left, caret: Math.min(Math.max(16, rect.left + rect.width / 2 - left), W - 24) });
+  }, [rect]);
   useEffect(() => { const h = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose]);
   return (
-    <div className="md-scrim" onClick={onClose}>
-      <div className="md-modal" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Record DQ — select all that apply</div><div className="md-msub">{swimmer ? `${swimmer} (relay) · ` : ""}{info.sw.name} · {info.sw.team}{age > 0 ? ` · age ${age}` : ""} · {shortEvent(info.eventName)} · Lane {info.ln}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
-        {age > 0 && age <= 6 && <div className="md-warn red">🚩 <b>6 &amp; under — CHALLENGE this DQ.</b> 6u swimmers should not be getting DQed. Talk to the referee before accepting; only record what was clearly and directly observed.</div>}
-        {age >= 7 && age <= 8 && <div className="md-warn amber">⚠︎ <b>7–8 — review before accepting.</b> Double-check the call with the official; benefit of the doubt goes to the swimmer.</div>}
-        {!swimmer && <button className={"md-nsbtn" + (ns ? " on" : "")} style={{ marginBottom: 10 }} onClick={onNoShow}>{ns ? "NS — no-show" : "No-show (NS) instead of a DQ"}</button>}
-        <div className="md-codes">{Object.entries(DQ_CODES).map(([group, codes]) => (<div key={group} className="md-cgroup"><div className="md-cglabel">{group}</div><div className="md-cgrid">{codes.map(([code, reason]) => { const on = dqs.some((q) => q.code === code); return <button key={code} className={"md-code" + (on ? " on" : "")} onClick={() => onToggle(group, code, reason)} title={reason}><span className="md-ccode">{code}</span><span className="md-creason">{reason}</span></button>; })}</div></div>))}</div>
-        <div className="md-mfoot">
-          {dqs.length > 0 && <button className="md-clear" onClick={onClear}>Clear all ({dqs.length})</button>}
-          <button className="md-apply" onClick={onClose}>Done{dqs.length ? ` — ${dqs.length} selected` : ""}</button>
-        </div>
+    <div ref={ref} className="md-dqpov" style={{ top: pos.top, left: pos.left }} role="dialog">
+      {pos.caret != null && <span className="md-caret" style={{ left: pos.caret }} />}
+      <div className="md-agepovhead"><span>Record DQ — select all that apply</span><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-dqpovsub">{swimmer ? `${swimmer} (relay) · ` : ""}{info.sw.name} · {info.sw.team}{age > 0 ? ` · age ${age}` : ""} · {shortEvent(info.eventName)} · Lane {info.ln}</div>
+      {age > 0 && age <= 6 && <div className="md-warn red">🚩 <b>6 &amp; under — CHALLENGE this DQ.</b> 6u swimmers should not be getting DQed. Talk to the referee before accepting; only record what was clearly and directly observed.</div>}
+      {age >= 7 && age <= 8 && <div className="md-warn amber">⚠︎ <b>7–8 — review before accepting.</b> Double-check the call with the official; benefit of the doubt goes to the swimmer.</div>}
+      {!swimmer && <button className={"md-nsbtn" + (ns ? " on" : "")} style={{ marginBottom: 10 }} onClick={onNoShow}>{ns ? "NS — no-show" : "No-show (NS) instead of a DQ"}</button>}
+      <div className="md-codes">{Object.entries(DQ_CODES).map(([group, codes]) => (<div key={group} className="md-cgroup"><div className="md-cglabel">{group}</div><div className="md-cgrid">{codes.map(([code, reason]) => { const on = dqs.some((q) => q.code === code); return <button key={code} className={"md-code" + (on ? " on" : "")} onClick={() => onToggle(group, code, reason)} title={reason}><span className="md-ccode">{code}</span><span className="md-creason">{reason}</span></button>; })}</div></div>))}</div>
+      <div className="md-dqpovfoot">
+        {dqs.length > 0 && <button className="md-clear" onClick={onClear}>Clear all ({dqs.length})</button>}
+        <button className="md-apply" onClick={onClose}>Done{dqs.length ? ` — ${dqs.length} selected` : ""}</button>
       </div>
     </div>
   );
@@ -3143,7 +3320,7 @@ function ImportModal({ onClose, onApply, defaultTeam }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Import roster</div><div className="md-msub">Upload the VCSL meet program PDF (or paste text). Preview shows what was read.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Import roster</div><div className="md-msub">Upload the VCSL meet program PDF (or paste text). Preview shows what was read.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,.tsv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy || "PDF, .txt or .csv"}</span></div>
         <div className="md-impgrid">
           <textarea className="md-imparea" placeholder={"Paste here…\n\n#13 Girls 15-18 50 Yard Butterfly\nVCSL Record: 26.69 2018 Chelsea Huffman\nHeat 1 of 5 Finals\n3 Greenberg, Maayan 15 BDST 47.78"} value={text} onChange={(e) => setText(e.target.value)} />
@@ -3167,7 +3344,7 @@ function ExportModal({ onClose, events, data, myTeam, places, records, meetName 
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Export to Google Sheets — {myTeam}</div><div className="md-msub">Roster down the side, strokes across the top. Cells show place, time (B best · BR record), DQ codes, comments.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Export to Google Sheets — {myTeam}</div><div className="md-msub">Roster down the side, strokes across the top. Cells show place, time (B best · BR record), DQ codes, comments.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-exwrap"><table className="md-extable"><thead><tr>{matrix[0].map((h, i) => <th key={i}>{h}</th>)}</tr></thead><tbody>{matrix.slice(1).map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j} className={j === 0 ? "nm" : ""}>{c}</td>)}</tr>)}{matrix.length === 1 && <tr><td colSpan={matrix[0].length} className="md-exempty">No {myTeam} entries yet.</td></tr>}</tbody></table></div>
         {msg && <div className="md-exmsg">{msg}</div>}
         <div className="md-mfoot"><button className="md-cancel" onClick={onClose}>Close</button><button className="md-ghost2" onClick={download}>Download CSV</button><button className="md-apply" onClick={copy}>Copy for Google Sheets</button></div>
@@ -3207,7 +3384,8 @@ html, body, #root { height: 100%; }
 .md-acctrow { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:12.5px; color:#64748b; }
 .md-strip { display:flex; align-items:center; gap:8px; flex-wrap:wrap; overflow-x:auto; }
 .md-strip.dual { gap:14px; }
-.md-tscore { display:inline-flex; align-items:center; gap:6px; background:#0c1c33; border:1px solid var(--line); border-radius:10px; padding:5px 10px; }
+.md-tscore { display:inline-flex; align-items:center; gap:6px; background:#0c1c33; border:1px solid var(--line); border-radius:10px; padding:5px 10px; font:inherit; color:inherit; cursor:pointer; }
+.md-tscore:hover { border-color:var(--cyan); }
 .md-tscore.big { padding:7px 14px; border-radius:12px; }
 .md-tsdot { width:10px; height:10px; border-radius:50%; }
 .md-tscode { font-weight:800; font-size:12.5px; } .md-tscore.big .md-tscode { font-size:15px; }
@@ -3232,7 +3410,9 @@ html, body, #root { height: 100%; }
 .md-splitsdot { display:inline-block; width:18px; height:18px; margin-right:7px; border-radius:50%; background:#2563eb; border:none; padding:0; cursor:pointer; vertical-align:middle; box-shadow:0 0 0 4px rgba(37,99,235,.18); }
 .md-splitsdot:hover { background:#1d4ed8; }
 .md-splitsdot.static { background:var(--cyan); box-shadow:none; cursor:default; width:14px; height:14px; }
-.md-raceclock { flex:none; width:fit-content; margin:3px auto 0; padding:2px 10px; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:14px; font-weight:800; letter-spacing:.04em; color:var(--cyan); background:#0a1a2e; border-radius:6px; }
+.md-waterhead { display:flex; align-items:center; gap:8px; }
+.md-waterstack { display:flex; flex-direction:column; align-items:flex-start; gap:1px; }
+.md-raceclock { flex:none; width:fit-content; margin:0; padding:1px 8px; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:13px; font-weight:800; letter-spacing:.04em; color:var(--cyan); background:#0a1a2e; border-radius:5px; }
 .md-raceclock.stopped { color:var(--green); }
 .md-pnav { display:flex; align-items:center; gap:7px; }
 .md-pnav button { width:26px; height:26px; border-radius:7px; border:1px solid var(--line); background:#0c1c33; color:var(--text); font-size:16px; line-height:1; cursor:pointer; }
@@ -3364,7 +3544,9 @@ html, body, #root { height: 100%; }
 .md-pov { position:fixed; z-index:61; width:320px; max-height:74vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:12px; }
 .md-caret { position:absolute; top:-8px; width:16px; height:16px; background:#fff; border-left:1px solid var(--sline); border-top:1px solid var(--sline); transform:rotate(45deg); }
 .md-attndpov { position:fixed; z-index:71; width:280px; max-height:70vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:12px; }
-.md-attndsub { font-size:11px; font-weight:800; color:#64748b; margin-bottom:6px; }
+.md-attndsub { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:11px; font-weight:800; color:#64748b; margin-bottom:6px; }
+.md-attndreset { border:none; background:none; color:#0e7490; font-size:11px; font-weight:800; cursor:pointer; padding:0; text-decoration:underline; }
+.md-attndreset:hover { color:#0a5a6e; }
 .md-attndsearch { width:100%; padding:8px 10px; border-radius:9px; border:1px solid var(--sline); font-size:13px; margin-bottom:8px; }
 .md-attndlist { display:flex; flex-direction:column; gap:2px; }
 .md-attndrow { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 4px; font-size:13px; font-weight:700; color:var(--sink); }
@@ -3377,8 +3559,10 @@ html, body, #root { height: 100%; }
 .md-attndseg.on { color:#fff; }
 .md-povhead { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:10px; }
 .md-povname { font-weight:800; font-size:16px; display:flex; align-items:center; gap:7px; }
-.md-povnamelink { cursor:pointer; text-decoration:underline; text-decoration-color:transparent; transition:text-decoration-color .12s; } .md-povnamelink:hover { text-decoration-color:currentColor; }
-.md-agechip { background:#eef4fb; color:#33608a; font-size:11px; font-weight:800; padding:2px 7px; border-radius:16px; cursor:pointer; }
+.md-povnamelink { border:none; background:none; padding:0; font:inherit; color:inherit; cursor:pointer; text-decoration:none; }
+.md-povnamelink:hover, .md-povnamelink:focus, .md-povnamelink:active { text-decoration:none; outline:none; }
+.md-agechip { border:none; background:#eef4fb; color:#33608a; font:inherit; font-size:11px; font-weight:800; padding:2px 7px; border-radius:16px; cursor:pointer; text-decoration:none; }
+.md-agechip:hover, .md-agechip:focus, .md-agechip:active { text-decoration:none; outline:none; }
 .md-agechip:hover { background:#dbeafe; }
 .md-povmeta { font-size:12px; color:#64748b; margin-top:1px; }
 .md-agepov { position:fixed; z-index:61; width:270px; max-height:60vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:10px; }
@@ -3408,15 +3592,23 @@ html, body, #root { height: 100%; }
 .md-sub { padding:7px 10px; border-radius:8px; border:1.5px solid var(--sline); background:#fff; color:#334155; font-weight:600; font-size:12.5px; cursor:pointer; }
 .md-sub:hover { border-color:#94a3b8; } .md-sub.on { color:#fff; }
 
-.md-scrim { position:fixed; inset:0; background:rgba(6,14,28,.6); backdrop-filter:blur(2px); display:grid; place-items:center; padding:16px; z-index:50; }
+.md-scrim { position:fixed; inset:0; background:rgba(6,14,28,.6); backdrop-filter:blur(2px); display:grid; place-items:center; padding:16px; z-index:50; overscroll-behavior:contain; }
 .md-modal { position:relative; background:#fff; border-radius:18px; width:min(680px,96vw); max-height:92vh; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 30px 80px -20px rgba(0,0,0,.5); }
 .md-imp { width:min(940px,96vw); }
 .md-mhead { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:16px 18px; border-bottom:1px solid var(--sline); }
+.md-mheadtxt { flex:1; min-width:0; }
+.md-logo.sm { width:30px; height:30px; font-size:17px; border-radius:8px; flex:none; }
 .md-mtitle { font-weight:800; font-size:17px; } .md-msub { font-size:12.5px; color:#64748b; margin-top:2px; }
 .md-warn { margin:14px 18px 0; border-radius:12px; padding:12px 14px; font-size:13.5px; line-height:1.5; }
 .md-warn.red { background:#fef2f2; border:1px solid #fecaca; color:#b42318; }
 .md-warn.amber { background:#fffbeb; border:1px solid #fde68a; color:#92600a; }
-.md-codes { overflow-y:auto; padding:14px 18px; }
+.md-dqpov { position:fixed; z-index:61; width:340px; max-height:78vh; display:flex; flex-direction:column; overflow:hidden; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); }
+.md-dqpov .md-agepovhead { padding:12px 14px 0; }
+.md-dqpovsub { padding:2px 14px 8px; font-size:11.5px; font-weight:700; color:#64748b; }
+.md-dqpov .md-warn { margin:0 14px 8px; }
+.md-dqpov .md-nsbtn { margin-left:14px; margin-right:14px; width:calc(100% - 28px); }
+.md-dqpovfoot { display:flex; gap:8px; padding:10px 14px; border-top:1px solid var(--sline); }
+.md-codes { flex:1; min-height:0; overflow-y:auto; padding:14px 18px; }
 .md-cgroup { margin-bottom:14px; } .md-cglabel { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.1em; color:#64748b; margin-bottom:7px; }
 .md-cgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:7px; }
 .md-code { display:flex; align-items:center; gap:8px; text-align:left; padding:9px 10px; border-radius:9px; border:1px solid var(--sline); background:#fff; cursor:pointer; } .md-code:hover { border-color:var(--dq); background:#fff6f6; }
@@ -3459,12 +3651,16 @@ html, body, #root { height: 100%; }
 .md-notearea { width:100%; min-height:62px; margin-top:8px; resize:vertical; border-radius:10px; border:1px solid #cfe0f2; background:#fff; padding:9px 11px; font-size:13.5px; font-family:inherit; color:var(--sink); line-height:1.4; }
 .md-notearea.one { min-height:0; height:38px; }
 .md-notearea:focus { outline:2px solid var(--cyan); outline-offset:1px; border-color:var(--cyan); }
+.md-relaysplitread { margin-top:6px; font-size:13px; color:#0e7490; background:#ecfeff; border:1px solid #a5f3fc; border-radius:8px; padding:6px 10px; }
+.md-relaysplitread b { font-variant-numeric:tabular-nums; }
 .md-otherteam { font-size:12.5px; color:#64748b; background:#f8fafc; border:1px solid var(--sline); border-radius:10px; padding:10px 12px; line-height:1.5; }
 
-.md-splitscrim { position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(6,14,28,.45); display:grid; place-items:center; padding:16px; z-index:45; }
-.md-splitpanel { width:min(760px,96vw); max-height:82vh; background:#0a1628; border:1px solid var(--line); border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 30px 80px -20px rgba(0,0,0,.6); }
+.md-splitpanel { position:fixed; z-index:45; display:flex; flex-direction:column; overflow:hidden; background:#0a1628; border:1px solid var(--line); border-radius:16px; box-shadow:0 30px 80px -20px rgba(0,0,0,.6); }
 .md-splithead { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; color:var(--text); font-weight:800; font-size:14px; border-bottom:1px solid var(--line); background:linear-gradient(180deg,#122b4d,#0d2038); }
-.md-splitgrid { padding:12px; display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; overflow-y:auto; }
+.md-splitstandings { display:flex; flex-wrap:wrap; gap:8px; padding:8px 14px; background:#0c1c33; border-bottom:1px solid var(--line); font-size:12.5px; color:#9fb3cc; }
+.md-standingchip { display:inline-flex; align-items:center; gap:4px; }
+.md-standingchip.mine { background:rgba(56,224,255,.12); border:1px solid rgba(56,224,255,.35); border-radius:16px; padding:2px 9px; color:var(--cyan); }
+.md-splitgrid { padding:12px; display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:10px; overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
 .md-splitcard { background:#0c1c33; border:1px solid var(--line); border-radius:12px; padding:10px; }
 .md-splitcard.mine { box-shadow:inset 3px 0 0 #facc15; }
 .md-splitcardhead { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
@@ -3497,7 +3693,7 @@ html, body, #root { height: 100%; }
 .md-statsfilterbtn:hover { background:rgba(255,255,255,.2); }
 .md-statsfilterbtn.on { background:#fff; color:#0f2036; border-color:#fff; }
 .md-statsfilterpanel { display:flex; flex-direction:column; gap:8px; padding:12px 20px; border-bottom:1px solid var(--sline); background:#f8fafc; }
-.md-statcol { overflow-y:auto; padding:12px 16px; border-right:1px solid var(--sline); }
+.md-statcol { overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:12px 16px; border-right:1px solid var(--sline); }
 .md-statcol:last-child { border-right:none; }
 .md-stath { font-weight:800; font-size:13px; margin-bottom:8px; color:var(--sink); position:sticky; top:0; background:#fff; padding-bottom:4px; }
 .md-statrow { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #f1f5f9; }
@@ -3658,6 +3854,10 @@ html, body, #root { height: 100%; }
 .md-lgresult { font-weight:800; text-align:right; } .md-lgresult.win { color:#166534; } .md-lgresult.loss { color:#b42318; }
 .md-lgswimname { font-weight:700; color:var(--sink); }
 .md-lgfilters { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start; padding:2px 0 14px; }
+.md-lgfilterwrap { margin-top:18px; padding-top:14px; border-top:1px solid var(--sline); }
+.md-lgfiltertop { display:flex; align-items:center; gap:10px; }
+.md-lgfiltertop .md-statsfilterbtn { border:1px solid var(--sline); background:#f8fafc; color:var(--sink); }
+.md-lgfiltertop .md-statsfilterbtn.on { border-color:var(--cyan); background:#e6fbff; color:#0e7490; }
 .md-lgsearch { position:relative; display:flex; align-items:center; }
 .md-lgsearchbtn { width:36px; height:36px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-size:15px; cursor:pointer; }
 .md-lgsearchbtn.on { background:var(--cyan); border-color:var(--cyan); }
@@ -3781,7 +3981,7 @@ html, body, #root { height: 100%; }
 .md-scratchmodal { width:min(400px,94vw); }
 .md-scratchbtns { padding:14px 18px; display:flex; flex-direction:column; gap:8px; }
 .md-planlegs { display:flex; flex-direction:column; gap:5px; margin-bottom:4px; }
-.md-planleg { display:grid; grid-template-columns:60px 1fr auto; align-items:center; gap:8px; padding:8px 10px; background:#f8fafc; border-radius:9px; font-size:12.5px; }
+.md-planleg { display:grid; grid-template-columns:60px 1fr auto auto; align-items:center; gap:8px; padding:8px 10px; background:#f8fafc; border-radius:9px; font-size:12.5px; }
 .md-planstroke { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:#0e7490; }
 .md-planname { font-weight:700; color:#334155; } .md-planname s { color:#94a3b8; font-weight:600; }
 .md-plantime { font-weight:800; color:#0e7490; font-variant-numeric:tabular-nums; }
