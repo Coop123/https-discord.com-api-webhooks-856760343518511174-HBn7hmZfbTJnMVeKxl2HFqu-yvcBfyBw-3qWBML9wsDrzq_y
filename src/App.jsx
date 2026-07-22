@@ -125,7 +125,7 @@ function computeSwimmerPoints(events, data, mode, filter) {
     rankedEvent(ev, evIdx, data, filter).forEach((e, i) => {
       const pts = (table[i + 1] || 0); if (!pts) return;
       const key = e.l.name + "|" + e.l.team;
-      (out[key] || (out[key] = { name: e.l.name, team: e.l.team, age: e.l.age, pts: 0, count: 0, events: [] }));
+      (out[key] || (out[key] = { name: e.l.name, team: e.l.team, age: e.l.age, gender: evGender(ev.name), pts: 0, count: 0, events: [] }));
       if (e.l.age) out[key].age = e.l.age;
       out[key].pts += pts; out[key].count++; out[key].events.push({ ev: ev.name, place: i + 1, pts, time: e.time });
     });
@@ -160,37 +160,149 @@ function computeLeague(events, data, mode, filter) {
   return sw;
 }
 
-// Mixed relay (6u, 15-18): 2 fastest girls + 2 fastest boys per team.
-function buildMixedRelays(events, ageGroup) {
-  const best = {};
-  events.forEach((ev) => { if (isRelayEvent(ev.name) || !/free/i.test(ev.name) || evAgeGroup(ev.name) !== ageGroup) return;
-    const g = evGender(ev.name);
-    ev.heats.forEach((ht) => ht.lanes.forEach((l) => { const s = toSeconds(l.seed); if (isNaN(s)) return;
-      (best[l.team] || (best[l.team] = {})); const cur = best[l.team][l.name];
-      if (!cur || s < cur.s) best[l.team][l.name] = { s, gender: g }; }));
+// ---- Relay builder: season-wide roster + best-time lookups -----------------
+// Every team + swimmer seen across a set of meets, with best-known age.
+function seasonRoster(meets, team) {
+  const seen = new Map();
+  meets.forEach((m) => (m.events || []).forEach((ev) => ev.heats.forEach((ht) => ht.lanes.forEach((l) => {
+    if (l.swimmers) { if (l.team === team) l.swimmers.forEach((s) => { if (!s.name) return; const prev = seen.get(s.name); if (!prev || (s.age && !prev.age)) seen.set(s.name, { name: s.name, age: s.age || (prev && prev.age) || 0, team }); }); return; }
+    if (l.team === team && l.name) { const prev = seen.get(l.name); if (!prev || (l.age && !prev.age)) seen.set(l.name, { name: l.name, age: l.age || (prev && prev.age) || 0, team }); }
+  }))));
+  return [...seen.values()];
+}
+// Infer gender from any Girls/Boys-labeled event across the whole season.
+function seasonGenderMap(meets) {
+  const map = {};
+  meets.forEach((m) => (m.events || []).forEach((ev) => { const g = evGender(ev.name); if (g === "Mixed") return;
+    ev.heats.forEach((ht) => ht.lanes.forEach((l) => { if (l.swimmers) l.swimmers.forEach((s) => (map[s.name + "|" + l.team] = g)); else map[l.name + "|" + l.team] = g; })); }));
+  return map;
+}
+// Best known time for a swimmer in a stroke category across a set of meets
+// (final if swum, else seed) — the season-wide counterpart to bestStrokeSeed.
+function seasonBestStroke(meets, name, team, cat) {
+  let best = Infinity;
+  meets.forEach((m) => (m.events || []).forEach((ev, ei) => { if (isRelayEvent(ev.name) || categorize(ev.name) !== cat) return;
+    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (l.name !== name || l.team !== team) return;
+      const d = (m.data || {})[entryId(ei, hi, l.lane)] || {}; const t = toSeconds(d.time), s = toSeconds(l.seed), v = !isNaN(t) ? t : s;
+      if (!isNaN(v) && v < best) best = v; })); }));
+  return isFinite(best) ? best : null;
+}
+// 15-18 has no individual 50 free on the program — only 100 free — and 15-18
+// relays are never swum as 100s, so estimate the 50-pace from half their 100
+// free time minus a gender-based cut (going out on a flying relay start is
+// faster than a paced 100 split; boys get more cut than girls). Prefers an
+// actual recorded relay split from a "Relay splits" entry, when there is one.
+const FREE50_CUT = { Girls: 0.15, Boys: 0.25 };
+function estimate1518Free50(meets, name, team, gender) {
+  let splitBest = Infinity;
+  meets.forEach((m) => (m.events || []).forEach((ev, ei) => { if (!isRelayEvent(ev.name) || !/free/i.test(ev.name)) return;
+    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (!l.swimmers || l.team !== team) return;
+      l.swimmers.forEach((s, leg) => { if (s.name !== name) return;
+        const d = (m.data || {})[entryId(ei, hi, l.lane)] || {}; const sp = toSeconds((d.splits || [])[leg]);
+        if (!isNaN(sp) && sp < splitBest) splitBest = sp; }); })); }));
+  let hundredBest = Infinity;
+  meets.forEach((m) => (m.events || []).forEach((ev, ei) => { if (isRelayEvent(ev.name) || categorize(ev.name) !== "Free" || !/\b100\b/.test(ev.name)) return;
+    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (l.name !== name || l.team !== team) return;
+      const d = (m.data || {})[entryId(ei, hi, l.lane)] || {}; const t = toSeconds(d.time), s = toSeconds(l.seed), v = !isNaN(t) ? t : s;
+      if (!isNaN(v) && v < hundredBest) hundredBest = v; })); }));
+  let estimated = Infinity;
+  if (isFinite(hundredBest)) { const cut = FREE50_CUT[gender] ?? 0.2; estimated = (hundredBest / 2) * (1 - cut); }
+  const best = Math.min(splitBest, estimated);
+  return isFinite(best) ? best : null;
+}
+// Best relay-leg time for a swimmer in a stroke, age-group aware (routes
+// 15-18 Free through the 100-free estimate instead of a nonexistent 50 seed).
+function bestLegTime(meets, name, team, stroke, ageGroup, gender) {
+  if (stroke === "Free" && ageGroup === "15-18") return estimate1518Free50(meets, name, team, gender);
+  return seasonBestStroke(meets, name, team, stroke);
+}
+const MEDLEY_LEGS = ["Back", "Breast", "Fly", "Free"];
+// Core mixed-medley optimizer: 2 girls + 2 boys, Free leg always a girl (house
+// rule). Searches which of Back/Breast/Fly the second girl covers, and how
+// the two boys split the remaining two strokes, picking the fastest total —
+// e.g. if the girl who's best at Breast is unavailable, this can shift a boy
+// into Breast and slot the second girl into Back instead.
+function optimalMixedMedley(roster, timeOf) {
+  const girls = roster.filter((c) => c.gender === "Girls");
+  const boys = roster.filter((c) => c.gender === "Boys");
+  const girlsWithFree = girls.map((g) => ({ ...g, free: timeOf(g.name, "Free") })).filter((g) => g.free != null).sort((a, b) => a.free - b.free);
+  if (!girlsWithFree.length || boys.length < 2) return null;
+  const NONFREE = ["Back", "Breast", "Fly"];
+  let bestPlan = null;
+  girlsWithFree.slice(0, 5).forEach((freeGirl, fi) => {
+    const remainingGirls = girlsWithFree.filter((_, i) => i !== fi);
+    remainingGirls.slice(0, 5).forEach((g2) => {
+      NONFREE.forEach((girlStroke) => {
+        const gTime = timeOf(g2.name, girlStroke); if (gTime == null) return;
+        const boyStrokes = NONFREE.filter((s) => s !== girlStroke);
+        [[boyStrokes[0], boyStrokes[1]], [boyStrokes[1], boyStrokes[0]]].forEach(([sA, sB]) => {
+          const boyTimesA = boys.map((b) => ({ ...b, s: timeOf(b.name, sA) })).filter((b) => b.s != null).sort((a, b) => a.s - b.s);
+          boyTimesA.slice(0, 3).forEach((boyA) => {
+            const boyTimesB = boys.filter((b) => b.name !== boyA.name).map((b) => ({ ...b, s: timeOf(b.name, sB) })).filter((b) => b.s != null).sort((a, b) => a.s - b.s);
+            if (!boyTimesB.length) return;
+            const boyB = boyTimesB[0];
+            const legs = new Array(4);
+            legs[MEDLEY_LEGS.indexOf("Free")] = { name: freeGirl.name, age: freeGirl.age, gender: "Girls", stroke: "Free", s: freeGirl.free };
+            legs[MEDLEY_LEGS.indexOf(girlStroke)] = { name: g2.name, age: g2.age, gender: "Girls", stroke: girlStroke, s: gTime };
+            legs[MEDLEY_LEGS.indexOf(sA)] = { name: boyA.name, age: boyA.age, gender: "Boys", stroke: sA, s: boyA.s };
+            legs[MEDLEY_LEGS.indexOf(sB)] = { name: boyB.name, age: boyB.age, gender: "Boys", stroke: sB, s: boyB.s };
+            const total = legs.reduce((a, l) => a + l.s, 0);
+            if (!bestPlan || total < bestPlan.total) bestPlan = { legs, total };
+          });
+        });
+      });
+    });
   });
-  return Object.entries(best).map(([team, swimmers]) => {
-    const arr = Object.entries(swimmers).map(([name, v]) => ({ name, s: v.s, gender: v.gender }));
-    const girls = arr.filter((x) => x.gender === "Girls").sort((a, b) => a.s - b.s).slice(0, 2);
-    const boys = arr.filter((x) => x.gender === "Boys").sort((a, b) => a.s - b.s).slice(0, 2);
-    let picked = [...girls, ...boys];
-    if (picked.length < 4) { const used = new Set(picked.map((p) => p.name)); picked = [...picked, ...arr.filter((x) => !used.has(x.name)).sort((a, b) => a.s - b.s)].slice(0, 4); }
-    picked.sort((a, b) => a.s - b.s);
-    return { team, swimmers: picked, total: picked.reduce((a, b) => a + b.s, 0), full: picked.length === 4 };
+  return bestPlan;
+}
+// Single-gender medley: greedily match the fastest available (swimmer,
+// stroke) pairs first, so a scratch naturally reshuffles who swims what.
+function optimalMedley(roster, timeOf) {
+  const candidates = [];
+  roster.forEach((c) => MEDLEY_LEGS.forEach((stroke) => { const t = timeOf(c.name, stroke); if (t != null) candidates.push({ name: c.name, age: c.age, gender: c.gender, stroke, s: t }); }));
+  candidates.sort((a, b) => a.s - b.s);
+  const usedPeople = new Set(), usedStrokes = new Set();
+  const legs = new Array(4).fill(null);
+  candidates.forEach((c) => { if (usedPeople.has(c.name) || usedStrokes.has(c.stroke)) return;
+    legs[MEDLEY_LEGS.indexOf(c.stroke)] = c; usedPeople.add(c.name); usedStrokes.add(c.stroke); });
+  return legs.every(Boolean) ? { legs, total: legs.reduce((a, l) => a + l.s, 0) } : null;
+}
+function allSeasonTeams(meets) { return [...new Set(meets.flatMap((m) => (m.events || []).flatMap((ev) => ev.heats.flatMap((ht) => ht.lanes.map((l) => l.team)))))]; }
+
+// Fastest 4-person FREE relay per team for an age group (+ gender, unless mixed).
+function buildFreeRelaysSeason(meets, ageGroup, gender) {
+  const genderMap = seasonGenderMap(meets);
+  const mixed = MIXED_GROUPS.includes(ageGroup);
+  return allSeasonTeams(meets).map((team) => {
+    const roster = seasonRoster(meets, team).filter((c) => ageGroupOf(c.age) === ageGroup)
+      .map((c) => ({ ...c, gender: genderMap[c.name + "|" + team] }));
+    const timed = roster.filter((c) => mixed || !c.gender || c.gender === gender)
+      .map((c) => ({ ...c, s: bestLegTime(meets, c.name, team, "Free", ageGroup, c.gender || gender) })).filter((c) => c.s != null);
+    let picked;
+    if (mixed) {
+      const girls = timed.filter((x) => x.gender === "Girls").sort((a, b) => a.s - b.s).slice(0, 2);
+      const boys = timed.filter((x) => x.gender === "Boys").sort((a, b) => a.s - b.s).slice(0, 2);
+      picked = [...girls, ...boys];
+      if (picked.length < 4) { const used = new Set(picked.map((p) => p.name)); picked = [...picked, ...timed.filter((x) => !used.has(x.name)).sort((a, b) => a.s - b.s)].slice(0, 4); }
+      picked.sort((a, b) => a.s - b.s);
+    } else {
+      picked = timed.sort((a, b) => a.s - b.s).slice(0, 4);
+    }
+    return { team, event: "Free", swimmers: picked, total: picked.reduce((a, b) => a + b.s, 0), full: picked.length === 4 };
   }).filter((r) => r.full).sort((a, b) => a.total - b.total);
 }
-
-// Build the fastest 4-person free relay per team for an age group + gender.
-function buildFreeRelays(events, ageGroup, gender) {
-  const best = {}; // team -> { name -> bestFreeSeed }
-  events.forEach((ev) => { if (isRelayEvent(ev.name) || !/free/i.test(ev.name)) return;
-    if (evAgeGroup(ev.name) !== ageGroup || (gender !== "Any" && evGender(ev.name) !== gender)) return;
-    ev.heats.forEach((ht) => ht.lanes.forEach((l) => { const s = toSeconds(l.seed); if (isNaN(s)) return;
-      (best[l.team] || (best[l.team] = {})); if (best[l.team][l.name] === undefined || s < best[l.team][l.name]) best[l.team][l.name] = s; }));
-  });
-  return Object.entries(best).map(([team, swimmers]) => {
-    const top = Object.entries(swimmers).map(([name, s]) => ({ name, s })).sort((a, b) => a.s - b.s).slice(0, 4);
-    return { team, swimmers: top, total: top.reduce((a, b) => a + b.s, 0), full: top.length === 4 };
+// Fastest 4-person MEDLEY relay per team for an age group (+ gender, unless mixed).
+function buildMedleyRelaysSeason(meets, ageGroup, gender) {
+  const genderMap = seasonGenderMap(meets);
+  const mixed = MIXED_GROUPS.includes(ageGroup);
+  const timeOf = (meets_, team) => (name, stroke) => bestLegTime(meets_, name, team, stroke, ageGroup, genderMap[name + "|" + team]);
+  return allSeasonTeams(meets).map((team) => {
+    const roster = seasonRoster(meets, team).filter((c) => ageGroupOf(c.age) === ageGroup)
+      .map((c) => ({ ...c, gender: genderMap[c.name + "|" + team] }));
+    const of = timeOf(meets, team);
+    const plan = mixed ? optimalMixedMedley(roster, of) : optimalMedley(roster.filter((c) => !c.gender || c.gender === gender), of);
+    if (!plan) return { team, event: "Medley", swimmers: [], total: null, full: false };
+    return { team, event: "Medley", swimmers: plan.legs, total: plan.total, full: true };
   }).filter((r) => r.full).sort((a, b) => a.total - b.total);
 }
 // Merge an uploaded results sheet (final times by name+event) for chosen teams.
@@ -368,7 +480,7 @@ function StatsModal({ onClose, events, data, mode, filter, homeTeam }) {
           <div className="md-statcol">
             <div className="md-stath">🏆 High points by age</div>
             {groups.some((g) => ptByGrp[g]) ? groups.map((g) => ptByGrp[g] && (<div key={g} className="md-agegrp"><div className="md-agehdr">{g}</div>
-              {ptByGrp[g].map((x, i) => <div key={x.name} className="md-statrow"><span className="md-statrank">{i + 1}</span><span className="md-statname">{x.name}</span><span className="md-statsub">{x.count} swim{x.count > 1 ? "s" : ""}</span><span className="md-statval gold">{x.pts}</span></div>)}
+              {ptByGrp[g].map((x, i) => <div key={x.name} className="md-statrow"><span className="md-statrank">{i + 1}</span><span className="md-statname statid"><span className={"md-gpill sm " + (x.gender || "mixed").toLowerCase()}>{(x.gender || "?")[0]}</span>{x.name}{x.age ? <em className="md-statage">{x.age}</em> : null}</span><span className="md-statsub">{x.count} swim{x.count > 1 ? "s" : ""}</span><span className="md-statval gold">{x.pts}</span></div>)}
             </div>)) : <div className="md-prevempty">No points yet{mode === "timetrial" ? " (time trials don't score)" : ""}.</div>}
           </div>
           <div className="md-statcol">
@@ -423,9 +535,11 @@ function SeasonModal({ onClose, homeTeam, meets }) {
   const agg = useMemo(() => computeSeason(list), [list]);
   const all = Object.values(agg).filter((s) => s.team === homeTeam);
   const match = (s) => (gender === "All" || s.gender === gender) && (grp === "All" || ageGroupOf(s.age) === grp);
-  const hp = all.filter(match).filter((s) => s.pts > 0).sort((a, b) => b.pts - a.pts).slice(0, 40);
+  const hpByGrp = {}; all.filter(match).filter((s) => s.pts > 0).sort((a, b) => b.pts - a.pts)
+    .forEach((s) => { const g = ageGroupOf(s.age) || "Open"; (hpByGrp[g] || (hpByGrp[g] = [])).push(s); });
   const impByGrp = {}; all.filter(match).filter((s) => s.swims > 0).map((s) => ({ ...s, pct: Math.round((s.improved / s.swims) * 100) })).sort((a, b) => b.pct - a.pct || b.swims - a.swims)
     .forEach((s) => { const g = ageGroupOf(s.age) || "Open"; (impByGrp[g] || (impByGrp[g] = [])).push(s); });
+  const hpGroups = AGE_GROUPS.filter((g) => hpByGrp[g]);
   const groups = AGE_GROUPS.filter((g) => impByGrp[g]);
   return (
     <div className="md-scrim" onClick={onClose}>
@@ -438,8 +552,9 @@ function SeasonModal({ onClose, homeTeam, meets }) {
         <div className="md-statwrap">
           <div className="md-statcol">
             <div className="md-stath">🏆 High points (season)</div>
-            {hp.length ? hp.map((x, i) => <div key={x.name + x.team} className="md-statrow mine"><span className="md-statrank">{i + 1}</span><span className="md-statname">{x.name}</span><span className="md-statsub">{ageGroupOf(x.age) || "?"} · {x.gender[0]}</span><span className="md-statval gold">{x.pts}</span></div>)
-              : <div className="md-prevempty">{list.length ? "No scored swims yet — enter finals then save." : "No saved meets yet — use “Save this meet to season” in Settings."}</div>}
+            {hpGroups.length ? hpGroups.map((g) => (<div key={g} className="md-agegrp"><div className="md-agehdr">{g}</div>
+              {hpByGrp[g].slice(0, 12).map((x, i) => <div key={x.name + x.team} className="md-statrow mine"><span className="md-statrank">{i + 1}</span><span className="md-statname statid"><span className={"md-gpill sm " + x.gender.toLowerCase()}>{x.gender[0]}</span>{x.name}</span><span className="md-statsub">{x.swims} swim{x.swims === 1 ? "" : "s"}</span><span className="md-statval gold">{x.pts}</span></div>)}
+            </div>)) : <div className="md-prevempty">{list.length ? "No scored swims yet — enter finals then save." : "No saved meets yet — use “Save this meet to season” in Settings."}</div>}
           </div>
           <div className="md-statcol">
             <div className="md-stath">📈 Improvement % by age</div>
@@ -504,26 +619,54 @@ function bestStrokeSeed(events, data, name, team, cat) {
       if (!isNaN(v) && v < best) best = v; })); });
   return isFinite(best) ? best : null;
 }
-const MEDLEY_ORDER = ["Back", "Breast", "Fly", "Free"];
+// Every relay slot (any event) a team's swimmers currently occupy this meet —
+// used to keep replacement suggestions from double-booking someone who's
+// already committed to a different relay.
+function relaySlotsByTeam(events, team) {
+  const slots = new Map(); // name -> {evIdx, htIdx, lane, leg, eventName}
+  events.forEach((ev, ei) => { if (!isRelayEvent(ev.name)) return;
+    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (l.team !== team || !l.swimmers) return;
+      l.swimmers.forEach((s, leg) => { if (s.name) slots.set(s.name, { evIdx: ei, htIdx: hi, lane: l.lane, leg, eventName: ev.name }); }); })); });
+  return slots;
+}
 // Teammates eligible to swap into a relay leg: same team, same natural age group,
 // same gender as the event (when known), not already swimming this relay — ranked
 // fastest-first by their best time in the relevant stroke (medley legs swim in
 // Back/Breast/Fly/Free order; free relays are Free throughout). Falls back to an
 // unverified same-team list (flagged) if nobody fits the strict rule, so a coach
-// always has a couple of options rather than a dead end.
+// always has a couple of options rather than a dead end. Candidates already
+// tied up in a different relay are marked "move" — swapping them in also
+// vacates their old slot, which the caller should offer to backfill.
 function relayReplacementCandidates(events, data, evIdx, htIdx, lane, leg, team) {
   const ev = events[evIdx]; const ht = ev && ev.heats[htIdx];
   const relayLane = ht && ht.lanes.find((l) => l.lane === lane);
   if (!relayLane || !relayLane.swimmers) return [];
   const group = evAgeGroup(ev.name), evg = evGender(ev.name);
-  const stroke = /medley/i.test(ev.name) ? (MEDLEY_ORDER[leg] || "Free") : "Free";
+  const stroke = /medley/i.test(ev.name) ? (MEDLEY_LEGS[leg] || "Free") : "Free";
   const already = new Set(relayLane.swimmers.map((s) => s.name));
   const genderMap = swimmerGenderMap(events);
-  const rank = (list) => list.map((c) => ({ ...c, best: bestStrokeSeed(events, data, c.name, team, stroke), stroke })).sort((a, b) => (a.best ?? Infinity) - (b.best ?? Infinity));
+  const otherSlots = relaySlotsByTeam(events, team);
+  const rank = (list) => list.map((c) => { const other = otherSlots.get(c.name);
+    return { ...c, best: bestStrokeSeed(events, data, c.name, team, stroke), stroke, moveFrom: other || null }; }).sort((a, b) => (a.best ?? Infinity) - (b.best ?? Infinity));
   const pool = teamRoster(events, team).filter((c) => !already.has(c.name));
   const strict = rank(pool.filter((c) => ageGroupOf(c.age) === group && (evg === "Mixed" || !genderMap[c.name + "|" + team] || genderMap[c.name + "|" + team] === evg))).map((c) => ({ ...c, verified: true }));
   if (strict.length) return strict.slice(0, 3);
   return rank(pool).slice(0, 3).map((c) => ({ ...c, verified: false }));
+}
+// Re-optimizes a medley relay's full 4-leg lineup for THIS meet's roster
+// (mixed or single-gender), excluding the scratched swimmer — a scratch here
+// can shuffle who swims what (not just a 1-for-1 swap), same idea as the
+// season-wide relay builder but scoped to who's actually entered today.
+function medleyReplacementPlan(events, data, evIdx, htIdx, lane, excludeName) {
+  const ev = events[evIdx]; if (!ev || !/medley/i.test(ev.name)) return null;
+  const ht = ev.heats[htIdx]; const relayLane = ht && ht.lanes.find((l) => l.lane === lane);
+  if (!relayLane) return null;
+  const team = relayLane.team, group = evAgeGroup(ev.name), evg = evGender(ev.name);
+  const genderMap = swimmerGenderMap(events);
+  const roster = teamRoster(events, team).filter((c) => c.name !== excludeName && ageGroupOf(c.age) === group)
+    .map((c) => ({ ...c, gender: genderMap[c.name + "|" + team] }));
+  const timeOf = (name, stroke) => bestStrokeSeed(events, data, name, team, stroke);
+  return evg === "Mixed" ? optimalMixedMedley(roster, timeOf) : optimalMedley(roster.filter((c) => !c.gender || c.gender === evg), timeOf);
 }
 
 // Participants & scratches — all swimmers, filter by team, scratch per event
@@ -567,17 +710,34 @@ function ParticipantsModal({ onClose, events, data, homeTeam, onOne, onAll }) {
   );
 }
 
-// After a relay swimmer is scratched: offer a couple of eligible teammates to
-// swap into that leg, or leave the relay short a swimmer.
-function RelayReplaceModal({ target, candidates, onClose, onSwap }) {
+// After a relay swimmer is scratched: for a medley relay, offer the full
+// re-optimized lineup (may reshuffle more than one leg); for a free relay (or
+// if no full medley plan is possible), offer a couple of eligible teammates
+// for just this leg — flagging anyone already on a different relay as a
+// "move" so the coach knows swapping them in leaves a gap elsewhere.
+function RelayReplaceModal({ target, candidates, plan, originalLegs, onClose, onSwap, onApplyPlan }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Replace {target.name}?</div><div className="md-msub">{shortEvent(target.eventName)} · {target.stroke || (candidates[0] && candidates[0].stroke) || ""} leg · {target.team}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><div><div className="md-mtitle">Replace {target.name}?</div><div className="md-msub">{shortEvent(target.eventName)} · {target.stroke || (candidates[0] && candidates[0].stroke) || (plan && plan.legs[0].stroke) || ""}{plan ? "" : " leg"} · {target.team}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-scratchbtns">
-          {candidates.length ? candidates.map((c) => (
+          {plan ? (<>
+            <div className="md-planlegs">
+              {plan.legs.map((l, i) => { const was = originalLegs[i]; const changed = was && was !== l.name;
+                return (
+                  <div key={i} className="md-planleg">
+                    <span className="md-planstroke">{l.stroke}</span>
+                    <span className="md-planname">{changed ? <><s>{was}</s> → <b>{l.name}</b></> : <b>{l.name}</b>}</span>
+                    <span className="md-plantime">{fmtT(l.s)}</span>
+                  </div>
+                ); })}
+            </div>
+            <button className="md-mbtn primary" onClick={onApplyPlan}>Apply this lineup</button>
+          </>) : candidates.length ? candidates.map((c) => (
             <button key={c.name} className="md-mbtn" onClick={() => onSwap(c)}>
-              <b>{c.name}</b>{c.age ? ` (${c.age})` : ""} — {c.best != null ? fmtT(c.best) : "no time on record"}{!c.verified && <em style={{ marginLeft: 6, color: "#a8842a", fontStyle: "normal" }}>unverified age/gender</em>}
+              <b>{c.name}</b>{c.age ? ` (${c.age})` : ""} — {c.best != null ? fmtT(c.best) : "no time on record"}
+              {c.moveFrom && <em style={{ marginLeft: 6, color: "#7c3aed", fontStyle: "normal" }}>currently on {shortEvent(c.moveFrom.eventName)} — moving them leaves a gap there</em>}
+              {!c.verified && <em style={{ marginLeft: 6, color: "#a8842a", fontStyle: "normal" }}>unverified age/gender</em>}
             </button>
           )) : <div className="md-prevempty">No eligible teammate found on the roster for this age group.</div>}
           <button className="md-cancel" onClick={onClose}>Leave relay short (keep scratch)</button>
@@ -622,49 +782,95 @@ function computeStandings(meets) {
 }
 
 // League dashboard: team records → tap a team for full stats + power ranking (SwimCloud-style).
+// League stats — a full-page takeover (not a modal), styled after SwimCloud:
+// a clean sortable standings table with team-color rank bars, and a per-team
+// page with a colored header banner, dual-meet record, and a roster power
+// ranking table.
+const LEAGUE_SORTS = {
+  record: (a, b) => (b.w - b.l) - (a.w - a.l) || b.power - a.power,
+  power: (a, b) => b.power - a.power,
+  pf: (a, b) => b.pf - a.pf,
+};
 function LeagueModal({ onClose, meets, homeTeam }) {
   const power = useMemo(() => computePower(meets), [meets]);
   const standings = useMemo(() => computeStandings(meets), [meets]);
   const teams = useMemo(() => [...new Set(Object.values(power).map((s) => s.team))].sort(), [power]);
   const teamPower = (t) => { const arr = Object.values(power).filter((s) => s.team === t && s.power != null); return arr.length ? Math.round(arr.reduce((a, b) => a + b.power, 0) / arr.length) : 0; };
   const [sel, setSel] = useState(null);
-  const rows = teams.map((t) => ({ team: t, ...(standings[t] || { w: 0, l: 0, tie: 0, pf: 0, pa: 0, meets: [] }), power: teamPower(t) }))
-    .sort((a, b) => (b.w - b.l) - (a.w - a.l) || b.power - a.power);
+  const [sort, setSort] = useState("record");
+  const [rosterSort, setRosterSort] = useState("power");
+  const rows = teams.map((t) => ({ team: t, ...(standings[t] || { w: 0, l: 0, tie: 0, pf: 0, pa: 0, meets: [] }), power: teamPower(t) })).sort(LEAGUE_SORTS[sort]);
+
   if (sel) {
     const st = standings[sel] || { meets: [] };
-    const roster = Object.values(power).filter((s) => s.team === sel).sort((a, b) => (b.power || 0) - (a.power || 0));
+    const rosterSorts = { power: (a, b) => (b.power || 0) - (a.power || 0), name: (a, b) => a.name.localeCompare(b.name), age: (a, b) => (a.age || 0) - (b.age || 0) };
+    const roster = Object.values(power).filter((s) => s.team === sel).sort(rosterSorts[rosterSort]);
     return (
-      <div className="md-scrim" onClick={onClose}>
-        <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-          <div className="md-mhead"><div><button className="md-back" onClick={() => setSel(null)}>‹ League</button><div className="md-mtitle" style={{ color: teamColor(sel) }}>{TEAM_NAME[sel] || sel}</div><div className="md-msub">{st.w || 0}-{st.l || 0}{st.tie ? "-" + st.tie : ""} · team power {teamPower(sel)}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
-          <div className="md-teamdetail">
-            <div className="md-stath">Meets</div>
-            {st.meets && st.meets.length ? st.meets.map((mm, i) => <div key={i} className="md-statrow"><span className="md-statname">vs {mm.opp}</span><span className="md-statsub">{mm.date}</span><span className={"md-statval " + (mm.margin > 0 ? "green" : mm.margin < 0 ? "red" : "")}>{mm.margin > 0 ? "W" : mm.margin < 0 ? "L" : "T"} {mm.pf}-{mm.pa}</span></div>) : <div className="md-prevempty">No dual-meet records yet.</div>}
-            <div className="md-stath" style={{ marginTop: 12 }}>Swimmers — power ranking</div>
-            {roster.map((s) => (<div key={s.name} className="md-statrow"><span className={"md-gpill " + s.gender.toLowerCase()}>{s.gender[0]}</span><span className="md-statname">{s.name}</span><span className="md-statsub">{ageGroupOf(s.age) || "?"}</span><span className="md-power">{s.power ?? "—"}</span></div>))}
+      <div className="md-leaguepage" role="dialog">
+        <div className="md-lgtopbar"><button className="md-lgback" onClick={() => setSel(null)}>← League</button><button className="md-x sm" onClick={onClose}>✕</button></div>
+        <div className="md-lgbanner" style={{ background: `linear-gradient(135deg, ${teamColor(sel)}, #0f2036)` }}>
+          <div className="md-lgbannerteam">{TEAM_NAME[sel] || sel}</div>
+          <div className="md-lgbannerstats">
+            <div className="md-lgstat"><b>{st.w || 0}-{st.l || 0}{st.tie ? "-" + st.tie : ""}</b><span>record</span></div>
+            <div className="md-lgstat"><b>{teamPower(sel)}</b><span>team power</span></div>
+            <div className="md-lgstat"><b>{roster.length}</b><span>swimmers</span></div>
           </div>
-          <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+        </div>
+        <div className="md-lgbody">
+          <div className="md-lgsection">
+            <div className="md-lgsectitle">Meets</div>
+            {st.meets && st.meets.length ? (
+              <table className="md-lgtable"><tbody>
+                {st.meets.map((mm, i) => <tr key={i}><td className="md-lgopp">vs {TEAM_NAME[mm.opp] || mm.opp}</td><td className="md-lgdate">{mm.date}</td><td className={"md-lgresult " + (mm.margin > 0 ? "win" : mm.margin < 0 ? "loss" : "")}>{mm.margin > 0 ? "W" : mm.margin < 0 ? "L" : "T"} {mm.pf}-{mm.pa}</td></tr>)}
+              </tbody></table>
+            ) : <div className="md-prevempty">No dual-meet records yet.</div>}
+          </div>
+          <div className="md-lgsection">
+            <div className="md-lgsectitle">Roster — power ranking</div>
+            <table className="md-lgtable roster">
+              <thead><tr>
+                <th className="md-lgsortable" onClick={() => setRosterSort("name")}>Swimmer</th>
+                <th className="md-lgsortable" onClick={() => setRosterSort("age")}>Age</th>
+                <th>Gender</th>
+                <th className="md-lgsortable" onClick={() => setRosterSort("power")}>Power</th>
+              </tr></thead>
+              <tbody>{roster.map((s) => <tr key={s.name}><td className="md-lgswimname">{s.name}</td><td>{ageGroupOf(s.age) || "?"}</td><td><span className={"md-gpill sm " + s.gender.toLowerCase()}>{s.gender[0]}</span></td><td className="md-lgpower">{s.power ?? "—"}</td></tr>)}</tbody>
+            </table>
+          </div>
         </div>
       </div>
     );
   }
   return (
-    <div className="md-scrim" onClick={onClose}>
-      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">League stats</div><div className="md-msub">Standings across saved meets. Tap a team for full stats.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
-        <div className="md-standings">
-          <div className="md-standhdr"><span>Team</span><span>W-L</span><span>Pts F/A</span><span>Power</span></div>
-          {rows.map((r) => (
-            <button key={r.team} className={"md-standrow" + (r.team === homeTeam ? " mine" : "")} onClick={() => setSel(r.team)}>
-              <span className="md-standteam"><span className="md-lgdot" style={{ background: teamColor(r.team) }} />{TEAM_NAME[r.team] || r.team}</span>
-              <span className="md-standwl">{r.w}-{r.l}{r.tie ? "-" + r.tie : ""}</span>
-              <span className="md-standpf">{r.pf}/{r.pa}</span>
-              <span className="md-standpow">{r.power}<span className="md-cc">›</span></span>
-            </button>
-          ))}
-          {!rows.length && <div className="md-prevempty">No teams yet — import a meet or results.</div>}
-        </div>
-        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+    <div className="md-leaguepage" role="dialog">
+      <div className="md-lgtopbar"><button className="md-lgback" onClick={onClose}>← MeetDeck</button><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-lgheader">
+        <h1 className="md-lgtitle">League standings</h1>
+        <p className="md-lgsub">Across {meets.length} saved meet{meets.length === 1 ? "" : "s"} · tap a team for the full profile</p>
+      </div>
+      <div className="md-lgbody">
+        <table className="md-lgtable standings">
+          <thead><tr>
+            <th>#</th><th>Team</th>
+            <th className="md-lgsortable" onClick={() => setSort("record")}>W-L</th>
+            <th className="md-lgsortable" onClick={() => setSort("pf")}>Pts F</th>
+            <th>Pts A</th>
+            <th className="md-lgsortable" onClick={() => setSort("power")}>Power</th>
+          </tr></thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={r.team} className={"md-lgtr" + (r.team === homeTeam ? " mine" : "")} onClick={() => setSel(r.team)}>
+                <td><span className={"md-lgrank" + (i < 3 ? " top" + (i + 1) : "")}>{i + 1}</span></td>
+                <td><span className="md-lgteambar" style={{ background: teamColor(r.team) }} />{TEAM_NAME[r.team] || r.team}</td>
+                <td>{r.w}-{r.l}{r.tie ? "-" + r.tie : ""}</td>
+                <td>{r.pf}</td>
+                <td>{r.pa}</td>
+                <td className="md-lgpower">{r.power}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows.length && <div className="md-prevempty">No teams yet — import a meet or results, then save it to the season.</div>}
       </div>
     </div>
   );
@@ -699,9 +905,14 @@ function normCdf(z) {
 // spread: a pinpoint "likely" time, plus a best/conservative case ~1sd out.
 function projectSwimmer(base, stats) {
   const { mean, sd } = stats;
-  const likely = base * (1 - mean);
+  // The pinpoint (used for the head-to-head winner call) deliberately only
+  // credits half the historical improvement rate — past improvement isn't a
+  // guarantee every single swim, so don't over-project it. The spread still
+  // uses the full mean+sd on the best-case side to stay realistically wide.
+  const pinpoint = mean * 0.5;
+  const likely = base * (1 - pinpoint);
   const best = base * (1 - Math.min(mean + sd, 0.14));
-  const conservative = base * (1 - (mean - sd));
+  const conservative = base * (1 - (pinpoint - sd));
   return { base, likely, best, conservative, sdTime: base * sd, ...stats };
 }
 
@@ -796,10 +1007,22 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam }) {
 // instead of their raw seed time, and carries the combined uncertainty
 // (variances add for independent legs) needed to simulate the field.
 function projectRelay(relay, meets) {
-  const legs = relay.swimmers.map((sw) => { const stats = swimmerImprovementStats(sw.name, relay.team, "Free", meets); return { name: sw.name, gender: sw.gender, ...projectSwimmer(sw.s, stats) }; });
+  const legs = relay.swimmers.map((sw) => { const stroke = sw.stroke || "Free"; const stats = swimmerImprovementStats(sw.name, relay.team, stroke, meets); return { name: sw.name, gender: sw.gender, stroke, ...projectSwimmer(sw.s, stats) }; });
   const projTotal = legs.reduce((a, l) => a + l.likely, 0);
   const sd = Math.sqrt(legs.reduce((a, l) => a + l.sdTime ** 2, 0)) || 0.05;
   return { ...relay, legs, projTotal, sd };
+}
+// Re-look-up a swimmer's leg time for a manual lineup override.
+function applyRelayOverride(relay, overrideNames, meets, ageGroup, genderMap) {
+  if (!overrideNames || !overrideNames.some(Boolean)) return relay;
+  const roster = seasonRoster(meets, relay.team);
+  const swimmers = relay.swimmers.map((leg, i) => { const on = overrideNames[i]; if (!on || on === leg.name) return leg;
+    const cand = roster.find((c) => c.name === on); if (!cand) return leg;
+    const gender = genderMap[on + "|" + relay.team]; const stroke = leg.stroke || "Free";
+    const s = bestLegTime(meets, on, relay.team, stroke, ageGroup, gender);
+    return { name: on, age: cand.age, gender, stroke, s: s != null ? s : leg.s };
+  });
+  return { ...relay, swimmers, total: swimmers.reduce((a, b) => a + b.s, 0) };
 }
 function gaussian() { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
 // Monte Carlo the field: each team's total is drawn from Normal(projTotal, sd)
@@ -815,37 +1038,67 @@ function simulateRelayField(projected, iters = 3000) {
   const out = {}; projected.forEach((r) => (out[r.team] = wins[r.team] / iters)); return out;
 }
 
-// Relay builder: fastest 4-swimmer free relay per team, home team highlighted,
-// ranked by projected time (factoring each swimmer's improvement trend, not
-// just raw seed) with a simulated probability of touching first.
+// Relay builder: fastest 4-swimmer relay per team built from the WHOLE
+// SEASON (not just the loaded meet) — Free or Medley, home team highlighted,
+// ranked by projected time (each swimmer's improvement trend factored in)
+// with a simulated probability of touching first. Every other team is shown
+// at ITS season-best lineup too, since that's usually who shows up at champs
+// even though it means we sometimes project a harder finish than we actually
+// get (their real lineup isn't always their fastest). Coaches can plug in a
+// different swimmer per leg to explore "what if" lineups.
 function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
-  const ageGroups = useMemo(() => AGE_GROUPS.filter((g) => events.some((e) => /free/i.test(e.name) && !isRelayEvent(e.name) && evAgeGroup(e.name) === g)), [events]);
+  const meets = useMemo(() => [{ meetName: "This meet", mode: "meet", events, data }, ...(seasonMeets || [])], [events, data, seasonMeets]);
+  const ageGroups = useMemo(() => AGE_GROUPS.filter((g) => meets.some((m) => (m.events || []).some((e) => !isRelayEvent(e.name) && evAgeGroup(e.name) === g))), [meets]);
   const [ag, setAg] = useState(ageGroups[0] || "11-12");
   const [gender, setGender] = useState("Girls");
+  const [relayType, setRelayType] = useState("Free");
+  const [overrides, setOverrides] = useState({});
+  const [editing, setEditing] = useState(null);
   const mixed = MIXED_GROUPS.includes(ag);
-  const relays = useMemo(() => mixed ? buildMixedRelays(events, ag) : buildFreeRelays(events, ag, gender), [events, ag, gender, mixed]);
-  const meets = useMemo(() => [{ meetName: "This meet", mode: "meet", events, data }, ...(seasonMeets || [])], [events, data, seasonMeets]);
+  const genderMap = useMemo(() => seasonGenderMap(meets), [meets]);
+  const baseRelays = useMemo(() => relayType === "Medley" ? buildMedleyRelaysSeason(meets, ag, gender) : buildFreeRelaysSeason(meets, ag, gender), [meets, ag, gender, relayType]);
+  const relays = useMemo(() => baseRelays.map((r) => applyRelayOverride(r, overrides[r.team], meets, ag, genderMap)).sort((a, b) => a.total - b.total), [baseRelays, overrides, meets, ag, genderMap]);
   const projected = useMemo(() => relays.map((r) => projectRelay(r, meets)).sort((a, b) => a.projTotal - b.projTotal), [relays, meets]);
   const winProb = useMemo(() => simulateRelayField(projected), [projected]);
+  const rosterFor = (team) => seasonRoster(meets, team).filter((c) => ageGroupOf(c.age) === ag).sort((a, b) => a.name.localeCompare(b.name));
+  const setLeg = (team, legIdx, name) => setOverrides((o) => { const cur = (o[team] || [null, null, null, null]).slice(); cur[legIdx] = name || null; return { ...o, [team]: cur }; });
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Relay builder — fastest free relay</div><div className="md-msub">Best 4 by seed per team, ranked by projected time (improvement trend factored in) with a simulated win probability.{mixed ? " Mixed group." : ""}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><div><div className="md-mtitle">Relay builder — fastest {relayType.toLowerCase()} relay</div><div className="md-msub">Built from the whole season ({meets.length} meet{meets.length === 1 ? "" : "s"}) · every team shown at its season-best lineup · improvement trend factored into the projected time.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl">
+          <div className="md-rbtabs">{["Free", "Medley"].map((t) => <button key={t} className={"md-rbtab" + (relayType === t ? " on" : "")} onClick={() => setRelayType(t)}>{t}</button>)}</div>
           <label className="md-ctl">Age<select value={ag} onChange={(e) => setAg(e.target.value)}>{ageGroups.map((a) => <option key={a} value={a}>{a}</option>)}</select></label>
           {mixed ? <span className="md-mixtag">Mixed</span> : <label className="md-ctl">Gender<select value={gender} onChange={(e) => setGender(e.target.value)}>{["Girls", "Boys"].map((g) => <option key={g} value={g}>{g}</option>)}</select></label>}
         </div>
         <div className="md-rblist">
-          {projected.length ? projected.map((r, i) => (
+          {projected.length ? projected.map((r, i) => { const hasOverride = overrides[r.team] && overrides[r.team].some(Boolean); const roster = editing === r.team ? rosterFor(r.team) : [];
+            return (
             <div key={r.team} className={"md-rbteam" + (r.team === homeTeam ? " mine" : "")}>
               <div className="md-rbhead"><span className="md-rbrank">{i + 1}</span><span className="md-rbteamname" style={{ color: teamColor(r.team) }}>{r.team}</span>
                 <span className="md-rbtotal">{fmtT(r.projTotal)}<span className="md-rbproj">seed {fmtT(r.total)}</span></span>
                 {i > 0 && <span className="md-rbgap">+{fmtT(r.projTotal - projected[0].projTotal)}</span>}
+                <button className={"md-rbedit" + (hasOverride ? " on" : "")} onClick={() => setEditing(editing === r.team ? null : r.team)}>✎ {editing === r.team ? "Done" : "Edit"}</button>
               </div>
-              <div className="md-rbswimmers">{r.legs.map((l, j) => <span key={j} className="md-rbswim">{l.gender ? <em className={"md-gtick " + l.gender.toLowerCase()}>{l.gender[0]}</em> : null}{l.name} <em>{fmtT(l.likely)}</em></span>)}</div>
+              {editing === r.team ? (
+                <div className="md-rbeditgrid">
+                  {r.legs.map((l, j) => (
+                    <label key={j} className="md-rbeditleg">
+                      {relayType === "Medley" && <span className="md-rbeditstroke">{l.stroke}</span>}
+                      <select value={l.name} onChange={(e) => setLeg(r.team, j, e.target.value)}>
+                        <option value={l.name}>{l.name}{l.age ? ` (${l.age})` : ""}</option>
+                        {roster.filter((c) => c.name !== l.name).map((c) => <option key={c.name} value={c.name}>{c.name}{c.age ? ` (${c.age})` : ""}{genderMap[c.name + "|" + r.team] ? " · " + genderMap[c.name + "|" + r.team][0] : ""}</option>)}
+                      </select>
+                    </label>
+                  ))}
+                  {hasOverride && <button className="md-rbreset" onClick={() => setOverrides((o) => ({ ...o, [r.team]: null }))}>↺ Reset to auto-picked</button>}
+                </div>
+              ) : (
+                <div className="md-rbswimmers">{r.legs.map((l, j) => <span key={j} className="md-rbswim">{l.gender ? <em className={"md-gtick " + l.gender.toLowerCase()}>{l.gender[0]}</em> : null}{relayType === "Medley" && <b className="md-rbstroke">{l.stroke} </b>}{l.name} <em>{fmtT(l.likely)}</em></span>)}</div>
+              )}
               <div className="md-rbprob"><div className="md-rbprobbar"><div className="md-rbprobfill" style={{ width: ((winProb[r.team] || 0) * 100).toFixed(0) + "%" }} /></div><span className="md-rbprobval">{((winProb[r.team] || 0) * 100).toFixed(0)}%</span></div>
             </div>
-          )) : <div className="md-prevempty">No full 4-swimmer set found for this group. Try another age, or import the full roster.</div>}
+          ); }) : <div className="md-prevempty">No full 4-swimmer set found for this group across the season. Try another age, or import more results.</div>}
         </div>
         <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
       </div>
@@ -1035,6 +1288,8 @@ export default function App() {
   const [seasonMeets, setSeasonMeets] = useState([]);
   const progMeets = useMemo(() => [{ date: "This meet", meetName, events, data }, ...seasonMeets], [meetName, events, data, seasonMeets]);
   const relayCandidates = useMemo(() => relayReplaceTarget ? relayReplacementCandidates(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, relayReplaceTarget.team) : [], [relayReplaceTarget, events, data]);
+  const medleyPlan = useMemo(() => relayReplaceTarget ? medleyReplacementPlan(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.name) : null, [relayReplaceTarget, events, data]);
+  const relayOriginalLegs = useMemo(() => { if (!relayReplaceTarget) return []; const ev = events[relayReplaceTarget.evIdx]; const ht = ev && ev.heats[relayReplaceTarget.htIdx]; const l = ht && ht.lanes.find((x) => x.lane === relayReplaceTarget.lane); return l && l.swimmers ? l.swimmers.map((s) => s.name) : []; }, [relayReplaceTarget, events]);
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2200); };
   // Restore last session, then autosave (debounced).
   useEffect(() => { if (!STORE) return; let live = true; (async () => { try { const r = await STORE.get(CUR_KEY); if (live && r && r.value) { const s = JSON.parse(r.value); if (s.events) { setEvents(s.events); setRecords(s.records || {}); setData(s.data || {}); if (s.meetName) setMeetName(s.meetName); if (s.mode) setMode(s.mode); if (s.homeTeam) setHomeTeam(s.homeTeam); if (s.hostTeam) setHostTeam(s.hostTeam); if (s.awayTeam) setAwayTeam(s.awayTeam); if (s.dualLanes) setDualLanes(s.dualLanes); } } } catch (e) {}
@@ -1067,12 +1322,40 @@ export default function App() {
     return nd; });
   // Swap a new swimmer into a scratched relay leg — edits the roster (events),
   // not just the results (data), then clears any stale scratched/tag state on
-  // that leg's id since it now belongs to a different swimmer.
+  // that leg's id since it now belongs to a different swimmer. If the pick was
+  // already swimming a different relay ("move" candidate), vacate that old
+  // slot and chain straight into a replacement popup for it.
   const swapRelaySwimmer = (evIdx, htIdx, lane, leg, candidate) => {
     setEvents((evs) => evs.map((ev, ei) => ei !== evIdx ? ev : { ...ev, heats: ev.heats.map((ht, hi) => hi !== htIdx ? ht : { ...ht, lanes: ht.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: l.swimmers.map((s, i) => i !== leg ? s : { name: candidate.name, age: candidate.age || 0 }) }) }) }));
     update(entryId(evIdx, htIdx, lane) + "#" + leg, { scratched: false, tags: {}, notes: "" });
     flash(candidate.name + " swapped in for " + (relayReplaceTarget ? relayReplaceTarget.name : "scratched swimmer"));
-    setRelayReplaceTarget(null);
+    if (candidate.moveFrom) {
+      const slot = candidate.moveFrom;
+      update(entryId(slot.evIdx, slot.htIdx, slot.lane) + "#" + slot.leg, { scratched: true });
+      setRelayReplaceTarget({ evIdx: slot.evIdx, htIdx: slot.htIdx, lane: slot.lane, leg: slot.leg, name: candidate.name, team: candidate.team || relayReplaceTarget.team, eventName: slot.eventName, relay: true });
+    } else {
+      setRelayReplaceTarget(null);
+    }
+  };
+  // Apply a full re-optimized medley lineup (possibly reassigning multiple
+  // legs at once). If it pulls in someone already on a different relay,
+  // vacate that slot and chain into its replacement popup too.
+  const applyRelayPlan = (evIdx, htIdx, lane, plan) => {
+    const ev = events[evIdx], ht = ev.heats[htIdx], relayLane = ht.lanes.find((l) => l.lane === lane);
+    const team = relayLane.team, before = relayLane.swimmers.map((s) => s.name);
+    const otherSlots = relaySlotsByTeam(events, team);
+    setEvents((evs) => evs.map((e, ei) => ei !== evIdx ? e : { ...e, heats: e.heats.map((h, hi) => hi !== htIdx ? h : { ...h, lanes: h.lanes.map((l) => l.lane !== lane ? l : { ...l, swimmers: plan.legs.map((leg) => ({ name: leg.name, age: leg.age || 0 })) }) }) }));
+    plan.legs.forEach((leg, i) => update(entryId(evIdx, htIdx, lane) + "#" + i, { scratched: false, tags: {}, notes: "" }));
+    const conflictLeg = plan.legs.find((leg) => !before.includes(leg.name) && otherSlots.has(leg.name));
+    if (conflictLeg) {
+      const slot = otherSlots.get(conflictLeg.name);
+      update(entryId(slot.evIdx, slot.htIdx, slot.lane) + "#" + slot.leg, { scratched: true });
+      flash(conflictLeg.name + " moved in — pick their " + shortEvent(slot.eventName) + " replacement next");
+      setRelayReplaceTarget({ evIdx: slot.evIdx, htIdx: slot.htIdx, lane: slot.lane, leg: slot.leg, name: conflictLeg.name, team, eventName: slot.eventName, relay: true });
+    } else {
+      flash("Lineup updated");
+      setRelayReplaceTarget(null);
+    }
   };
 
   const swimmerAt = useCallback((id) => { if (!id) return null; const [base, legStr] = id.split("#"); const [ei, hi, ln] = base.split(":").map(Number); const ev = events[ei], ht = ev?.heats[hi], lane = ht?.lanes.find((l) => l.lane === ln); if (!lane) return null;
@@ -1132,7 +1415,7 @@ export default function App() {
             <OnDeckStrip heat={onDeck} homeTeam={homeTeam} onPick={openPop} />
           </div>
 
-          <div className={"md-panel water grow" + (isStarted ? "" : " waiting")}>
+          <div className={"md-panel water" + (isStarted ? " grow" : " prestart")}>
             <div className="md-phead"><span className="md-eyebrow water-e">● In the water{!isStarted && <em className="md-waiting"> · ready</em>}</span>
               {isStarted
                 ? <button className="md-endrace" onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1} aria-label="Stop / end race" />
@@ -1140,15 +1423,19 @@ export default function App() {
               <span className="md-pnav"><button onClick={() => setHeatPtr((p) => Math.max(0, p - 1))} disabled={ptr === 0}>‹</button>
                 <span className="md-pmeta">#{events[current.evIdx].num} {shortEvent(current?.eventName)} · H{current?.num}</span>
                 <button onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1}>›</button></span></div>
-            {isStarted && isRelayEvent(current?.eventName) && <button className="md-relaybtn" onClick={() => setRelaySplits(true)}>🏊 Relay splits & legs</button>}
-            <div className={"md-lanes" + (isStarted ? "" : " prestart")}>
-              {slots(current, lanesPerHeat).map((l, i) => l ? (() => { const id = entryId(current.evIdx, current.htIdx, l.lane);
-                return <LaneRow key={id} lane={l} d={get(id)} place={isStarted ? curHeatPlaces[id] : null} rec={records[current.evId]} active={isStarted} mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })} />; })()
-                : <div key={"e" + i} className="md-lane empty"><span className="md-lanenum">{i + 1}</span><span className="md-emptytxt">—</span></div>)}
-            </div>
+            {isStarted ? (<>
+              {isRelayEvent(current?.eventName) && <button className="md-relaybtn" onClick={() => setRelaySplits(true)}>🏊 Relay splits & legs</button>}
+              <div className="md-lanes">
+                {slots(current, lanesPerHeat).map((l, i) => l ? (() => { const id = entryId(current.evIdx, current.htIdx, l.lane);
+                  return <LaneRow key={id} lane={l} d={get(id)} place={curHeatPlaces[id]} rec={records[current.evId]} active mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })} />; })()
+                  : <div key={"e" + i} className="md-lane empty"><span className="md-lanenum">{i + 1}</span><span className="md-emptytxt">—</span></div>)}
+              </div>
+            </>) : (
+              <AllLanesStrip heat={current} homeTeam={homeTeam} onPick={openPop} />
+            )}
           </div>
 
-          <div className={"md-panel prev" + (isStarted ? " racing" : "")}>
+          <div className={"md-panel prev" + (isStarted ? " racing" : " grow")}>
             <div className="md-phead"><span className="md-eyebrow">Previous</span>
               <span className="md-pmeta">{previous ? `#${events[previous.evIdx].num} ${shortEvent(previous.eventName)} · H${previous.num}` : "—"}</span></div>
             {previous && (isStarted
@@ -1236,8 +1523,9 @@ export default function App() {
           </div>
         </div>
       </div>}
-      {relayReplaceTarget && <RelayReplaceModal target={relayReplaceTarget} candidates={relayCandidates} onClose={() => setRelayReplaceTarget(null)}
-        onSwap={(c) => swapRelaySwimmer(relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, c)} />}
+      {relayReplaceTarget && <RelayReplaceModal target={relayReplaceTarget} candidates={relayCandidates} plan={medleyPlan} originalLegs={relayOriginalLegs} onClose={() => setRelayReplaceTarget(null)}
+        onSwap={(c) => swapRelaySwimmer(relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, c)}
+        onApplyPlan={() => applyRelayPlan(relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, medleyPlan)} />}
       {toast && <div className="md-toast">{toast}</div>}
       {modal === "relay" && <RelayBuilderModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} />}
       {modal === "export" && <ExportModal onClose={() => setModal(null)} events={events} data={data} myTeam={homeTeam} places={places} records={records} meetName={meetName} />}
@@ -1248,26 +1536,46 @@ export default function App() {
 
 // Collapsed "previous" scoreboard: shows heat place, 2 at a time, auto-sliding.
 // On-deck: horizontal strip of the next heat, auto-sliding left→right (lane 1 → max).
+// On Deck only ever shows the home team's own swimmers in the upcoming heat.
 function OnDeckStrip({ heat, homeTeam, onPick }) {
-  const lanes = heat ? [...heat.lanes].sort((a, b) => a.lane - b.lane) : [];
+  const lanes = heat ? [...heat.lanes].filter((l) => l.team === homeTeam).sort((a, b) => a.lane - b.lane) : [];
   const [idx, setIdx] = useState(0);
   const hold = useRef(0); const tx = useRef(null);
   const VIS = 2, maxIdx = Math.max(0, lanes.length - VIS);
   useEffect(() => { setIdx(0); }, [heat && heat.evIdx, heat && heat.htIdx, lanes.length]);
   useEffect(() => { if (lanes.length <= VIS) return; const t = setInterval(() => { if (Date.now() < hold.current) return; setIdx((i) => (i >= maxIdx ? 0 : i + 1)); }, 1800); return () => clearInterval(t); }, [lanes.length, maxIdx]);
   const nudge = (d) => { hold.current = Date.now() + 5000; setIdx((i) => Math.min(maxIdx, Math.max(0, i + d))); };
-  if (!lanes.length) return <div className="md-odempty">No swimmers on deck.</div>;
+  if (!heat) return <div className="md-odempty">No swimmers on deck.</div>;
+  if (!lanes.length) return <div className="md-odempty">No {homeTeam} swimmers in this heat.</div>;
   return (
     <div className="md-odstrip" onTouchStart={(e) => (tx.current = e.touches[0].clientX)} onTouchEnd={(e) => { if (tx.current === null) return; const dx = e.changedTouches[0].clientX - tx.current; tx.current = null; if (Math.abs(dx) > 40) nudge(dx < 0 ? 1 : -1); }}>
       <div className="md-odwin"><div className="md-odroll" style={{ transform: `translateX(-${idx * (100 / VIS)}%)` }}>
         {lanes.map((l) => { const id = entryId(heat.evIdx, heat.htIdx, l.lane);
-          return <button key={l.lane} className={"md-odcard" + (l.team === homeTeam ? " mine" : "")} onClick={(e) => onPick(id, e.currentTarget)}>
+          return <button key={l.lane} className="md-odcard mine" onClick={(e) => onPick(id, e.currentTarget)}>
             <span className="md-odlane">{l.lane}</span>
             <span className="md-odcname">{l.name}</span>
             <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{l.team}{l.age ? " · " + l.age : ""}</span>
             <span className="md-odcseed">{l.seed}</span>
           </button>; })}
       </div></div>
+    </div>
+  );
+}
+
+// Pre-start preview of the heat that's about to swim: every lane laid out in
+// one horizontal row, sized to fit the on-deck-sized box without scrolling —
+// distinct from OnDeckStrip's 2-card carousel, which only shows the home team.
+function AllLanesStrip({ heat, homeTeam, onPick }) {
+  const lanes = heat ? [...heat.lanes].sort((a, b) => a.lane - b.lane) : [];
+  if (!lanes.length) return <div className="md-odempty">No swimmers in this heat.</div>;
+  return (
+    <div className="md-allstrip">
+      {lanes.map((l) => { const id = entryId(heat.evIdx, heat.htIdx, l.lane);
+        return <button key={l.lane} className={"md-odcard allfit" + (l.team === homeTeam ? " mine" : "")} onClick={(e) => onPick(id, e.currentTarget)}>
+          <span className="md-odlane">{l.lane}</span>
+          <span className="md-odcname">{l.name}</span>
+          <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{l.team}</span>
+        </button>; })}
     </div>
   );
 }
@@ -1437,12 +1745,16 @@ function TeamScore({ r, big }) {
 
 function LaneRow({ lane, d, place, rec, active, mine, selected, onSelect, onTime }) {
   const best = isBest(d.time, lane.seed), br = brokeRecord(d.time, rec), dq = hasDq(d), scr = isScratched(d), ns = isNoShow(d), off = scr || ns, tagCount = Object.keys(d.tags || {}).length;
+  const fs = toSeconds(d.time), ss = toSeconds(lane.seed);
+  const delta = !isNaN(fs) && !isNaN(ss) ? fs - ss : null; // negative = improved
+  const deltaStr = delta === null ? null : (delta < 0 ? "−" : "+") + Math.abs(delta).toFixed(2);
   return (
     <div className={"md-lane clickable" + (selected ? " sel" : "") + (dq ? " dq" : "") + (off ? " scr" : "") + (mine ? " mine" : "")} onClick={(e) => onSelect(e.currentTarget)}>
       <span className="md-lanenum">{lane.lane}</span>
       <span className="md-laneid"><span className="md-laneswimmer">{lane.name}{br && !dq && !off && <span className="md-br">BR</span>}</span><span className="md-laneteam" style={{ color: teamColor(lane.team) }}>{lane.team}{lane.age ? " · " + lane.age : ""}</span></span>
       <span className="md-lanemarks">
         {ns && <span className="md-scrbadge">NS</span>}
+        {deltaStr && !dq && !off && <span className={"md-delta sm" + (delta < 0 ? " neg" : " pos")}>{deltaStr}</span>}
         {place && !dq && !off && <span className="md-place">{ORD(place)}</span>}
         {dq && <span className="md-dqbadge">DQ {dqLabel(d)}</span>}
         {tagCount > 0 && <span className="md-tagcount">{tagCount}</span>}
@@ -1636,7 +1948,6 @@ html, body, #root { height: 100%; }
 .md-panel.water { flex:none; border-color:#1f6b7d; box-shadow:0 0 0 1px rgba(34,211,238,.25) inset; }
 .md-panel.water.grow { flex:none; }
 .md-panel.water .md-lanes { overflow:visible; }
-.md-panel.water .md-lanes.prestart { overflow-y:auto; max-height:246px; }
 .md-panel.prev { flex:1 1 auto; min-height:76px; }
 .md-panel.prev .md-lanes { flex:1 1 auto; min-height:0; }
 .md-panel.results { flex:none; max-height:30vh; border-color:#6b5b13; box-shadow:0 0 0 1px rgba(224,180,0,.2) inset; }
@@ -1715,6 +2026,7 @@ html, body, #root { height: 100%; }
 .md-delta { font-weight:900; font-size:11.5px; padding:2px 7px; border-radius:6px; font-variant-numeric:tabular-nums; }
 .md-delta.neg { background:#dcfce7; color:#166534; }
 .md-delta.pos { background:#fee2e2; color:#b42318; }
+.md-delta.sm { font-size:9.5px; padding:1px 5px; }
 
 .md-right { min-height:0; background:var(--card); border:1px solid var(--sline); border-radius:13px; display:flex; flex-direction:column; overflow:hidden; }
 .md-sheethead { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 14px; border-bottom:1px solid var(--sline); background:#fbfdff; flex:none; }
@@ -1876,6 +2188,9 @@ html, body, #root { height: 100%; }
 .md-agegrp { margin-bottom:10px; } .md-agehdr { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#0e7490; margin:6px 0 2px; }
 .md-gpill { width:18px; height:18px; display:grid; place-items:center; border-radius:50%; font-size:10px; font-weight:900; color:#fff; }
 .md-gpill.girls { background:#ec4899; } .md-gpill.boys { background:#3b82f6; } .md-gpill.mixed { background:#8b5cf6; }
+.md-gpill.sm { width:15px; height:15px; font-size:8.5px; flex:none; }
+.md-statname.statid { display:inline-flex; align-items:center; gap:5px; }
+.md-statage { font-style:normal; color:#94a3b8; font-weight:700; }
 
 .md-rbctl { display:flex; gap:14px; padding:12px 18px; border-bottom:1px solid var(--sline); }
 .md-rblist { overflow-y:auto; padding:12px 16px; }
@@ -1888,7 +2203,18 @@ html, body, #root { height: 100%; }
 .md-rbgap { font-size:11px; font-weight:800; color:#b42318; }
 .md-rbswimmers { display:flex; flex-wrap:wrap; gap:6px 12px; }
 .md-rbswim { font-size:12px; color:#475569; font-weight:600; } .md-rbswim em { color:#94a3b8; font-style:normal; font-variant-numeric:tabular-nums; }
+.md-rbstroke { color:#0e7490; font-weight:800; margin-right:2px; }
 .md-rbproj { font-size:11px; color:#0e7490; font-weight:700; margin-left:4px; }
+.md-rbtabs { display:flex; gap:4px; background:#f1f5f9; border-radius:9px; padding:3px; }
+.md-rbtab { padding:6px 12px; border-radius:7px; border:none; background:transparent; color:#475569; font-weight:800; font-size:12.5px; cursor:pointer; }
+.md-rbtab.on { background:#fff; color:#0f2036; box-shadow:0 1px 3px rgba(0,0,0,.15); }
+.md-rbedit { margin-left:auto; padding:4px 9px; border-radius:7px; border:1px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:11px; cursor:pointer; }
+.md-rbedit.on { border-color:#7c3aed; color:#7c3aed; background:#f5f3ff; }
+.md-rbeditgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-bottom:4px; }
+.md-rbeditleg { display:flex; flex-direction:column; gap:2px; }
+.md-rbeditstroke { font-size:9.5px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:#0e7490; }
+.md-rbeditleg select { padding:6px 8px; border-radius:8px; border:1px solid var(--sline); background:#fff; font-size:12.5px; font-weight:600; color:var(--sink); }
+.md-rbreset { grid-column:1/-1; padding:6px; border-radius:8px; border:1px dashed var(--sline); background:#fff; color:#7c3aed; font-weight:700; font-size:11.5px; cursor:pointer; }
 .md-rbprob { display:flex; align-items:center; gap:8px; margin-top:6px; }
 .md-rbprobbar { flex:1; height:8px; border-radius:5px; background:#eef2f7; overflow:hidden; }
 .md-rbprobfill { height:100%; background:#10b981; }
@@ -1922,6 +2248,37 @@ html, body, #root { height: 100%; }
 .md-rswim.btn:hover { border-color:#facc15; background:#fffdf0; }
 
 .md-lgcount { margin-left:auto; font-size:12px; font-weight:800; color:#64748b; }
+
+.md-leaguepage { position:fixed; inset:0; z-index:90; background:#fff; display:flex; flex-direction:column; overflow-y:auto; }
+.md-lgtopbar { display:flex; align-items:center; justify-content:space-between; padding:12px 20px; border-bottom:1px solid var(--sline); flex:none; position:sticky; top:0; background:#fff; z-index:2; }
+.md-lgback { border:none; background:none; color:#0e7490; font-weight:800; font-size:14px; cursor:pointer; padding:6px 4px; }
+.md-lgback:hover { text-decoration:underline; }
+.md-lgheader { padding:24px 24px 8px; max-width:920px; margin:0 auto; width:100%; }
+.md-lgtitle { font-size:26px; font-weight:900; color:var(--sink); margin:0; }
+.md-lgsub { font-size:13.5px; color:#64748b; margin:4px 0 0; }
+.md-lgbanner { padding:28px 24px; color:#fff; display:flex; flex-direction:column; gap:14px; }
+.md-lgbannerteam { font-size:28px; font-weight:900; }
+.md-lgbannerstats { display:flex; gap:28px; }
+.md-lgstat { display:flex; flex-direction:column; }
+.md-lgstat b { font-size:22px; font-weight:900; }
+.md-lgstat span { font-size:10.5px; text-transform:uppercase; letter-spacing:.08em; opacity:.8; font-weight:700; }
+.md-lgbody { max-width:920px; margin:0 auto; width:100%; padding:16px 24px 40px; display:flex; flex-direction:column; gap:28px; }
+.md-lgsection { display:flex; flex-direction:column; gap:8px; }
+.md-lgsectitle { font-size:15px; font-weight:800; color:var(--sink); }
+.md-lgtable { width:100%; border-collapse:collapse; font-size:13.5px; }
+.md-lgtable.standings thead th, .md-lgtable.roster thead th { text-align:left; padding:9px 10px; font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; border-bottom:2px solid var(--sline); }
+.md-lgsortable { cursor:pointer; user-select:none; } .md-lgsortable:hover { color:#0e7490; }
+.md-lgtable.standings tbody td, .md-lgtable.roster tbody td { padding:11px 10px; border-bottom:1px solid #f1f5f9; color:#334155; }
+.md-lgtr { cursor:pointer; } .md-lgtr:hover td { background:#f8fafc; }
+.md-lgtr.mine td { background:#fffdf0; } .md-lgtr.mine:hover td { background:#fef9e0; }
+.md-lgrank { display:inline-grid; place-items:center; width:24px; height:24px; border-radius:50%; background:#eef2f7; color:#475569; font-weight:800; font-size:12px; }
+.md-lgrank.top1 { background:#facc15; color:#3a2e00; } .md-lgrank.top2 { background:#cbd5e1; color:#1c2430; } .md-lgrank.top3 { background:#d98c4a; color:#3a2007; }
+.md-lgteambar { display:inline-block; width:4px; height:16px; border-radius:2px; margin-right:9px; vertical-align:middle; }
+.md-lgpower { font-weight:900; color:#0e7490; font-variant-numeric:tabular-nums; }
+.md-lgopp { font-weight:700; color:var(--sink); } .md-lgdate { color:#94a3b8; }
+.md-lgresult { font-weight:800; text-align:right; } .md-lgresult.win { color:#166534; } .md-lgresult.loss { color:#b42318; }
+.md-lgswimname { font-weight:700; color:var(--sink); }
+@media (max-width:640px){ .md-lgbannerstats { gap:16px; } .md-lgbanner { padding:20px 16px; } .md-lgheader,.md-lgbody { padding-left:16px; padding-right:16px; } }
 .md-lglist { overflow-y:auto; padding:8px 12px; flex:1; min-height:0; }
 .md-lgitem { border:1px solid var(--sline); border-radius:11px; margin-bottom:6px; overflow:hidden; }
 .md-lgitem.mine { border-color:#facc15; }
@@ -1938,7 +2295,11 @@ html, body, #root { height: 100%; }
 .md-lgevseed { color:#64748b; font-variant-numeric:tabular-nums; flex:1; }
 .md-lgevplace { font-weight:800; color:#0e7490; } .md-lgevpts { font-weight:800; color:#166534; }
 
-.md-panel.prev.grow { flex:2; } .md-panel.water.prestart { flex:none; }
+.md-panel.prev.grow { flex:2 1 auto; }
+.md-panel.water.prestart { flex:none; max-height:118px; overflow:hidden; }
+.md-allstrip { display:flex; align-items:stretch; gap:3px; padding:5px; height:100%; overflow:hidden; }
+.md-odcard.allfit { flex:1 1 0; min-width:0; border-right:none; padding:6px 6px; }
+.md-odcard.allfit .md-odcname, .md-odcard.allfit .md-odcteam { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .md-waiting { font-style:normal; color:var(--muted); font-weight:700; }
 .md-prestartbox { padding:12px; display:flex; flex-direction:column; gap:10px; }
 .md-startbtn { padding:14px; border-radius:12px; border:none; background:var(--cyan); color:#062a33; font-weight:900; font-size:16px; cursor:pointer; letter-spacing:.02em; }
@@ -1965,8 +2326,6 @@ html, body, #root { height: 100%; }
 .md-endrace:hover { background:#dc2626; } .md-endrace:disabled { opacity:.4; cursor:default; }
 .md-startsq { width:26px; height:26px; margin-left:auto; border:none; border-radius:7px; background:var(--cyan); color:#062a33; font-weight:900; font-size:12px; cursor:pointer; display:grid; place-items:center; box-shadow:0 1px 4px rgba(34,211,238,.4); }
 .md-startsq:hover { background:#5fe3f5; }
-.md-panel.water.waiting { max-height:290px; }
-.md-lanes.prestart { max-height:246px; overflow-y:auto; }
 .md-progbtn { width:100%; margin-top:8px; padding:9px; border-radius:9px; border:1.5px solid var(--sline); background:#fff; color:#7c3aed; font-weight:800; font-size:13px; cursor:pointer; }
 .md-progbtn.on { background:#f3e8ff; border-color:#ddd6fe; }
 .md-progwrap { margin-top:8px; }
@@ -2022,6 +2381,11 @@ html, body, #root { height: 100%; }
 .md-scratchbtn:hover { background:#f1f5f9; } .md-scratchbtn.on { background:#e2e8f0; border-color:#94a3b8; color:#334155; }
 .md-scratchmodal { width:min(400px,94vw); }
 .md-scratchbtns { padding:14px 18px; display:flex; flex-direction:column; gap:8px; }
+.md-planlegs { display:flex; flex-direction:column; gap:5px; margin-bottom:4px; }
+.md-planleg { display:grid; grid-template-columns:60px 1fr auto; align-items:center; gap:8px; padding:8px 10px; background:#f8fafc; border-radius:9px; font-size:12.5px; }
+.md-planstroke { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:#0e7490; }
+.md-planname { font-weight:700; color:#334155; } .md-planname s { color:#94a3b8; font-weight:600; }
+.md-plantime { font-weight:800; color:#0e7490; font-variant-numeric:tabular-nums; }
 
 .md-newmeetform { padding:16px 18px; display:flex; flex-direction:column; gap:10px; overflow-y:auto; }
 .md-newmeetnote { font-size:12px; color:#64748b; background:#f8fafc; border:1px solid var(--sline); border-radius:9px; padding:9px 11px; }
