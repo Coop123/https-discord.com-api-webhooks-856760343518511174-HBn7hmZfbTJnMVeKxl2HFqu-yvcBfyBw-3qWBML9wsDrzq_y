@@ -368,14 +368,19 @@ function buildMedleyRelaysSeason(meets, ageGroup, gender, excludeByTeam) {
   }).filter((r) => r.full).sort((a, b) => a.total - b.total);
 }
 // Merge an uploaded results sheet (final times by name+event) for chosen teams.
-function mergeResults(parsedEvents, targetEvents, teamsToApply) {
+function mergeResults(parsedEvents, targetEvents, teamsToApply, homeTeam) {
   const patch = {}; let matched = 0;
   const idx = {}; // "evnum|name" -> {evIdx, htIdx, lane, team}
   targetEvents.forEach((ev, evIdx) => ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { idx[ev.num + "|" + l.name.toLowerCase()] = { evIdx, htIdx, lane: l.lane, team: l.team }; })));
   parsedEvents.forEach((ev) => ev.heats.forEach((ht) => ht.lanes.forEach((l) => {
     const hit = idx[ev.num + "|" + l.name.toLowerCase()];
-    if (hit && (!teamsToApply || teamsToApply.includes(hit.team)) && toSeconds(l.finalTime || l.seed) && !isNaN(toSeconds(l.finalTime || l.seed))) {
-      patch[entryId(hit.evIdx, hit.htIdx, hit.lane)] = { time: l.finalTime || l.seed }; matched++;
+    if (!hit || (teamsToApply && !teamsToApply.includes(hit.team))) return;
+    const id = entryId(hit.evIdx, hit.htIdx, hit.lane);
+    // DQ rows only get flagged for our own team — a pending DQ requiring the
+    // coach to pick the reason via the usual DQ button, same as a live tap.
+    if (l.dq) { if (hit.team === homeTeam) { patch[id] = { ...(patch[id] || {}), dqs: [{ code: PEND_DQ_CODE, reason: "Reason pending — awaiting DQ slip", group: "Pending" }] }; matched++; } return; }
+    if (toSeconds(l.finalTime || l.seed) && !isNaN(toSeconds(l.finalTime || l.seed))) {
+      patch[id] = { ...(patch[id] || {}), time: l.finalTime || l.seed }; matched++;
     }
   })));
   return { patch, matched };
@@ -440,6 +445,23 @@ async function pdfToText(file) {
 
 const fmtT = (s) => { if (isNaN(s)) return "—"; const m = Math.floor(s / 60); const sec = s - m * 60; return m > 0 ? `${m}:${sec.toFixed(2).padStart(5, "0")}` : sec.toFixed(2); };
 
+// Digital MM:SS clock counting up from when the race starts. `stopped`
+// freezes it (heat complete) instead of hiding it, so the coach can still
+// see how long the heat took; ticking is driven by our own state (not a
+// live Date.now() read on every render) so it doesn't creep forward once frozen.
+function RaceClockDisplay({ startedAt, stopped }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (stopped) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [stopped, startedAt]);
+  const elapsedSec = Math.max(0, (now - startedAt) / 1000);
+  const m = Math.floor(elapsedSec / 60), s = Math.floor(elapsedSec % 60);
+  return <div className={"md-raceclock" + (stopped ? " stopped" : "")}>{String(m).padStart(2, "0")}:{String(s).padStart(2, "0")}</div>;
+}
+
 // Relay splits — floating (not full-screen). One card per relay lane, in lane
 // order, with the four legs vertical, current leg highlighted, split entry.
 function RelaySplitsPanel({ heat, evIdx, htIdx, data, homeTeam, onClose, update, get, openPop, clockActive }) {
@@ -482,11 +504,11 @@ function RelaySplitsPanel({ heat, evIdx, htIdx, data, homeTeam, onClose, update,
 }
 
 // Import a results sheet and merge final times by name+event for chosen teams.
-function ResultsModal({ onClose, events, teams, homeTeam, onApply, onSaveNew }) {
+function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
   const [text, setText] = useState(""); const [busy, setBusy] = useState("");
   const parsed = useMemo(() => parseResults(text), [text]);
-  const [sel, setSel] = useState(teams);
-  const { patch, matched } = useMemo(() => mergeResults(parsed, events, sel), [parsed, events, sel]);
+  const { patch, matched } = useMemo(() => mergeResults(parsed, events, null, homeTeam), [parsed, events, homeTeam]);
+  const dqCount = useMemo(() => Object.values(patch).filter((p) => p.dqs).length, [patch]);
   const count = parsed.reduce((n, ev) => n + ev.heats[0].lanes.length, 0);
   const foundTeams = useMemo(() => { const s = new Set(); parsed.forEach((ev) => ev.heats[0].lanes.forEach((l) => s.add(l.team))); return [...s]; }, [parsed]);
   const [form, setForm] = useState(false);
@@ -497,14 +519,12 @@ function ResultsModal({ onClose, events, teams, homeTeam, onApply, onSaveNew }) 
   const onFile = async (e) => { const f = e.target.files?.[0]; if (!f) return;
     if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") { setBusy("Reading PDF…"); try { setText(await pdfToText(f)); setBusy(""); } catch { setBusy("Couldn't read the PDF — paste text."); } }
     else { const r = new FileReader(); r.onload = () => setText(String(r.result || "")); r.readAsText(f); } };
-  const toggle = (t) => setSel((s) => s.includes(t) ? s.filter((x) => x !== t) : [...s, t]);
   const teamOpt = (t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>;
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
         <div className="md-mhead"><div><div className="md-mtitle">Import results sheet</div><div className="md-msub">Merge finals onto a loaded program, or save a whole new meet from results alone.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
-        <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy || "Merge applies to:"}</span>
-          <span className="md-teamsel">{teams.map((t) => <button key={t} className={"md-teamchip" + (sel.includes(t) ? " on" : "")} style={sel.includes(t) ? { background: teamColor(t), borderColor: teamColor(t), color: "#0a1628" } : {}} onClick={() => toggle(t)}>{t}</button>)}</span></div>
+        <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy}</span></div>
         {form ? (
           <div className="md-newmeetform">
             <label className="md-mrow">Meet name<input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Belwood vs Oaktree — Jun 20" /></label>
@@ -517,8 +537,8 @@ function ResultsModal({ onClose, events, teams, homeTeam, onApply, onSaveNew }) 
         ) : (
           <div className="md-impgrid">
             <textarea className="md-imparea" placeholder={"Paste results text…"} value={text} onChange={(e) => setText(e.target.value)} />
-            <div className="md-preview"><div className="md-prevtop"><span>{parsed.length} events · {count} results · <b>{matched}</b> merge onto loaded meet</span></div>
-              <div className="md-prevbody"><div className="md-prevempty">“Merge” fills finals onto the loaded program by event # + name for the selected teams. “Save as new meet” builds and saves a fresh meet from just this results sheet.</div></div></div>
+            <div className="md-preview"><div className="md-prevtop"><span>{parsed.length} events · {count} results · <b>{matched}</b> merge onto loaded meet{dqCount ? <> · <b className="md-impdqnote">{dqCount} DQ{dqCount > 1 ? "s" : ""}</b> found for {homeTeam}</> : null}</span></div>
+              <div className="md-prevbody"><div className="md-prevempty">“Merge” fills finals onto the loaded program by event # + name. Any {homeTeam} row marked DQ on the sheet gets flagged as a pending DQ — pick the reason from the usual DQ button after merging. “Save as new meet” builds and saves a fresh meet from just this results sheet.</div></div></div>
           </div>
         )}
         <div className="md-mfoot"><button className="md-cancel" onClick={form ? () => setForm(false) : onClose}>{form ? "Back" : "Cancel"}</button>
@@ -706,30 +726,42 @@ function relaySlotsByTeam(events, team) {
       l.swimmers.forEach((s, leg) => { if (s.name) slots.set(s.name, { evIdx: ei, htIdx: hi, lane: l.lane, leg, eventName: ev.name }); }); })); });
   return slots;
 }
-// Would pulling `name` out of their other relay (backfilling it with the next
-// best available teammate) cost that relay's seed-based place in its event?
-// Compares the field's seed-time ranking before vs. after the swap so a
-// "move" suggestion never sacrifices ground on a relay we're already seeded
-// to hold. Missing data (no seed, no backfill option) errs toward allowing
-// the move rather than blocking on incomplete information.
-function relayMoveIsSafe(events, data, name, team, fromSlot) {
-  const ev = events[fromSlot.evIdx]; if (!ev) return true;
-  const donorLane = ev.heats[fromSlot.htIdx] && ev.heats[fromSlot.htIdx].lanes.find((l) => l.lane === fromSlot.lane);
-  if (!donorLane) return true;
+// Where a team's relay currently sits by seed time (across all heats of the
+// event) vs. where it would land if its total changed by deltaSec (negative
+// = faster/less time, positive = slower/more time) — the shared math behind
+// both "is this move safe" and the replacement picker's +/- time & place.
+function relayPlaceProjection(events, team, evIdx, deltaSec) {
+  const ev = events[evIdx]; if (!ev || deltaSec == null || isNaN(deltaSec)) return null;
   const field = [];
   ev.heats.forEach((ht) => ht.lanes.forEach((l) => { if (!l.swimmers) return; const s = toSeconds(l.seed); if (!isNaN(s)) field.push({ team: l.team, v: s }); }));
-  const currentIdx = field.findIndex((f) => f.team === team);
-  if (currentIdx < 0) return true;
-  const currentPlace = [...field].sort((a, b) => a.v - b.v).findIndex((f) => f.team === team) + 1;
+  const idx = field.findIndex((f) => f.team === team); if (idx < 0) return null;
+  const oldPlace = [...field].sort((a, b) => a.v - b.v).findIndex((f) => f.team === team) + 1;
+  const oldTime = field[idx].v;
+  const newField = field.map((f) => f.team === team ? { ...f, v: f.v + deltaSec } : f);
+  const newPlace = [...newField].sort((a, b) => a.v - b.v).findIndex((f) => f.team === team) + 1;
+  return { oldPlace, newPlace, placeDelta: oldPlace - newPlace, timeDelta: deltaSec, oldTime, newTime: oldTime + deltaSec };
+}
+// What happens to `name`'s OTHER relay if they're pulled out of it and
+// backfilled with the next-best available teammate — the donor side of a
+// "move" candidate, so the picker can show that relay's own +/- alongside
+// the one gaining the swimmer. null when there's no seed/backfill to compare.
+function relayDonorImpact(events, data, name, team, fromSlot) {
+  const ev = events[fromSlot.evIdx]; if (!ev) return null;
   const stroke = /medley/i.test(ev.name) ? (MEDLEY_LEGS[fromSlot.leg] || "Free") : "Free";
   const nameLegTime = bestStrokeSeed(events, data, name, team, stroke);
-  const donorSeed = toSeconds(donorLane.seed);
-  if (nameLegTime == null || isNaN(donorSeed)) return true;
   const backfill = relayReplacementCandidatesRaw(events, data, fromSlot.evIdx, fromSlot.htIdx, fromSlot.lane, fromSlot.leg, team)[0];
-  const newTotal = backfill && backfill.best != null ? donorSeed - nameLegTime + backfill.best : Infinity;
-  const newField = field.map((f) => f.team === team ? { ...f, v: newTotal } : f).sort((a, b) => a.v - b.v);
-  const newPlace = newField.findIndex((f) => f.team === team) + 1;
-  return newPlace <= currentPlace;
+  if (nameLegTime == null || !backfill || backfill.best == null) return null;
+  const proj = relayPlaceProjection(events, team, fromSlot.evIdx, backfill.best - nameLegTime);
+  return proj && { ...proj, backfillName: backfill.name, eventName: ev.name };
+}
+// Would pulling `name` out of their other relay (backfilling it with the next
+// best available teammate) cost that relay's seed-based place in its event?
+// A "move" suggestion should never sacrifice ground on a relay we're already
+// seeded to hold. Missing data (no seed, no backfill option) errs toward
+// allowing the move rather than blocking on incomplete information.
+function relayMoveIsSafe(events, data, name, team, fromSlot) {
+  const impact = relayDonorImpact(events, data, name, team, fromSlot);
+  return !impact || impact.newPlace <= impact.oldPlace;
 }
 // Drops any roster candidate who's on a different relay this meet UNLESS
 // moving them is "safe" per relayMoveIsSafe — used to gate both the flat
@@ -855,6 +887,20 @@ function ParticipantsModal({ onClose, events, data, homeTeam, onOne, onAll }) {
 // if no full medley plan is possible), offer a couple of eligible teammates
 // for just this leg — flagging anyone already on a different relay as a
 // "move" so the coach knows swapping them in leaves a gap elsewhere.
+function RelayDeltaLine({ label, d }) {
+  if (!d) return null;
+  const timeCls = d.timeDelta < 0 ? "neg" : "pos";
+  const timeStr = (d.timeDelta < 0 ? "−" : "+") + Math.abs(d.timeDelta).toFixed(2) + "s";
+  const placeCls = d.placeDelta > 0 ? "neg" : d.placeDelta < 0 ? "pos" : "";
+  const placeStr = d.placeDelta === 0 ? ORD(d.oldPlace) + " (no change)" : ORD(d.oldPlace) + " → " + ORD(d.newPlace);
+  return (
+    <div className="md-reldeltaline">
+      <span className="md-reldeltalabel">{label}</span>
+      <span className={"md-delta sm" + (placeCls ? " " + placeCls : "")}>{placeStr}</span>
+      <span className={"md-delta sm " + timeCls}>{timeStr}</span>
+    </div>
+  );
+}
 function RelayReplaceModal({ target, candidates, plan, originalLegs, onClose, onSwap, onApplyPlan }) {
   return (
     <div className="md-scrim" onClick={onClose}>
@@ -878,6 +924,8 @@ function RelayReplaceModal({ target, candidates, plan, originalLegs, onClose, on
               <b>{c.name}</b>{c.age ? ` (${c.age})` : ""} — {c.best != null ? fmtT(c.best) : "no time on record"}
               {c.moveFrom && <em style={{ marginLeft: 6, color: "#7c3aed", fontStyle: "normal" }}>currently on {shortEvent(c.moveFrom.eventName)} — moving them leaves a gap there</em>}
               {!c.verified && <em style={{ marginLeft: 6, color: "#a8842a", fontStyle: "normal" }}>unverified age/gender</em>}
+              <RelayDeltaLine label="This relay:" d={c.thisDelta} />
+              {c.donorDelta && <RelayDeltaLine label={"Their relay (backfilled by " + c.donorDelta.backfillName + "):"} d={c.donorDelta} />}
             </button>
           )) : <div className="md-prevempty">No eligible teammate found on the roster for this age group.</div>}
           <button className="md-cancel" onClick={onClose}>Leave relay short (keep scratch)</button>
@@ -927,6 +975,15 @@ function computePower(meets, filter) {
     s.power = Math.round(0.6 * speed + 0.25 * improveScore + 0.15 * ptsScore);
   });
   return sw;
+}
+// "Top Kid" score for the League page's improvement+points leaderboard —
+// unlike computePower's blended power rating (60% speed), this is 50/50
+// improvement rate and points scored, so it surfaces swimmers who are
+// climbing fast or racking up points even if they aren't the fastest yet.
+function topKidScore(s, maxPts) {
+  const improveScore = s.improveN ? Math.max(0, Math.min(100, (s.improveSum / s.improveN) * 1500)) : 0;
+  const ptsScore = maxPts ? (s.pts / maxPts) * 100 : 0;
+  return Math.round(0.5 * improveScore + 0.5 * ptsScore);
 }
 // Team standings (W-L, points for/against, margins) from dual meets.
 function computeStandings(meets) {
@@ -1018,6 +1075,17 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
   const [sort, setSort] = useState("record");
   const [rosterSort, setRosterSort] = useState("power");
   const rows = teams.map((t) => ({ team: t, ...(standings[t] || { w: 0, l: 0, tie: 0, pf: 0, pa: 0, meets: [] }), power: teamPower(t) })).sort(LEAGUE_SORTS[sort]);
+
+  // Top Kid leaderboard — its own age-group slider, independent of the page
+  // filter bar, sliding left (6u) to right (15-18).
+  const [topKidAgeIdx, setTopKidAgeIdx] = useState(2);
+  const topKidAge = AGE_GROUPS[topKidAgeIdx];
+  const topKidPower = useMemo(() => computePower(meets, { ageGroup: topKidAge }), [meets, topKidAge]);
+  const topKids = useMemo(() => {
+    const arr = Object.values(topKidPower).filter((s) => s.pts > 0 || s.improveN > 0);
+    const maxPts = Math.max(1, ...arr.map((s) => s.pts));
+    return arr.map((s) => ({ ...s, score: topKidScore(s, maxPts) })).sort((a, b) => b.score - a.score).slice(0, 5);
+  }, [topKidPower]);
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -1146,6 +1214,31 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
       </div>
       <div className="md-lgbody">
         {filterBar}
+        <div className="md-lgsection md-topkid">
+          <div className="md-lgsectitle">🏅 Top Kid — {topKidAge} <em className="md-topkidnote">improvement + points, all teams</em></div>
+          <div className="md-topkidslider">
+            <span className="md-topkidend">6u</span>
+            <input type="range" min="0" max={AGE_GROUPS.length - 1} step="1" value={topKidAgeIdx} onChange={(e) => setTopKidAgeIdx(+e.target.value)} className="md-topkidrange" />
+            <span className="md-topkidend">15-18</span>
+          </div>
+          {topKids.length ? (
+            <table className="md-lgtable roster">
+              <thead><tr><th>#</th><th>Swimmer</th><th>Team</th><th>Avg improvement</th><th>Points</th><th>Score</th></tr></thead>
+              <tbody>
+                {topKids.map((s, i) => (
+                  <tr key={s.name + "|" + s.team} className="md-lgtr" onClick={() => setProfile({ name: s.name, team: s.team })}>
+                    <td><span className={"md-lgrank" + (i < 3 ? " top" + (i + 1) : "")}>{i + 1}</span></td>
+                    <td className="md-lgswimname">{s.name}</td>
+                    <td><span className="md-lgteambar" style={{ background: teamColor(s.team) }} />{TEAM_NAME[s.team] || s.team}</td>
+                    <td>{s.improveN ? ((s.improveSum / s.improveN) * 100).toFixed(1) + "%" : "—"}</td>
+                    <td>{s.pts}</td>
+                    <td className="md-lgpower">{s.score}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <div className="md-prevempty">No swims recorded for {topKidAge} yet.</div>}
+        </div>
         <table className="md-lgtable standings">
           <thead><tr>
             <th>#</th><th>Team</th>
@@ -1291,12 +1384,46 @@ function CompareBoard({ people, slots, onAssign, onSwap, onRemove }) {
   );
 }
 
+// Simple-mode picker: one swimmer chosen via team + single-select (circle,
+// not multi-select) age/gender filters + a name dropdown, instead of the
+// Complex mode's drag-and-drop bank. Two of these side by side replace the
+// 4-slot board when the coach just wants a quick head-to-head.
+function SimplePicker({ idx, people, slot, onAssign, onRemove }) {
+  const [team, setTeam] = useState(slot ? slot.team : "");
+  const [ageSel, setAgeSel] = useState(null);
+  const [genderSel, setGenderSel] = useState(null);
+  const teams = useMemo(() => [...new Set(people.map((p) => p.team))].sort(), [people]);
+  const availAges = useMemo(() => AGE_GROUPS.filter((g) => people.some((p) => (!team || p.team === team) && ageGroupOf(p.age) === g)), [people, team]);
+  const filtered = useMemo(() => people.filter((p) => (!team || p.team === team) && (!ageSel || ageGroupOf(p.age) === ageSel) && (!genderSel || p.gender === genderSel)), [people, team, ageSel, genderSel]);
+  const curVal = slot ? slot.name + "|" + slot.team : "";
+  return (
+    <div className="md-cmpsimplecard">
+      <div className="md-cmpsimplehead">Swimmer {idx + 1}</div>
+      <label className="md-ctl">Team<select value={team} onChange={(e) => { setTeam(e.target.value); onRemove(); }}>
+        <option value="">Any team</option>{teams.map((t) => <option key={t} value={t}>{t}</option>)}
+      </select></label>
+      <div className="md-cmpradiogrp"><span className="md-cmpchecklabel">Gender</span>{["Girls", "Boys"].map((g) => (
+        <label key={g} className="md-cmpradio"><input type="checkbox" checked={genderSel === g} onChange={() => setGenderSel(genderSel === g ? null : g)} />{g}</label>
+      ))}</div>
+      <div className="md-cmpradiogrp"><span className="md-cmpchecklabel">Age</span>{availAges.length ? availAges.map((g) => (
+        <label key={g} className="md-cmpradio"><input type="checkbox" checked={ageSel === g} onChange={() => setAgeSel(ageSel === g ? null : g)} />{g}</label>
+      )) : <span className="md-cmpchecklabel">—</span>}</div>
+      <label className="md-ctl">Swimmer<select value={curVal} onChange={(e) => { const p = filtered.find((x) => x.name + "|" + x.team === e.target.value); onAssign(p || null); }}>
+        <option value="">Choose…</option>{filtered.map((p) => <option key={p.name + "|" + p.team} value={p.name + "|" + p.team}>{p.name}{p.age ? ` (${p.age})` : ""} — {p.team}</option>)}
+      </select></label>
+      {slot && <button className="md-cmpslotremove" onClick={onRemove}>✕ remove</button>}
+    </div>
+  );
+}
+
 function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const meets = useMemo(() => [{ meetName: "This meet", mode: "meet", events, data }, ...seasonMeets], [events, data, seasonMeets]);
   const power = useMemo(() => computePower(meets), [meets]);
   const people = useMemo(() => Object.values(power).sort((a, b) => a.name.localeCompare(b.name)), [power]);
   const [stroke, setStroke] = useState("Free");
+  const [mode, setMode] = useState("complex"); // "complex" (4-slot drag/drop) | "simple" (2-swimmer dropdown)
   const [slots, setSlots] = useState([null, null, null, null]); // { name, team }
+  const toggleMode = () => { setMode((m) => m === "complex" ? "simple" : "complex"); setSlots([null, null, null, null]); };
 
   const assign = (idx, person) => setSlots((s) => { const ns = [...s]; ns[idx] = { name: person.name, team: person.team }; return ns; });
   const removeSlot = (idx) => setSlots((s) => { const ns = [...s]; ns[idx] = null; return ns; });
@@ -1319,11 +1446,19 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp md-cmpmodal" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Swimmer comparison</div><div className="md-msub">Drag up to 4 swimmers from the bank into the slots. Projections use each swimmer's own improvement spread.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><div><div className="md-mtitle">Swimmer comparison</div><div className="md-msub">{mode === "complex" ? "Drag up to 4 swimmers from the bank into the slots." : "Pick 2 swimmers by team, age and gender."} Projections use each swimmer's own improvement spread.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl">
           <label className="md-ctl">Stroke<select value={stroke} onChange={(e) => setStroke(e.target.value)}>{PROG_STROKES.map((s) => <option key={s}>{s}</option>)}</select></label>
+          <button className="md-cmpmodebtn" onClick={toggleMode}>{mode === "complex" ? "Simple" : "Complex"}</button>
         </div>
-        <CompareBoard people={people} slots={slots} onAssign={assign} onSwap={swapSlots} onRemove={removeSlot} />
+        {mode === "complex" ? (
+          <CompareBoard people={people} slots={slots} onAssign={assign} onSwap={swapSlots} onRemove={removeSlot} />
+        ) : (
+          <div className="md-cmpsimplewrap">
+            <SimplePicker idx={0} people={people} slot={slots[0]} onAssign={(p) => (p ? assign(0, p) : removeSlot(0))} onRemove={() => removeSlot(0)} />
+            <SimplePicker idx={1} people={people} slot={slots[1]} onAssign={(p) => (p ? assign(1, p) : removeSlot(1))} onRemove={() => removeSlot(1)} />
+          </div>
+        )}
         {slots.some(Boolean) && (
           <div className="md-cmpspreadwrap">
             {slots.map((s, i) => { const p = projections[i]; if (!s) return null;
@@ -1451,6 +1586,39 @@ function RelayLegDragBoard({ legs, bench, relayType, mixed, doubleANames, double
   );
 }
 
+// "Who's coming" attendance popup — anchored to its trigger button with a
+// caret, like the swimmer popovers. Everyone on the roster starts checked in
+// (present); unchecking marks them absent so relay auto-picks and the manual
+// edit bench skip them, same path as the locked-other-relay exclusion.
+function AttendancePopup({ team, roster, isAbsent, onToggle, rect, onClose }) {
+  const ref = useRef(null);
+  const [search, setSearch] = useState("");
+  const [pos, setPos] = useState({ top: rect.bottom + 10, left: rect.left, caret: 24 });
+  useLayoutEffect(() => {
+    const W = 280, m = 10, vw = window.innerWidth, vh = window.innerHeight, h = ref.current ? ref.current.offsetHeight : 320;
+    let top = rect.bottom + 10;
+    if (top + h > vh - m) top = Math.max(m, vh - h - m);
+    const left = Math.min(Math.max(m, rect.left), vw - W - m);
+    setPos({ top, left, caret: Math.min(Math.max(16, rect.left + rect.width / 2 - left), W - 24) });
+  }, [rect]);
+  const q = search.trim().toLowerCase();
+  const filtered = q ? roster.filter((s) => s.name.toLowerCase().includes(q)) : roster;
+  const absentCount = roster.filter((s) => isAbsent(s.name)).length;
+  return (
+    <div ref={ref} className="md-attndpov" style={{ top: pos.top, left: pos.left }} role="dialog">
+      <span className="md-caret" style={{ left: pos.caret }} />
+      <div className="md-agepovhead"><span>Who's coming — {team}</span><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-attndsub">{roster.length - absentCount} of {roster.length} present</div>
+      <input className="md-attndsearch" placeholder="Search swimmers…" value={search} onChange={(e) => setSearch(e.target.value)} />
+      <div className="md-attndlist">
+        {filtered.length ? filtered.map((s) => (
+          <label key={s.name} className="md-attndrow"><input type="checkbox" checked={!isAbsent(s.name)} onChange={() => onToggle(s.name)} />{s.name}{s.age ? <em> ({s.age})</em> : null}</label>
+        )) : <div className="md-prevempty">No swimmers match.</div>}
+      </div>
+    </div>
+  );
+}
+
 // Relay builder: fastest 4-swimmer relay per team built from the WHOLE
 // SEASON (not just the loaded meet) — Free or Medley, home team highlighted,
 // ranked by projected time (each swimmer's improvement trend factored in)
@@ -1476,18 +1644,40 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const genderMap = useMemo(() => seasonGenderMap(meets), [meets]);
   const keyFor = (team, type) => (type || relayType) + "|" + ag + "|" + team;
   const otherType = relayType === "Free" ? "Medley" : "Free";
+  // Every team that appears anywhere in the season data — the coach opts
+  // teams into the comparison (home team is always included); teams left
+  // unchecked are hidden entirely rather than always showing everyone found.
+  const allTeams = useMemo(() => { const s = new Set(); meets.forEach((m) => (m.events || []).forEach((ev) => ev.heats.forEach((ht) => ht.lanes.forEach((l) => s.add(l.team))))); return [...s].sort(); }, [meets]);
+  const [selTeams, setSelTeams] = useState(() => [homeTeam]);
+  const toggleTeam = (t) => setSelTeams((s) => s.includes(t) ? s.filter((x) => x !== t) : [...s, t]);
+  const rankTeams = useMemo(() => [...new Set([homeTeam, ...selTeams])], [homeTeam, selTeams]);
+  // Who's actually at the meet — keyed name|team, false = marked absent,
+  // missing/true = present (everyone starts checked in). Feeds straight into
+  // excludeByTeam below so absent swimmers never get auto-picked or offered
+  // as a manual bench candidate, same path as the locked-other-relay rule.
+  const [attendance, setAttendance] = useState({});
+  const [attendanceOpen, setAttendanceOpen] = useState(null); // { rect } | null
+  const isAbsent = (name, team) => attendance[name + "|" + team] === false;
+  const toggleAttendance = (name, team) => setAttendance((a) => ({ ...a, [name + "|" + team]: a[name + "|" + team] === false ? true : false }));
   // If a team doesn't have 8+ swimmers in this age group, there just aren't
   // enough people for two fully-distinct A squads — let someone swim both
   // instead of leaving a relay short. Only enforce "one A relay per person"
-  // when the roster is deep enough to reasonably expect it.
-  const excludeByTeam = (team) => { const other = locked[keyFor(team, otherType)]; if (!other) return null;
+  // when the roster is deep enough to reasonably expect it. Absent swimmers
+  // are always excluded regardless of depth — they just aren't there.
+  const excludeByTeam = (team) => { const other = locked[keyFor(team, otherType)];
     const depth = seasonRoster(meets, team).filter((c) => ageGroupOf(c.age) === ag).length;
-    if (depth < 8) return null;
-    return new Set(other.swimmers.map((s) => s.name)); };
-  const baseRelays = useMemo(() => relayType === "Medley" ? buildMedleyRelaysSeason(meets, ag, gender, excludeByTeam) : buildFreeRelaysSeason(meets, ag, gender, excludeByTeam), [meets, ag, gender, relayType, locked]);
+    const otherExcl = other && depth >= 8 ? other.swimmers.map((s) => s.name) : [];
+    const absent = seasonRoster(meets, team).filter((c) => ageGroupOf(c.age) === ag && isAbsent(c.name, team)).map((c) => c.name);
+    if (!otherExcl.length && !absent.length) return null;
+    return new Set([...otherExcl, ...absent]); };
+  const baseRelaysAll = useMemo(() => relayType === "Medley" ? buildMedleyRelaysSeason(meets, ag, gender, excludeByTeam) : buildFreeRelaysSeason(meets, ag, gender, excludeByTeam), [meets, ag, gender, relayType, locked, attendance]);
+  const baseRelays = useMemo(() => baseRelaysAll.filter((r) => rankTeams.includes(r.team)), [baseRelaysAll, rankTeams]);
   const relays = useMemo(() => baseRelays.map((r) => { const key = keyFor(r.team); if (locked[key]) return locked[key]; return applyRelayOverride(r, overrides[key], meets, ag, genderMap); }).sort((a, b) => a.total - b.total), [baseRelays, overrides, locked, meets, ag, genderMap, relayType]);
   const projected = useMemo(() => relays.map((r) => projectRelay(r, meets)).sort((a, b) => a.projTotal - b.projTotal), [relays, meets]);
   const winProb = useMemo(() => simulateRelayField(projected), [projected]);
+  const homeIdx = projected.findIndex((r) => r.team === homeTeam);
+  const homeRow = homeIdx >= 0 ? projected[homeIdx] : null;
+  const otherRows = projected.filter((r) => r.team !== homeTeam);
   const rosterFor = (team) => seasonRoster(meets, team).filter((c) => ageGroupOf(c.age) === ag).sort((a, b) => a.name.localeCompare(b.name));
   const setLeg = (team, legIdx, name) => { const key = keyFor(team); setOverrides((o) => { const cur = (o[key] || [null, null, null, null]).slice(); cur[legIdx] = name || null; return { ...o, [key]: cur }; });
     setLocked((l) => { if (!l[key]) return l; const { [key]: _, ...rest } = l; return rest; }); };
@@ -1496,49 +1686,62 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
     if (drag.source === "leg") { if (drag.legIdx === targetIdx) return; setLeg(r.team, targetIdx, drag.name); setLeg(r.team, drag.legIdx, r.legs[targetIdx].name); }
     else setLeg(r.team, targetIdx, drag.name);
   };
+  const teamCard = (r, rankIdx, extraClass) => {
+    const key = keyFor(r.team); const isLocked = !!locked[key]; const hasOverride = overrides[key] && overrides[key].some(Boolean); const roster = editing === r.team ? rosterFor(r.team) : [];
+    const excluded = excludeByTeam(r.team); // this team's other-type A relay, locked in — those 4 aren't eligible here
+    const otherLocked = locked[keyFor(r.team, otherType)];
+    const depth = seasonRoster(meets, r.team).filter((c) => ageGroupOf(c.age) === ag).length;
+    const doubleANames = otherLocked ? r.legs.filter((l) => otherLocked.swimmers.some((s) => s.name === l.name)).map((l) => l.name) : [];
+    const doubleASeverity = depth < 8 ? "yellow" : "red";
+    return (
+      <div key={r.team} className={"md-rbteam" + (extraClass ? " " + extraClass : "") + (isLocked ? " locked" : "")}>
+        <div className="md-rbhead"><span className="md-rbrank">{rankIdx + 1}</span><span className="md-rbteamname" style={{ color: teamColor(r.team) }}>{r.team}</span>
+          <span className="md-rbtotal">{fmtT(r.projTotal)}<span className="md-rbproj">seed {fmtT(r.total)}</span></span>
+          {rankIdx > 0 && <span className="md-rbgap">+{fmtT(r.projTotal - projected[0].projTotal)}</span>}
+          <button className={"md-rblock" + (isLocked ? " on" : "")} onClick={() => toggleLock(r)}>{isLocked ? "🔒 Locked" : "🔓 Lock in"}</button>
+          <button className={"md-rbedit" + (hasOverride ? " on" : "")} onClick={() => setEditing(editing === r.team ? null : r.team)}>✎ {editing === r.team ? "Done" : "Edit"}</button>
+        </div>
+        {editing === r.team ? (
+          <div className="md-rbeditgrid">
+            <RelayLegDragBoard
+              legs={r.legs}
+              bench={roster.filter((c) => !r.legs.some((l) => l.name === c.name) && (!excluded || !excluded.has(c.name))).map((c) => ({ ...c, gender: genderMap[c.name + "|" + r.team] }))}
+              relayType={relayType}
+              mixed={mixed}
+              doubleANames={doubleANames}
+              doubleASeverity={doubleASeverity}
+              onAssign={(drag, targetIdx) => onAssign(r, drag, targetIdx)}
+            />
+            {hasOverride && <button className="md-rbreset" onClick={() => setOverrides((o) => ({ ...o, [key]: null }))}>↺ Reset to auto-picked</button>}
+          </div>
+        ) : (
+          <div className="md-rbswimmers">{r.legs.map((l, j) => <span key={j} className={"md-rbswim" + (doubleANames.includes(l.name) ? " doubleA-" + doubleASeverity : "")}>{l.gender ? <em className={"md-gtick " + l.gender.toLowerCase()}>{l.gender[0]}</em> : null}{relayType === "Medley" && <b className="md-rbstroke">{l.stroke} </b>}{l.name} <em>{fmtT(l.likely)}</em></span>)}</div>
+        )}
+        <div className="md-rbprob"><div className="md-rbprobbar"><div className="md-rbprobfill" style={{ width: ((winProb[r.team] || 0) * 100).toFixed(0) + "%" }} /></div><span className="md-rbprobval">{((winProb[r.team] || 0) * 100).toFixed(0)}%</span></div>
+      </div>
+    );
+  };
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Relay builder — fastest {relayType.toLowerCase()} relay</div><div className="md-msub">Built from the whole season ({meets.length} meet{meets.length === 1 ? "" : "s"}) · every team shown at its season-best lineup · lock in a lineup to freeze it while comparing.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><div><div className="md-mtitle">Relay builder — fastest {relayType.toLowerCase()} relay</div><div className="md-msub">Built from the whole season ({meets.length} meet{meets.length === 1 ? "" : "s"}) · check off teams to compare against · lock in a lineup to freeze it while comparing.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl">
           <div className="md-rbtabs">{["Free", "Medley"].map((t) => <button key={t} className={"md-rbtab" + (relayType === t ? " on" : "")} onClick={() => setRelayType(t)}>{t}</button>)}</div>
           <label className="md-ctl">Age<select value={ag} onChange={(e) => setAg(e.target.value)}>{ageGroups.map((a) => <option key={a} value={a}>{a}</option>)}</select></label>
           {mixed ? <span className="md-mixtag">Mixed</span> : <label className="md-ctl">Gender<select value={gender} onChange={(e) => setGender(e.target.value)}>{["Girls", "Boys"].map((g) => <option key={g} value={g}>{g}</option>)}</select></label>}
+          <button className="md-mbtn sm" onClick={(e) => setAttendanceOpen(attendanceOpen ? null : { rect: e.currentTarget.getBoundingClientRect() })}>🧍 Who's coming</button>
         </div>
+        {attendanceOpen && <AttendancePopup team={homeTeam} roster={rosterFor(homeTeam)} isAbsent={(name) => isAbsent(name, homeTeam)} onToggle={(name) => toggleAttendance(name, homeTeam)} rect={attendanceOpen.rect} onClose={() => setAttendanceOpen(null)} />}
+        <div className="md-impbar"><span className="md-impnote">Compare against:</span>
+          <span className="md-teamsel">{allTeams.filter((t) => t !== homeTeam).map((t) => <button key={t} className={"md-teamchip" + (selTeams.includes(t) ? " on" : "")} style={selTeams.includes(t) ? { background: teamColor(t), borderColor: teamColor(t), color: "#0a1628" } : {}} onClick={() => toggleTeam(t)}>{t}</button>)}</span></div>
+        {homeRow && <div className="md-rbhometeam">
+          <div className="md-rbhometeamlabel">Your team — projected {ORD(homeIdx + 1)} of {projected.length}</div>
+          {teamCard(homeRow, homeIdx, "mine top")}
+        </div>}
         <div className="md-rblist">
-          {projected.length ? projected.map((r, i) => { const key = keyFor(r.team); const isLocked = !!locked[key]; const hasOverride = overrides[key] && overrides[key].some(Boolean); const roster = editing === r.team ? rosterFor(r.team) : [];
-            const excluded = excludeByTeam(r.team); // this team's other-type A relay, locked in — those 4 aren't eligible here
-            const otherLocked = locked[keyFor(r.team, otherType)];
-            const depth = seasonRoster(meets, r.team).filter((c) => ageGroupOf(c.age) === ag).length;
-            const doubleANames = otherLocked ? r.legs.filter((l) => otherLocked.swimmers.some((s) => s.name === l.name)).map((l) => l.name) : [];
-            const doubleASeverity = depth < 8 ? "yellow" : "red";
-            return (
-            <div key={r.team} className={"md-rbteam" + (r.team === homeTeam ? " mine" : "") + (isLocked ? " locked" : "")}>
-              <div className="md-rbhead"><span className="md-rbrank">{i + 1}</span><span className="md-rbteamname" style={{ color: teamColor(r.team) }}>{r.team}</span>
-                <span className="md-rbtotal">{fmtT(r.projTotal)}<span className="md-rbproj">seed {fmtT(r.total)}</span></span>
-                {i > 0 && <span className="md-rbgap">+{fmtT(r.projTotal - projected[0].projTotal)}</span>}
-                <button className={"md-rblock" + (isLocked ? " on" : "")} onClick={() => toggleLock(r)}>{isLocked ? "🔒 Locked" : "🔓 Lock in"}</button>
-                <button className={"md-rbedit" + (hasOverride ? " on" : "")} onClick={() => setEditing(editing === r.team ? null : r.team)}>✎ {editing === r.team ? "Done" : "Edit"}</button>
-              </div>
-              {editing === r.team ? (
-                <div className="md-rbeditgrid">
-                  <RelayLegDragBoard
-                    legs={r.legs}
-                    bench={roster.filter((c) => !r.legs.some((l) => l.name === c.name) && (!excluded || !excluded.has(c.name))).map((c) => ({ ...c, gender: genderMap[c.name + "|" + r.team] }))}
-                    relayType={relayType}
-                    mixed={mixed}
-                    doubleANames={doubleANames}
-                    doubleASeverity={doubleASeverity}
-                    onAssign={(drag, targetIdx) => onAssign(r, drag, targetIdx)}
-                  />
-                  {hasOverride && <button className="md-rbreset" onClick={() => setOverrides((o) => ({ ...o, [key]: null }))}>↺ Reset to auto-picked</button>}
-                </div>
-              ) : (
-                <div className="md-rbswimmers">{r.legs.map((l, j) => <span key={j} className={"md-rbswim" + (doubleANames.includes(l.name) ? " doubleA-" + doubleASeverity : "")}>{l.gender ? <em className={"md-gtick " + l.gender.toLowerCase()}>{l.gender[0]}</em> : null}{relayType === "Medley" && <b className="md-rbstroke">{l.stroke} </b>}{l.name} <em>{fmtT(l.likely)}</em></span>)}</div>
-              )}
-              <div className="md-rbprob"><div className="md-rbprobbar"><div className="md-rbprobfill" style={{ width: ((winProb[r.team] || 0) * 100).toFixed(0) + "%" }} /></div><span className="md-rbprobval">{((winProb[r.team] || 0) * 100).toFixed(0)}%</span></div>
-            </div>
-          ); }) : <div className="md-prevempty">No full 4-swimmer set found for this group across the season. Try another age, or import more results.</div>}
+          {otherRows.length ? otherRows.map((r) => teamCard(r, projected.indexOf(r)))
+            : (projected.length === 0 ? <div className="md-prevempty">No full 4-swimmer set found for this group across the season. Try another age, or import more results.</div>
+              : <div className="md-prevempty">Check off a team above to compare against.</div>)}
         </div>
         <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
       </div>
@@ -1558,12 +1761,18 @@ function parseResults(text) {
     if (m && /(free|back|breast|fly|medley|relay|\bim\b)/i.test(line)) { ev = { num: m[1], name: m[2].replace(/\)+$/, "").trim(), relay: /relay/i.test(m[2]), heats: [{ num: 1, lanes: [] }] }; events.push(ev); continue; }
     if (!ev) continue;
     if (/^name age team|^team relay|vcsl record|hy-tek|valley cabana|^results|^\d{4} vcsl|meet -|belwood:/i.test(line)) continue;
-    const times = [...line.matchAll(/\b\d{1,2}:\d{2}\.\d{2}\b|\b\d{1,3}\.\d{2}\b/g)].map((x) => x[0]);
-    if (!times.length) continue;
-    const seed = times.length > 1 ? times[0] : "NT", final = times[times.length - 1];
+    // A DQ'd individual swim shows "DQ" in place of (or alongside) the finals
+    // time — strip it out before matching name/age/team so it doesn't get
+    // swallowed into the team token, but remember it so we can flag a
+    // pending DQ on merge (relay DQ rows aren't handled here).
+    const isDq = !ev.relay && /\bdq\b/i.test(line);
+    const cleanLine = isDq ? line.replace(/\bdq\b/gi, " ").replace(/\s+/g, " ").trim() : line;
+    const times = [...cleanLine.matchAll(/\b\d{1,2}:\d{2}\.\d{2}\b|\b\d{1,3}\.\d{2}\b/g)].map((x) => x[0]);
+    if (!times.length && !isDq) continue;
+    const seed = times.length > 1 ? times[0] : "NT", final = times.length ? times[times.length - 1] : "";
     if (!ev.relay) {
-      const nm = line.match(/^\*?\d+\s+([A-Za-zÀ-ÿ'’.\-]+,\s*[A-Za-zÀ-ÿ'’.\- ]+?)\s+(\d{1,2})\s+([A-Za-z].*)$/);
-      if (nm) ev.heats[0].lanes.push({ name: nm[1].trim(), age: +nm[2], team: normTeam(nm[3]), seed, finalTime: final, lane: ev.heats[0].lanes.length + 1 });
+      const nm = cleanLine.match(/^\*?\d+\s+([A-Za-zÀ-ÿ'’.\-]+,\s*[A-Za-zÀ-ÿ'’.\- ]+?)\s+(\d{1,2})\s+([A-Za-z].*)$/);
+      if (nm) ev.heats[0].lanes.push({ name: nm[1].trim(), age: +nm[2], team: normTeam(nm[3]), seed, finalTime: final, lane: ev.heats[0].lanes.length + 1, ...(isDq ? { dq: true } : {}) });
     } else {
       const rm = line.match(/^\*?\d+\s+(.+?)\s+([A-Z])\b/);
       if (rm) ev.heats[0].lanes.push({ name: normTeam(rm[1]) + " " + rm[2], team: normTeam(rm[1]), relay: rm[2], seed, finalTime: final, lane: ev.heats[0].lanes.length + 1, swimmers: [] });
@@ -1760,6 +1969,21 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   // age-group rank popover isn't empty before this meet gets saved to season.
   const rankMeets = useMemo(() => [{ mode, events, data }, ...seasonMeets], [mode, events, data, seasonMeets]);
   const relayCandidates = useMemo(() => relayReplaceTarget ? relayReplacementCandidates(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, relayReplaceTarget.team) : [], [relayReplaceTarget, events, data]);
+  // Time & place +/- for each candidate: this relay's own delta from
+  // swapping in their time, plus (for a "move" candidate) the donor relay's
+  // delta from losing them and backfilling with the next-best teammate.
+  const relayCandidatesWithDelta = useMemo(() => {
+    if (!relayReplaceTarget) return [];
+    const { evIdx, team, name } = relayReplaceTarget;
+    const ev = events[evIdx];
+    const stroke = ev && /medley/i.test(ev.name) ? (MEDLEY_LEGS[relayReplaceTarget.leg] || "Free") : "Free";
+    const scratchedTime = bestStrokeSeed(events, data, name, team, stroke);
+    return relayCandidates.map((c) => ({
+      ...c,
+      thisDelta: (scratchedTime != null && c.best != null) ? relayPlaceProjection(events, team, evIdx, c.best - scratchedTime) : null,
+      donorDelta: c.moveFrom ? relayDonorImpact(events, data, c.name, team, c.moveFrom) : null,
+    }));
+  }, [relayReplaceTarget, relayCandidates, events, data]);
   const medleyPlan = useMemo(() => relayReplaceTarget ? medleyReplacementPlan(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.name) : null, [relayReplaceTarget, events, data]);
   const relayOriginalLegs = useMemo(() => { if (!relayReplaceTarget) return []; const ev = events[relayReplaceTarget.evIdx]; const ht = ev && ev.heats[relayReplaceTarget.htIdx]; const l = ht && ht.lanes.find((x) => x.lane === relayReplaceTarget.lane); return l && l.swimmers ? l.swimmers.map((s) => s.name) : []; }, [relayReplaceTarget, events]);
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2200); };
@@ -1937,6 +2161,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
               <span className="md-pnav"><button onClick={() => setHeatPtr((p) => Math.max(0, p - 1))} disabled={ptr === 0}>‹</button>
                 <span className="md-pmeta">#{events[current.evIdx].num} {shortEvent(current?.eventName)} · H{current?.num}</span>
                 <button onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1}>›</button></span></div>
+            {clockActive && <RaceClockDisplay startedAt={clockActive.startedAt} stopped={curHeatComplete} />}
             {isStarted ? (<>
               {isRelayEvent(current?.eventName) && <button className="md-relaybtn" onClick={() => setRelaySplits(true)}>🏊 Relay splits & legs</button>}
               <div className="md-lanes">
@@ -2014,8 +2239,14 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
         onNoShow={() => { const id = dqNsTarget || dqTarget; update(id, { noshow: !isNoShow(get(id)) }); }}
         onToggle={(group, code, reason) => toggleDqCode(dqTarget, group, code, reason, dqSwimmer)} />}
       {modal === "import" && <ImportModal onClose={() => setModal(null)} onApply={applyImport} defaultTeam={homeTeam} />}
-      {modal === "results" && <ResultsModal onClose={() => setModal(null)} events={events} teams={teamsPresent} homeTeam={homeTeam}
-        onApply={(patch) => { setData((d) => { const nd = { ...d }; Object.entries(patch).forEach(([id, p]) => (nd[id] = { ...(nd[id] || { time: "", dqs: [], tags: {}, notes: "" }), ...p })); return nd; }); setModal(null); }}
+      {modal === "results" && <ResultsModal onClose={() => setModal(null)} events={events} homeTeam={homeTeam}
+        onApply={(patch) => { setData((d) => { const nd = { ...d }; Object.entries(patch).forEach(([id, p]) => {
+          const cur = nd[id] || { time: "", dqs: [], tags: {}, notes: "" };
+          // A pending-DQ patch from the sheet shouldn't stack duplicate pending
+          // markers or clobber a DQ the coach already entered by hand.
+          const dqs = p.dqs ? (cur.dqs && cur.dqs.length ? cur.dqs : p.dqs) : cur.dqs;
+          nd[id] = { ...cur, ...p, ...(p.dqs ? { dqs } : {}) };
+        }); return nd; }); setModal(null); }}
         onSaveNew={({ meet, name, date, mode: mtype, host, away }) => {
           const saveDate = date || new Date().toISOString().slice(0, 10);
           setEvents(meet.events); setData(meet.data); setRecords({}); setStartedHeats({}); setHeatPtr(0);
@@ -2054,7 +2285,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           </div>
         </div>
       </div>}
-      {relayReplaceTarget && <RelayReplaceModal target={relayReplaceTarget} candidates={relayCandidates} plan={medleyPlan} originalLegs={relayOriginalLegs} onClose={() => setRelayReplaceTarget(null)}
+      {relayReplaceTarget && <RelayReplaceModal target={relayReplaceTarget} candidates={relayCandidatesWithDelta} plan={medleyPlan} originalLegs={relayOriginalLegs} onClose={() => setRelayReplaceTarget(null)}
         onSwap={(c) => swapRelaySwimmer(relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, c)}
         onApplyPlan={() => applyRelayPlan(relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, medleyPlan)} />}
       {relayUndo && <div className="md-toast md-toastundo"><span>{relayUndo.label}</span><button className="md-undobtn" onClick={() => { relayUndo.fn(); setRelayUndo(null); }}>Undo</button></div>}
@@ -2733,6 +2964,8 @@ html, body, #root { height: 100%; }
 .md-mbtn.danger { border-color:#fecaca; color:#b42318; } .md-mbtn.danger:hover { background:#fef2f2; }
 .md-mbtn:hover { background:#f1f5f9; } .md-mbtn.primary { background:var(--cyan); border-color:var(--cyan); color:#062a33; }
 .md-mbtn.sm { padding:6px 10px; font-size:12px; }
+.md-reldeltaline { display:flex; align-items:center; gap:6px; margin-top:4px; flex-wrap:wrap; }
+.md-reldeltalabel { font-size:11px; font-weight:700; color:var(--muted); }
 .md-acctrow { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:12.5px; color:#64748b; }
 .md-strip { display:flex; align-items:center; gap:8px; flex-wrap:wrap; overflow-x:auto; }
 .md-strip.dual { gap:14px; }
@@ -2758,6 +2991,8 @@ html, body, #root { height: 100%; }
 .md-panel.results { flex:none; max-height:30vh; border-color:#6b5b13; box-shadow:0 0 0 1px rgba(224,180,0,.2) inset; }
 .md-phead { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 11px; background:linear-gradient(180deg,#122b4d,#0d2038); border-bottom:1px solid var(--line); flex:none; }
 .water-e { color:var(--cyan); } .md-pmeta { color:var(--muted); font-size:11.5px; font-weight:700; text-align:right; }
+.md-raceclock { flex:none; padding:4px 11px; text-align:center; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:22px; font-weight:800; letter-spacing:.04em; color:var(--cyan); background:#0a1a2e; border-bottom:1px solid var(--line); }
+.md-raceclock.stopped { color:var(--green); }
 .md-pnav { display:flex; align-items:center; gap:7px; }
 .md-pnav button { width:26px; height:26px; border-radius:7px; border:1px solid var(--line); background:#0c1c33; color:var(--text); font-size:16px; line-height:1; cursor:pointer; }
 .md-pnav button:disabled { opacity:.3; } .md-pnav button:hover:not(:disabled){ border-color:var(--cyan); }
@@ -2886,6 +3121,13 @@ html, body, #root { height: 100%; }
 
 .md-povscrim { position:fixed; inset:0; z-index:60; }
 .md-pov { position:fixed; z-index:61; width:320px; max-height:74vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:12px; }
+.md-caret { position:absolute; top:-8px; width:16px; height:16px; background:#fff; border-left:1px solid var(--sline); border-top:1px solid var(--sline); transform:rotate(45deg); }
+.md-attndpov { position:fixed; z-index:71; width:280px; max-height:70vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:12px; }
+.md-attndsub { font-size:11px; font-weight:800; color:#64748b; margin-bottom:6px; }
+.md-attndsearch { width:100%; padding:8px 10px; border-radius:9px; border:1px solid var(--sline); font-size:13px; margin-bottom:8px; }
+.md-attndlist { display:flex; flex-direction:column; gap:2px; }
+.md-attndrow { display:flex; align-items:center; gap:8px; padding:6px 4px; font-size:13px; font-weight:700; color:var(--sink); cursor:pointer; }
+.md-attndrow em { font-style:normal; color:#94a3b8; font-weight:600; margin-left:2px; }
 .md-povhead { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:10px; }
 .md-povname { font-weight:800; font-size:16px; display:flex; align-items:center; gap:7px; }
 .md-povnamelink { cursor:pointer; text-decoration:underline; text-decoration-color:transparent; transition:text-decoration-color .12s; } .md-povnamelink:hover { text-decoration-color:currentColor; }
@@ -2947,6 +3189,7 @@ html, body, #root { height: 100%; }
 .md-imparea:focus { outline:none; background:#fbfdff; }
 .md-preview { display:flex; flex-direction:column; min-height:0; background:#f8fafc; border-top:1px solid var(--sline); }
 .md-prevtop { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--sline); font-size:12px; font-weight:700; color:#475569; }
+.md-impdqnote { color:#b42318; }
 .md-ctl { display:flex; align-items:center; gap:6px; font-size:10.5px; color:#64748b; font-weight:700; text-transform:uppercase; }
 .md-ctl select { background:#fff; color:#0f2036; border:1px solid var(--sline); border-radius:8px; padding:6px 8px; font-size:13px; font-weight:700; }
 .md-prevbody { overflow-y:auto; padding:10px 14px; }
@@ -3017,9 +3260,12 @@ html, body, #root { height: 100%; }
 .md-statage { font-style:normal; color:#94a3b8; font-weight:700; }
 
 .md-rbctl { display:flex; gap:14px; padding:12px 18px; border-bottom:1px solid var(--sline); }
-.md-rblist { overflow-y:auto; padding:12px 16px; }
+.md-rblist { overflow-y:auto; padding:10px 16px 12px; border-top:1px solid var(--sline); }
 .md-rbteam { border:1px solid var(--sline); border-radius:12px; padding:10px 12px; margin-bottom:8px; }
 .md-rbteam.mine { border-color:#facc15; box-shadow:0 0 0 1px #facc15 inset; background:#fffdf0; }
+.md-rbhometeam { margin:0 18px 12px; }
+.md-rbhometeamlabel { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:#94a3b8; margin-bottom:4px; }
+.md-rbteam.top { margin-bottom:0; }
 .md-rbteam.locked { border-color:#0e7490; box-shadow:0 0 0 1px #0e7490 inset; }
 .md-rblock { padding:4px 9px; border-radius:7px; border:1px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:11px; cursor:pointer; }
 .md-rblock.on { border-color:#0e7490; color:#0e7490; background:#ecfeff; }
@@ -3069,6 +3315,15 @@ html, body, #root { height: 100%; }
 .md-cmpchecklabel { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; }
 .md-cmpcheck { display:inline-flex; align-items:center; gap:4px; font-size:12px; font-weight:700; color:var(--sink); cursor:pointer; }
 .md-cmpcheck input { margin:0; }
+.md-cmpmodebtn { margin-left:auto; align-self:center; background:#2563eb; color:#fff; border:none; border-radius:9px; padding:9px 16px; font-weight:800; font-size:13px; cursor:pointer; }
+.md-cmpmodebtn:hover { background:#1d4ed8; }
+.md-cmpsimplewrap { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:0 18px 12px; align-items:start; }
+.md-cmpsimplecard { border:1px solid var(--sline); border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:8px; }
+.md-cmpsimplehead { font-size:12.5px; font-weight:800; color:var(--sink); }
+.md-cmpradiogrp { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:2px 0; }
+.md-cmpradio { display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:700; color:var(--sink); cursor:pointer; }
+.md-cmpradio input[type=checkbox] { appearance:none; -webkit-appearance:none; width:16px; height:16px; margin:0; border-radius:50%; border:2px solid #94a3b8; cursor:pointer; }
+.md-cmpradio input[type=checkbox]:checked { background:#2563eb; border-color:#2563eb; box-shadow:inset 0 0 0 3px #fff; }
 .md-cmpboard { display:flex; gap:16px; padding:0 18px 12px; align-items:flex-start; }
 .md-cmpslots { flex:1 1 55%; min-width:0; display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 .md-cmpslot { min-height:60px; border:2px dashed var(--sline); border-radius:10px; padding:8px; display:flex; flex-direction:column; align-items:flex-start; justify-content:center; gap:4px; transition:border-color .1s; }
@@ -3123,6 +3378,11 @@ html, body, #root { height: 100%; }
 .md-lgbody { max-width:920px; margin:0 auto; width:100%; padding:16px 24px 40px; display:flex; flex-direction:column; gap:28px; }
 .md-lgsection { display:flex; flex-direction:column; gap:8px; }
 .md-lgsectitle { font-size:15px; font-weight:800; color:var(--sink); }
+.md-topkid { background:linear-gradient(135deg, #fffbeb, #fff); border:1px solid #fde68a; border-radius:14px; padding:14px 16px; }
+.md-topkidnote { margin-left:8px; font-style:normal; font-size:11px; font-weight:700; color:#94a3b8; text-transform:none; letter-spacing:0; }
+.md-topkidslider { display:flex; align-items:center; gap:10px; padding:4px 2px 8px; }
+.md-topkidend { font-size:11px; font-weight:800; color:#94a3b8; white-space:nowrap; }
+.md-topkidrange { flex:1; accent-color:#f59e0b; height:22px; cursor:pointer; }
 .md-lgtable { width:100%; border-collapse:collapse; font-size:13.5px; }
 .md-lgtable.standings thead th, .md-lgtable.roster thead th { text-align:left; padding:9px 10px; font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; border-bottom:2px solid var(--sline); }
 .md-lgsortable { cursor:pointer; user-select:none; } .md-lgsortable:hover { color:#0e7490; }
