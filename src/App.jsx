@@ -1019,8 +1019,37 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
   const [sort, setSort] = useState("record");
   const [rosterSort, setRosterSort] = useState("power");
   const rows = teams.map((t) => ({ team: t, ...(standings[t] || { w: 0, l: 0, tie: 0, pf: 0, pa: 0, meets: [] }), power: teamPower(t) })).sort(LEAGUE_SORTS[sort]);
+
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const searchMatches = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return [];
+    return Object.values(power).filter((s) => s.name.toLowerCase().includes(q)).sort((a, b) => a.name.localeCompare(b.name)).slice(0, 8);
+  }, [search, power]);
+  const openProfile = (s) => { setProfile({ name: s.name, team: s.team }); setSearch(""); setSearchOpen(false); };
+  const searchBar = (
+    <div className="md-lgsearch">
+      <button className={"md-lgsearchbtn" + (searchOpen ? " on" : "")} onClick={() => setSearchOpen((o) => !o)} aria-label="Search swimmers">🔍</button>
+      {searchOpen && (
+        <div className="md-lgsearchbox">
+          <input autoFocus className="md-lgsearchinput" placeholder="Search swimmers…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          {search.trim() && (
+            <div className="md-lgsearchresults">
+              {searchMatches.length ? searchMatches.map((s) => (
+                <button key={s.name + "|" + s.team} className="md-lgsearchrow" onClick={() => openProfile(s)}>
+                  <span className="md-lgteambar" style={{ background: teamColor(s.team) }} />{s.name}<span className="md-lgsearchteam">{s.team}</span>
+                </button>
+              )) : <div className="md-prevempty">No swimmers match.</div>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
   const filterBar = (
     <div className="md-lgfilters">
+      {searchBar}
       <label className="md-ctl">Gender<select value={filterGender} onChange={(e) => setFilterGender(e.target.value)}><option>All</option><option>Girls</option><option>Boys</option></select></label>
       <label className="md-ctl">Age group<select value={filterAge} onChange={(e) => setFilterAge(e.target.value)}><option>All</option>{AGE_GROUPS.map((g) => <option key={g}>{g}</option>)}</select></label>
       <label className="md-ctl">Stroke<select value={filterStroke} onChange={(e) => setFilterStroke(e.target.value)}><option>All</option>{PROG_STROKES.map((s) => <option key={s}>{s}</option>)}</select></label>
@@ -1199,12 +1228,17 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const useSide = (defaultTeam) => {
     const [team, setTeam] = useState(defaultTeam);
     const ages = useMemo(() => AGE_GROUPS.filter((g) => people.some((p) => p.team === team && ageGroupOf(p.age) === g)), [team, people]);
-    const [age, setAge] = useState(ages[0] || "");
-    useEffect(() => { if (ages.length && !ages.includes(age)) setAge(ages[0]); }, [ages.join(",")]);
-    const roster = useMemo(() => people.filter((p) => p.team === team && (!age || ageGroupOf(p.age) === age)).sort((a, b) => a.name.localeCompare(b.name)), [team, age, people]);
+    const [ageSel, setAgeSel] = useState([]); // checked age groups; [] = all
+    const [genderSel, setGenderSel] = useState([]); // checked genders; [] = all
+    const toggleAge = (g) => setAgeSel((s) => s.includes(g) ? s.filter((x) => x !== g) : [...s, g]);
+    const toggleGender = (g) => setGenderSel((s) => s.includes(g) ? s.filter((x) => x !== g) : [...s, g]);
+    const roster = useMemo(() => people.filter((p) => p.team === team
+      && (!ageSel.length || ageSel.includes(ageGroupOf(p.age)))
+      && (!genderSel.length || genderSel.includes(p.gender))
+    ).sort((a, b) => a.name.localeCompare(b.name)), [team, ageSel, genderSel, people]);
     const [name, setName] = useState(roster[0] ? roster[0].name : "");
     useEffect(() => { if (roster.length && !roster.some((r) => r.name === name)) setName(roster[0].name); }, [roster.map((r) => r.name).join(",")]);
-    return { team, setTeam, age, setAge, ages, name, setName, roster };
+    return { team, setTeam, ageSel, toggleAge, ages, genderSel, toggleGender, name, setName, roster };
   };
   const A = useSide(homeTeam || teams[0]);
   const B = useSide(teams.find((t) => t !== (homeTeam || teams[0])) || teams[0]);
@@ -1226,7 +1260,18 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam }) {
     <div className="md-cmpcol">
       <div className="md-cmppicks">
         <select className="md-cmpsel" value={side.team} onChange={(e) => side.setTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}</select>
-        <select className="md-cmpsel" value={side.age} onChange={(e) => side.setAge(e.target.value)}>{side.ages.length ? side.ages.map((g) => <option key={g} value={g}>{g}</option>) : <option value="">—</option>}</select>
+        <div className="md-cmpcheckgrp">
+          <span className="md-cmpchecklabel">Gender</span>
+          {["Girls", "Boys"].map((g) => (
+            <label key={g} className="md-cmpcheck"><input type="checkbox" checked={side.genderSel.includes(g)} onChange={() => side.toggleGender(g)} />{g}</label>
+          ))}
+        </div>
+        <div className="md-cmpcheckgrp">
+          <span className="md-cmpchecklabel">Age</span>
+          {side.ages.length ? side.ages.map((g) => (
+            <label key={g} className="md-cmpcheck"><input type="checkbox" checked={side.ageSel.includes(g)} onChange={() => side.toggleAge(g)} />{g}</label>
+          )) : <span className="md-cmpchecklabel">—</span>}
+        </div>
         <select className="md-cmpsel" value={side.name} onChange={(e) => side.setName(e.target.value)}>{side.roster.length ? side.roster.map((s) => <option key={s.name} value={s.name}>{s.name}</option>) : <option value="">No swimmers</option>}</select>
       </div>
     </div>
@@ -2883,6 +2928,10 @@ html, body, #root { height: 100%; }
 .md-cmpvs { flex:none; align-self:center; font-weight:900; font-size:13px; color:#94a3b8; padding-top:14px; }
 .md-cmppicks { display:flex; flex-direction:column; gap:6px; }
 .md-cmpsel { width:100%; padding:9px 10px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:13.5px; color:var(--sink); }
+.md-cmpcheckgrp { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:2px 0; }
+.md-cmpchecklabel { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; }
+.md-cmpcheck { display:inline-flex; align-items:center; gap:4px; font-size:12px; font-weight:700; color:var(--sink); cursor:pointer; }
+.md-cmpcheck input { margin:0; }
 .md-cmpprob { padding:0 18px 10px; }
 .md-cmpprobbar { height:10px; border-radius:6px; background:#fee2e2; overflow:hidden; }
 .md-cmpprobfill { height:100%; background:#10b981; }
@@ -2939,7 +2988,17 @@ html, body, #root { height: 100%; }
 .md-lgopp { font-weight:700; color:var(--sink); } .md-lgdate { color:#94a3b8; }
 .md-lgresult { font-weight:800; text-align:right; } .md-lgresult.win { color:#166534; } .md-lgresult.loss { color:#b42318; }
 .md-lgswimname { font-weight:700; color:var(--sink); }
-.md-lgfilters { display:flex; gap:14px; flex-wrap:wrap; padding:2px 0 14px; }
+.md-lgfilters { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start; padding:2px 0 14px; }
+.md-lgsearch { position:relative; display:flex; align-items:center; }
+.md-lgsearchbtn { width:36px; height:36px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-size:15px; cursor:pointer; }
+.md-lgsearchbtn.on { background:var(--cyan); border-color:var(--cyan); }
+.md-lgsearchbtn:hover { background:#f1f5f9; }
+.md-lgsearchbox { position:absolute; left:42px; top:0; z-index:5; }
+.md-lgsearchinput { height:36px; width:220px; border-radius:9px; border:1px solid var(--sline); background:#fff; padding:0 12px; font-size:13.5px; }
+.md-lgsearchresults { position:absolute; top:40px; left:0; width:260px; max-height:280px; overflow-y:auto; background:#fff; border-radius:12px; border:1px solid var(--sline); box-shadow:0 18px 40px -12px rgba(6,14,28,.35); padding:6px; }
+.md-lgsearchrow { display:flex; align-items:center; gap:8px; width:100%; padding:8px 9px; border-radius:8px; border:none; background:none; text-align:left; font-size:13px; font-weight:700; cursor:pointer; color:var(--sink); }
+.md-lgsearchrow:hover { background:#f1f5f9; }
+.md-lgsearchteam { margin-left:auto; font-size:10.5px; font-weight:800; color:#94a3b8; }
 .md-profnote { padding:10px 12px; background:#f8fafc; border-radius:9px; margin-bottom:6px; font-size:12.5px; }
 .md-profnote b { color:var(--sink); } .md-profnotemeta { color:#94a3b8; font-weight:700; }
 .md-profnote p { margin:4px 0 0; color:#334155; line-height:1.4; }
