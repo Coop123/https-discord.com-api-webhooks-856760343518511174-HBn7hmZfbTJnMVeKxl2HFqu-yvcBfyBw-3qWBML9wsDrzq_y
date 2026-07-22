@@ -24,14 +24,22 @@ function abbrevName(name) {
   if (m.length < 2 || !m[0] || !m[1]) return name;
   return (m[1][0] + m[0][0]).toUpperCase();
 }
-// "Last, First" → "First" (e.g. "Wong, Madelyn" → "Madelyn"); any remaining
-// overflow is left for CSS text-overflow:ellipsis to truncate.
+// "Last, First" → "First" (e.g. "Wong, Madelyn" → "Madelyn").
 function firstNameOnly(name) {
   const m = (name || "").split(",").map((s) => s.trim());
   if (m.length < 2 || !m[1]) return name;
   return m[1].split(" ")[0];
 }
-const STORE = (typeof window !== "undefined" && window.storage) ? window.storage : null;
+// window.storage is a Claude-artifact-host API only — not present on the real
+// GitHub Pages deploy — so fall back to localStorage there so data (season
+// meets, accounts, the in-progress meet) survives a page refresh on the iPad.
+const LOCAL_STORE = {
+  async get(key) { try { const v = localStorage.getItem(key); return v == null ? null : { value: v }; } catch (e) { return null; } },
+  async set(key, value) { try { localStorage.setItem(key, value); } catch (e) {} },
+  async delete(key) { try { localStorage.removeItem(key); } catch (e) {} },
+};
+const STORE = (typeof window !== "undefined" && window.storage) ? window.storage
+  : (typeof window !== "undefined" && window.localStorage) ? LOCAL_STORE : null;
 const CUR_KEY = "meetdeck:current:v1";
 const INDEX_KEY = "meetdeck:index:v1";
 const TEAM_ALIASES = {
@@ -88,6 +96,11 @@ function toSeconds(t) { if (!t) return NaN; const m = String(t).trim().match(/^(
 const isBest = (time, seed) => { const a = toSeconds(time), b = toSeconds(seed); return !isNaN(a) && !isNaN(b) && a < b; };
 const brokeRecord = (time, rec) => { const a = toSeconds(time), b = toSeconds(rec); return !isNaN(a) && !isNaN(b) && a < b; };
 const hasDq = (d) => (d.dqs || []).length > 0;
+// A quick tap flags "this swimmer was DQ'd" instantly with the real reason
+// still unknown (coach doesn't have the paper DQ slip yet) — vs. holding for
+// 2s, which opens the full code picker right away when the reason IS known.
+const PEND_DQ_CODE = "PEND";
+const isPendingDq = (d) => (d.dqs || []).some((q) => q.code === PEND_DQ_CODE);
 const isScratched = (d) => !!(d && d.scratched);
 const isNoShow = (d) => !!(d && d.noshow);
 const dqLabel = (d) => (d.dqs || []).map((q) => q.code).join(",");
@@ -104,8 +117,30 @@ function categorize(name) { const n = (name||"").toLowerCase();
 const CATS = ["Medley Relay", "Fly", "Back", "IM", "Breast", "Free", "Free Relay"];
 const isRelayEvent = (name) => /relay/i.test(name || "");
 const shortEvent = (name) => { let s = (name||"").trim(); s = s.replace(/^(girls|boys|mixed|women|men)\s+/i, ""); s = s.replace(/^(\d+\s*&\s*(under|over|u)\b|\d+\s*-\s*\d+|\d+\s*&\s*u)\s*/i, ""); s = s.replace(/\byard\s+/i, ""); return s.trim(); };
+// How many taps the live race-clock stopwatch expects for this event before
+// it records the final time: 100 IM = 4 (one per stroke leg), 100 free = 2
+// (a 50 split + finish), 100/200 relays = 4 (one per swimmer) — everything
+// else is a single tap to stop the clock and record the time.
+function requiredTapsFor(name) {
+  const n = (name || "").toLowerCase();
+  if (isRelayEvent(n)) return 4;
+  if (/\bim\b|individual medley/.test(n) && /\b100\b/.test(n)) return 4;
+  if (/free/.test(n) && /\b100\b/.test(n)) return 2;
+  return 1;
+}
 
 function eventList(ev, evIdx, data) { const out = []; ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { const id = entryId(evIdx, htIdx, l.lane); const d = data[id] || {}; out.push({ id, l, secs: toSeconds(d.time), dq: hasDq(d), scr: isScratched(d), ns: isNoShow(d), time: d.time }); })); return out; }
+// Every distinct swimmer (incl. relay legs) across the whole loaded meet whose
+// age falls in the given age group — used by the popover's age-chip drill-down
+// so it can list "everyone else in this age group" without leaving the board.
+function ageGroupRoster(events, ageGroup) {
+  const seen = new Set(), out = [];
+  events.forEach((ev, evIdx) => ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => {
+    if (l.swimmers) { l.swimmers.forEach((s, i) => { if (ageGroupOf(s.age) !== ageGroup) return; const key = s.name + "|" + l.team; if (seen.has(key)) return; seen.add(key); out.push({ id: entryId(evIdx, htIdx, l.lane) + "#" + i, name: s.name, team: l.team, age: s.age }); }); }
+    else { if (ageGroupOf(l.age) !== ageGroup) return; const key = l.name + "|" + l.team; if (seen.has(key)) return; seen.add(key); out.push({ id: entryId(evIdx, htIdx, l.lane), name: l.name, team: l.team, age: l.age }); }
+  })));
+  return out.sort((a, b) => a.team.localeCompare(b.team) || a.name.localeCompare(b.name));
+}
 function rankedEvent(ev, evIdx, data, filter) { const relay = isRelayEvent(ev.name); let list = eventList(ev, evIdx, data).filter((e) => !isNaN(e.secs) && !e.dq && !e.scr && !e.ns); if (filter) list = list.filter((e) => filter.includes(e.l.team)); if (relay) list = list.filter((e) => e.l.relay === "A"); list.sort((a, b) => a.secs - b.secs); return list; }
 function computePlaces(events, data, filter, mode) { if (mode === "timetrial") return {}; const map = {}; events.forEach((ev, evIdx) => rankedEvent(ev, evIdx, data, filter).forEach((e, i) => (map[e.id] = i + 1))); return map; }
 // Place within a single heat (used live on the board before an event is final).
@@ -408,31 +443,36 @@ const fmtT = (s) => { if (isNaN(s)) return "—"; const m = Math.floor(s / 60); 
 
 // Relay splits — floating (not full-screen). One card per relay lane, in lane
 // order, with the four legs vertical, current leg highlighted, split entry.
-function RelaySplitsPanel({ heat, evIdx, htIdx, data, homeTeam, onClose, update, get, openPop }) {
+function RelaySplitsPanel({ heat, evIdx, htIdx, data, homeTeam, onClose, update, get, openPop, clockActive }) {
   const relays = heat.lanes.filter((l) => l.swimmers && l.team === homeTeam).sort((a, b) => a.lane - b.lane);
+  const relayTap = (id, splits) => { if (!clockActive) return;
+    const leg = splits.length, elapsedSec = (Date.now() - clockActive.startedAt) / 1000;
+    const prevCum = splits.reduce((s, x) => s + (toSeconds(x) || 0), 0);
+    const legSec = Math.max(0, elapsedSec - prevCum);
+    const ns = [...splits]; ns[leg] = fmtT(legSec);
+    if (leg >= 3) update(id, { splits: ns, time: fmtT(elapsedSec) }); else update(id, { splits: ns });
+  };
   return (
     <div className="md-splitscrim" onClick={onClose}>
       <div className="md-splitpanel" onClick={(e) => e.stopPropagation()}>
         <div className="md-splithead"><span>🏊 Relay splits — {shortEvent(heat.eventName)} · H{heat.num}</span><button className="md-x sm" onClick={onClose}>✕</button></div>
         <div className="md-splitgrid">
-          {relays.map((l) => { const id = entryId(evIdx, htIdx, l.lane), d = get(id), leg = d.leg || 0, splits = d.splits || [];
+          {relays.map((l) => { const id = entryId(evIdx, htIdx, l.lane), d = get(id), splits = d.splits || [];
             return (
               <div key={l.lane} className={"md-splitcard" + (l.team === homeTeam ? " mine" : "")}>
                 <div className="md-splitcardhead"><span className="md-splitlane">L{l.lane}</span><span className="md-splitteam" style={{ color: teamColor(l.team) }}>{l.team} {l.relay}</span>
                   <input className="md-splittime" placeholder="––.––" value={d.time || ""} onChange={(e) => update(id, { time: e.target.value })} /></div>
                 <div className="md-legs">
                   {l.swimmers.map((s, i) => (
-                    <div key={i} className={"md-leg" + (i === leg ? " cur" : "") + (i < leg ? " done" : "")}>
-                      <button className="md-legsel" onClick={() => update(id, { leg: i })}><span className="md-legnum">{i + 1}</span><span className="md-legname">{s.name}{s.age ? ` (${s.age})` : ""}</span></button>
-                      {splits[i] && <span className="md-legsplit">{splits[i]}</span>}
+                    <div key={i} className="md-leg">
+                      <span className="md-legnum">{i + 1}</span>
+                      <span className="md-legname">{s.name}{s.age ? ` (${s.age})` : ""}</span>
+                      <input className="md-splitbox" placeholder={`#${i + 1}`} value={splits[i] || ""} onChange={(e) => { const ns = splits.slice(); ns[i] = e.target.value; update(id, { splits: ns }); }} />
                       <button className="md-legnote" title="Notes / tags" onClick={(e) => openPop(id + "#" + i, e.currentTarget)}>✎</button>
                     </div>
                   ))}
                 </div>
-                <div className="md-splitrow">
-                  <button className="md-nextleg" onClick={() => update(id, { leg: Math.min(3, leg + 1) })}>Next leg ▸</button>
-                  <input className="md-splitin" placeholder={`Leg ${leg + 1} split`} value={splits[leg] || ""} onChange={(e) => { const ns = splits.slice(); ns[leg] = e.target.value; update(id, { splits: ns }); }} />
-                </div>
+                {clockActive && !d.time && <button className="md-nextleg tap" onClick={() => relayTap(id, splits)}>⏱ Tap — leg {splits.length + 1}/4</button>}
               </div>
             ); })}
           {!relays.length && <div className="md-prevempty">No {homeTeam} relay in this heat.</div>}
@@ -966,16 +1006,16 @@ const LEAGUE_SORTS = {
   power: (a, b) => b.power - a.power,
   pf: (a, b) => b.pf - a.pf,
 };
-function LeagueModal({ onClose, meets, homeTeam, liveMeet, initialProfile, initialAgeFilter, initialTeam }) {
+function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
   const [filterGender, setFilterGender] = useState("All");
-  const [filterAge, setFilterAge] = useState(initialAgeFilter || "All");
+  const [filterAge, setFilterAge] = useState("All");
   const [filterStroke, setFilterStroke] = useState("All");
   const power = useMemo(() => computePower(meets, { gender: filterGender, ageGroup: filterAge, stroke: filterStroke }), [meets, filterGender, filterAge, filterStroke]);
   const standings = useMemo(() => computeStandings(meets), [meets]);
   const teams = useMemo(() => [...new Set(Object.values(power).map((s) => s.team))].sort(), [power]);
   const teamPower = (t) => { const arr = Object.values(power).filter((s) => s.team === t && s.power != null); return arr.length ? Math.round(arr.reduce((a, b) => a + b.power, 0) / arr.length) : 0; };
-  const [sel, setSel] = useState(initialTeam || (initialProfile && initialProfile.team) || null);
-  const [profile, setProfile] = useState(initialProfile || null);
+  const [sel, setSel] = useState(null);
+  const [profile, setProfile] = useState(null);
   const [sort, setSort] = useState("record");
   const [rosterSort, setRosterSort] = useState("power");
   const rows = teams.map((t) => ({ team: t, ...(standings[t] || { w: 0, l: 0, tie: 0, pf: 0, pa: 0, meets: [] }), power: teamPower(t) })).sort(LEAGUE_SORTS[sort]);
@@ -1508,7 +1548,7 @@ const INITIAL_DATA = {
   "0:1:7": { time: "24.30", dqs: [], tags: {}, notes: "" },
 };
 
-export default function App() {
+function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts }) {
   const [meetName, setMeetName] = useState("2026 VCSL Championship");
   const [meetDate, setMeetDate] = useState(new Date().toISOString().slice(0, 10));
   const [events, setEvents] = useState(SEED_EVENTS);
@@ -1522,15 +1562,19 @@ export default function App() {
   const [dualLanes, setDualLanes] = useState(6);
   const [dqTarget, setDqTarget] = useState(null);
   const [dqSwimmer, setDqSwimmer] = useState(null);
+  const [dqNsTarget, setDqNsTarget] = useState(null); // leg-specific id for the No-show toggle inside DQModal
   const [scratchTarget, setScratchTarget] = useState(null);
   const [relayReplaceTarget, setRelayReplaceTarget] = useState(null);
   const [modal, setModal] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [pop, setPop] = useState(null);
+  const [ageStack, setAgeStack] = useState([]); // age-chip drill-down, stacked on top of `pop`
   const [odOpen, setOdOpen] = useState(true);
   const [prevOpen, setPrevOpen] = useState(true);
   const [relaySplits, setRelaySplits] = useState(false);
   const [startedHeats, setStartedHeats] = useState({});
+  const [showFinalizeDqs, setShowFinalizeDqs] = useState(false);
+  const autoFinalizeShown = useRef(false);
   const lanesPerHeat = dualLanes;
   const sheetRef = useRef(null);
   const evRefs = useRef({});
@@ -1563,7 +1607,25 @@ export default function App() {
   const curKey = current ? current.evIdx + ":" + current.htIdx : null;
   const curHasTimes = current ? current.lanes.some((l) => (data[entryId(current.evIdx, current.htIdx, l.lane)] || {}).time) : false;
   const isStarted = !!(curKey && (startedHeats[curKey] || curHasTimes));
-  const startRace = () => curKey && setStartedHeats((s) => ({ ...s, [curKey]: true }));
+  // Live stopwatch for the heat on the board — deliberately transient (not
+  // persisted): it only drives tap-to-lap while this heat is up, and resets
+  // whenever Start is pressed again or the board moves to a different heat.
+  const [raceClock, setRaceClock] = useState(null); // { key, startedAt }
+  const startRace = () => curKey && (setStartedHeats((s) => ({ ...s, [curKey]: true })), setRaceClock({ key: curKey, startedAt: Date.now() }));
+  const clockActive = raceClock && raceClock.key === curKey ? raceClock : null;
+  useEffect(() => { setRaceClock((c) => (c && c.key === curKey ? c : null)); }, [curKey]);
+  const recordLap = (id, eventName) => {
+    if (!clockActive) return;
+    const d = get(id); if (d.time) return;
+    const req = requiredTapsFor(eventName);
+    const splits = [...(d.splits || [])];
+    const elapsedSec = (Date.now() - clockActive.startedAt) / 1000;
+    const prevCum = splits.reduce((s, x) => s + (toSeconds(x) || 0), 0);
+    const legSec = Math.max(0, elapsedSec - prevCum);
+    splits.push(fmtT(legSec));
+    if (splits.length >= req) update(id, { splits, time: fmtT(elapsedSec) });
+    else update(id, { splits });
+  };
   // Heat is done when every entered lane has a time or DQ (and at least one time).
   const curHeatComplete = useMemo(() => { if (!current) return false; let entered = 0, done = 0, timed = 0; current.lanes.forEach((l) => { const d = data[entryId(current.evIdx, current.htIdx, l.lane)] || {}; entered++; if (d.time || (d.dqs || []).length) done++; if (d.time) timed++; }); return entered > 0 && timed > 0 && done === entered; }, [current, data]);
   const autoEnded = useRef({});
@@ -1572,9 +1634,11 @@ export default function App() {
     if (!curHeatComplete) { seenIncomplete.current[curKey] = true; return; }
     if (seenIncomplete.current[curKey] && !autoEnded.current[curKey]) { autoEnded.current[curKey] = true; setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1)); }
   }, [curKey, curHeatComplete, flatHeats.length]);
+  const pendingDqs = useMemo(() => pendingDqList(events, data), [events, data]);
+  const meetOver = flatHeats.length > 0 && ptr === flatHeats.length - 1 && curHeatComplete;
+  useEffect(() => { if (meetOver && pendingDqs.length && !autoFinalizeShown.current) { autoFinalizeShown.current = true; setShowFinalizeDqs(true); } }, [meetOver, pendingDqs.length]);
   const prevList = useMemo(() => previous ? [...previous.lanes].map((l) => { const id = entryId(previous.evIdx, previous.htIdx, l.lane); return { id, l, time: (data[id] || {}).time, place: prevHeatPlaces[id] }; }).sort((a, b) => (a.place || 99) - (b.place || 99) || a.l.lane - b.l.lane) : [], [previous, data, prevHeatPlaces]);
   const [toast, setToast] = useState("");
-  const [leagueJump, setLeagueJump] = useState(null); // { profile: {name, team} } | { ageFilter } - seeds LeagueModal on open
   const [relayUndo, setRelayUndo] = useState(null); // { label, fn }
   const relayUndoTimer = useRef(null);
   const pushRelayUndo = (label, fn) => { setRelayUndo({ label, fn }); if (relayUndoTimer.current) clearTimeout(relayUndoTimer.current); relayUndoTimer.current = setTimeout(() => setRelayUndo(null), 8000); };
@@ -1604,7 +1668,13 @@ export default function App() {
       try { await STORE.delete(INDEX_KEY); } catch (e) {} try { await STORE.delete(CUR_KEY); } catch (e) {} }
     setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); setHeatPtr(4); setModal(null); flash("Data cleared"); };
   const toggleTag = (id, key) => { const tags = { ...get(id).tags }; tags[key] ? delete tags[key] : (tags[key] = true); update(id, { tags }); };
-  const toggleDqCode = (id, group, code, reason, swimmer) => { const dqs = [...(get(id).dqs || [])]; const i = dqs.findIndex((q) => q.code === code); if (i >= 0) dqs.splice(i, 1); else dqs.push({ code, reason, group, ...(swimmer ? { swimmer } : {}) }); update(id, { dqs }); };
+  const toggleDqCode = (id, group, code, reason, swimmer) => { let dqs = [...(get(id).dqs || [])]; const i = dqs.findIndex((q) => q.code === code); if (i >= 0) dqs.splice(i, 1); else { dqs = dqs.filter((q) => q.code !== PEND_DQ_CODE); dqs.push({ code, reason, group, ...(swimmer ? { swimmer } : {}) }); } update(id, { dqs }); };
+  // Quick tap: flag a DQ instantly with the reason left pending (toggles off
+  // if the only thing recorded is still the placeholder — a real reason can
+  // only be cleared via the full picker, so an accidental tap can't wipe it).
+  const toggleQuickDq = (id, swimmer) => { const d = get(id), dqs = d.dqs || [];
+    if (dqs.length === 0) update(id, { dqs: [{ code: PEND_DQ_CODE, reason: "Reason pending — awaiting DQ slip", group: "Pending", ...(swimmer ? { swimmer } : {}) }] });
+    else if (isPendingDq(d) && dqs.length === 1) update(id, { dqs: [] }); };
   const scratchOne = (id) => update(id, { scratched: true });
   const unscratchOne = (id) => update(id, { scratched: false });
   // Scratches a swimmer everywhere they appear this meet — solo entries AND
@@ -1672,7 +1742,24 @@ export default function App() {
     return { ei, hi, ln, evId: ev.id, eventName: ev.name, heatNum: ht.num, sw: lane }; }, [events]);
   const popInfo = useMemo(() => swimmerAt(pop?.id), [pop, swimmerAt]);
   const dqInfo = useMemo(() => swimmerAt(dqTarget), [dqTarget, swimmerAt]);
-  const openPop = (id, el) => setPop({ id, rect: el.getBoundingClientRect() });
+  const openPop = (id, el) => { setPop({ id, rect: el.getBoundingClientRect() }); setAgeStack([]); };
+  // Shared renderer for the swimmer action popover, used both for the base
+  // popover (opened from any lane on the board) and for each "swimmer" level
+  // pushed onto ageStack by the age-chip drill-down, so every level has full
+  // DQ/scratch/notes functionality, not just the outermost one.
+  const renderSwimmerPop = (id, rect, depth, onCloseThis, pushAge, key) => {
+    const info = swimmerAt(id); if (!info) return null;
+    const d = get(id);
+    return (
+      <ActionPopover key={key} info={info} d={d} mine={info.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(info.eventName)} hideSplits={info.leg !== undefined} relaySwimmer={info.leg !== undefined} progMeets={progMeets} rect={rect} depth={depth} onClose={onCloseThis}
+        onDq={() => { setDqTarget(info.relayBase || id); setDqSwimmer(info.leg !== undefined ? info.sw.name : null); setDqNsTarget(id); setPop(null); setAgeStack([]); }}
+        onDqQuick={() => toggleQuickDq(info.relayBase || id, info.leg !== undefined ? info.sw.name : null)}
+        onToggle={(k) => toggleTag(id, k)} onSplits={(a) => update(id, { splits: a })} onNotes={(v) => update(id, { notes: v })} onNoShow={() => update(id, { noshow: !isNoShow(get(id)) })}
+        onScratch={() => { setScratchTarget({ id, name: info.sw.name, team: info.sw.team, evIdx: info.ei, htIdx: info.hi, lane: info.ln, relay: info.leg !== undefined, leg: info.leg, eventName: info.eventName }); setPop(null); setAgeStack([]); }}
+        onUnscratch={() => unscratchOne(id)}
+        onOpenAgeGroup={(el) => { const ag = ageGroupOf(info.sw.age); if (!ag) return; pushAge(ag, el ? el.getBoundingClientRect() : rect); }} />
+    );
+  };
   // Return to Meet setup (not closing out entirely) so lanes-per-heat — which
   // depends on the just-imported roster — can be adjusted right away.
   const applyImport = (parsed) => { setEvents(parsed.events); setRecords(Object.fromEntries(parsed.events.filter((e) => e.record).map((e) => [e.id, e.record]))); if (parsed.myTeam) setHomeTeam(parsed.myTeam); setData({}); setPop(null); setHeatPtr(0); setModal("meetsetup"); };
@@ -1692,7 +1779,6 @@ export default function App() {
 
   return (
     <div className="md-root">
-      <style>{CSS}</style>
 
       <header className="md-top">
         <div className="md-logowrap">
@@ -1706,6 +1792,7 @@ export default function App() {
               <button className="md-mbtn" onClick={() => { setModal("season"); setMenuOpen(false); }}>Team stats</button>
               <div className="md-menutitle">Meet day</div>
               <button className="md-mbtn" onClick={() => { setModal("participants"); setMenuOpen(false); }}>Scratches</button>
+              <button className="md-mbtn" onClick={() => { setShowFinalizeDqs(true); setMenuOpen(false); }}>🚩 Finalize DQs{pendingDqs.length ? ` (${pendingDqs.length})` : ""}</button>
               <div className="md-menutitle">Meet day analytics</div>
               <button className="md-mbtn" onClick={() => { setModal("relay"); setMenuOpen(false); }}>Relay builder</button>
               <button className="md-mbtn" onClick={() => { setModal("compare"); setMenuOpen(false); }}>Swimmer comparison</button>
@@ -1738,7 +1825,8 @@ export default function App() {
               {isRelayEvent(current?.eventName) && <button className="md-relaybtn" onClick={() => setRelaySplits(true)}>🏊 Relay splits & legs</button>}
               <div className="md-lanes">
                 {slots(current, lanesPerHeat).map((l, i) => l ? (() => { const id = entryId(current.evIdx, current.htIdx, l.lane);
-                  return <LaneRow key={id} lane={l} d={get(id)} place={curHeatPlaces[id]} rec={records[current.evId]} active mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })} />; })()
+                  return <LaneRow key={id} lane={l} d={get(id)} place={curHeatPlaces[id]} rec={records[current.evId]} active mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })}
+                    eventName={current.eventName} clockActive={!!clockActive} onLap={() => recordLap(id, current.eventName)} onSplitEdit={(arr) => update(id, { splits: arr })} />; })()
                   : <div key={"e" + i} className="md-lane empty"><span className="md-lanenum">{i + 1}</span><span className="md-emptytxt">—</span></div>)}
               </div>
             </>) : (
@@ -1795,15 +1883,17 @@ export default function App() {
       </div>
 
       {pop && popInfo && (<>
-        <div className="md-povscrim" onClick={() => setPop(null)} />
-        <ActionPopover info={popInfo} d={get(pop.id)} mine={popInfo.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(popInfo.eventName)} hideSplits={popInfo.leg !== undefined} relaySwimmer={popInfo.leg !== undefined} progMeets={progMeets} rect={pop.rect} onClose={() => setPop(null)} onDq={() => { setDqTarget(popInfo.relayBase || pop.id); setDqSwimmer(popInfo.leg !== undefined ? popInfo.sw.name : null); setPop(null); }} onToggle={(k) => toggleTag(pop.id, k)} onSplits={(a) => update(pop.id, { splits: a })} onNotes={(v) => update(pop.id, { notes: v })} onNoShow={() => update(pop.id, { noshow: !isNoShow(get(pop.id)) })}
-          onScratch={() => { setScratchTarget({ id: pop.id, name: popInfo.sw.name, team: popInfo.sw.team, evIdx: popInfo.ei, htIdx: popInfo.hi, lane: popInfo.ln, relay: popInfo.leg !== undefined, leg: popInfo.leg, eventName: popInfo.eventName }); setPop(null); }}
-          onUnscratch={() => unscratchOne(pop.id)}
-          onOpenProfile={() => { setLeagueJump({ profile: { name: popInfo.sw.name, team: popInfo.sw.team } }); setModal("league"); setPop(null); }}
-          onOpenAgeGroup={() => { setLeagueJump({ ageFilter: ageGroupOf(popInfo.sw.age) }); setModal("league"); setPop(null); }} />
+        <div className="md-povscrim" onClick={() => { setPop(null); setAgeStack([]); }} />
+        {renderSwimmerPop(pop.id, pop.rect, 0, () => { setPop(null); setAgeStack([]); }, (ag, rect) => setAgeStack([{ kind: "age", ageGroup: ag, rect }]), "base")}
+        {ageStack.map((item, i) => item.kind === "age"
+          ? <AgeGroupPopover key={"age" + i} ageGroup={item.ageGroup} roster={ageGroupRoster(events, item.ageGroup)} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} onPick={(id, el) => setAgeStack((s) => [...s.slice(0, i + 1), { kind: "swimmer", id, rect: el.getBoundingClientRect() }])} />
+          : renderSwimmerPop(item.id, item.rect, i + 1, () => setAgeStack((s) => s.slice(0, i)), (ag, rect) => setAgeStack((s) => [...s.slice(0, i + 1), { kind: "age", ageGroup: ag, rect }]), "sw" + i))}
       </>)}
-      {dqInfo && <DQModal info={dqInfo} dqs={get(dqTarget).dqs || []} swimmer={dqSwimmer} onClose={() => { setDqTarget(null); setDqSwimmer(null); }}
+      {showFinalizeDqs && <FinalizeDqsPanel list={pendingDqs} onClose={() => setShowFinalizeDqs(false)}
+        onPick={(row) => { setDqTarget(row.id); setDqSwimmer(row.swimmer || null); setDqNsTarget(row.id); }} />}
+      {dqInfo && <DQModal info={dqInfo} dqs={get(dqTarget).dqs || []} swimmer={dqSwimmer} ns={isNoShow(get(dqNsTarget || dqTarget))} onClose={() => { setDqTarget(null); setDqSwimmer(null); setDqNsTarget(null); }}
         onClear={() => update(dqTarget, { dqs: [] })}
+        onNoShow={() => { const id = dqNsTarget || dqTarget; update(id, { noshow: !isNoShow(get(id)) }); }}
         onToggle={(group, code, reason) => toggleDqCode(dqTarget, group, code, reason, dqSwimmer)} />}
       {modal === "import" && <ImportModal onClose={() => setModal(null)} onApply={applyImport} defaultTeam={homeTeam} />}
       {modal === "results" && <ResultsModal onClose={() => setModal(null)} events={events} teams={teamsPresent} homeTeam={homeTeam}
@@ -1823,10 +1913,12 @@ export default function App() {
         onOne={(entry, val) => { update(entry.id, { scratched: val });
           if (val && entry.relay) { pushRelayUndo("Scratched " + entry.name, () => { update(entry.id, { scratched: false }); flash("Undone"); }); setRelayReplaceTarget({ evIdx: entry.evIdx, htIdx: entry.htIdx, lane: entry.relayLane, leg: entry.leg, name: entry.name, team: entry.team, eventName: events[entry.evIdx]?.name || entry.ev }); } }}
         onAll={(name, team, val) => scratchAll(name, team, val)} />}
-      {modal === "league" && <LeagueModal key={leagueJump ? JSON.stringify(leagueJump) : "plain"} onClose={() => { setModal(null); setLeagueJump(null); }} meets={seasonMeets} homeTeam={homeTeam} liveMeet={{ meetName, mode, events, data }} initialProfile={leagueJump?.profile || null} initialAgeFilter={leagueJump?.ageFilter || null} initialTeam={leagueJump?.profile?.team || null} />}
+      {modal === "league" && <LeagueModal onClose={() => setModal(null)} meets={seasonMeets} homeTeam={homeTeam} liveMeet={{ meetName, mode, events, data }} />}
       {modal === "season" && <SeasonModal onClose={() => setModal(null)} homeTeam={homeTeam} meets={seasonMeets} />}
       {modal === "meetsetup" && <MeetSetupModal onClose={() => setModal(null)} meetName={meetName} setMeetName={setMeetName} meetDate={meetDate} setMeetDate={setMeetDate} mode={mode} setMode={setMode} dualLanes={dualLanes} setDualLanes={setDualLanes} hostTeam={hostTeam} setHostTeam={setHostTeam} awayTeam={awayTeam} setAwayTeam={setAwayTeam} teams={teamsPresent} onImport={() => setModal("import")} />}
-      {modal === "settings" && <SettingsModal onClose={() => setModal(null)} homeTeam={homeTeam} setHomeTeam={setHomeTeam} teams={teamsPresent} onMeetSetup={() => setModal("meetsetup")} onResults={() => setModal("results")} onSave={() => saveToSeason()} onExport={() => setModal("export")} onClear={clearData} meets={seasonMeets} onLoad={loadMeet} onDelete={deleteMeet} />}
+      {modal === "settings" && <SettingsModal onClose={() => setModal(null)} homeTeam={homeTeam} setHomeTeam={setHomeTeam} teams={teamsPresent} onMeetSetup={() => setModal("meetsetup")} onResults={() => setModal("results")} onSave={() => saveToSeason()} onExport={() => setModal("export")} onClear={clearData} meets={seasonMeets} onLoad={loadMeet} onDelete={deleteMeet}
+        session={session} isAdmin={isAdmin} onLogout={onLogout} onManageAccounts={() => setModal("accounts")} />}
+      {modal === "accounts" && isAdmin && <AccountsModal onClose={() => setModal(null)} accounts={accounts} onSave={onSaveAccounts} currentUsername={session?.username} />}
       {modal === "compare" && <SwimmerCompareModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} />}
       {scratchTarget && <div className="md-scrim" onClick={() => setScratchTarget(null)}>
         <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
@@ -1849,7 +1941,104 @@ export default function App() {
       {toast && !relayUndo && <div className="md-toast">{toast}</div>}
       {modal === "relay" && <RelayBuilderModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} />}
       {modal === "export" && <ExportModal onClose={() => setModal(null)} events={events} data={data} myTeam={homeTeam} places={places} records={records} meetName={meetName} />}
-      {relaySplits && current && isRelayEvent(current.eventName) && <RelaySplitsPanel heat={current} evIdx={current.evIdx} htIdx={current.htIdx} data={data} homeTeam={homeTeam} onClose={() => setRelaySplits(false)} update={update} get={get} openPop={openPop} />}
+      {relaySplits && current && isRelayEvent(current.eventName) && <RelaySplitsPanel heat={current} evIdx={current.evIdx} htIdx={current.htIdx} data={data} homeTeam={homeTeam} onClose={() => setRelaySplits(false)} update={update} get={get} openPop={openPop} clockActive={clockActive} />}
+    </div>
+  );
+}
+
+const ACCOUNTS_KEY = "meetdeck:accounts:v1";
+const SESSION_KEY = "meetdeck:session:v1";
+const DEFAULT_ACCOUNTS = [{ username: "Coach-Cooper", password: "123456", role: "admin" }];
+const findAccount = (accounts, username) => accounts.find((a) => a.username.toLowerCase() === (username || "").trim().toLowerCase());
+
+// Top-level: gates the board behind a login screen and owns the account list,
+// both kept in persistent storage so a page refresh on the iPad doesn't log
+// the coach back out or forget who else has an account.
+export default function App() {
+  const [accounts, setAccounts] = useState(null); // null while loading
+  const [session, setSession] = useState(null);
+  const [loginError, setLoginError] = useState("");
+
+  useEffect(() => { let live = true; (async () => {
+    let acc = DEFAULT_ACCOUNTS, sess = null;
+    if (STORE) {
+      try { const r = await STORE.get(ACCOUNTS_KEY); if (r && r.value) acc = JSON.parse(r.value); else await STORE.set(ACCOUNTS_KEY, JSON.stringify(acc)); } catch (e) {}
+      try { const r = await STORE.get(SESSION_KEY); if (r && r.value) sess = JSON.parse(r.value); } catch (e) {}
+    }
+    if (!live) return;
+    setAccounts(acc);
+    if (sess && findAccount(acc, sess.username)) setSession(sess);
+  })(); return () => { live = false; }; }, []);
+
+  const saveAccounts = (next) => { setAccounts(next); if (STORE) STORE.set(ACCOUNTS_KEY, JSON.stringify(next)).catch(() => {}); };
+  const login = (username, password) => {
+    const acc = findAccount(accounts || [], username);
+    if (!acc || acc.password !== password) { setLoginError("Incorrect username or password."); return; }
+    const sess = { username: acc.username };
+    setSession(sess); setLoginError(""); if (STORE) STORE.set(SESSION_KEY, JSON.stringify(sess)).catch(() => {});
+  };
+  const logout = () => { setSession(null); if (STORE) STORE.delete(SESSION_KEY).catch(() => {}); };
+  const isAdmin = session && findAccount(accounts || [], session.username)?.role === "admin";
+
+  return (<>
+    <style>{CSS}</style>
+    {accounts === null ? null // brief flash while persisted state loads
+      : !session ? <LoginScreen onLogin={login} error={loginError} />
+      : <MeetDeckBoard session={session} isAdmin={isAdmin} onLogout={logout} accounts={accounts} onSaveAccounts={saveAccounts} />}
+  </>);
+}
+
+function LoginScreen({ onLogin, error }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const submit = (e) => { e.preventDefault(); onLogin(username, password); };
+  return (
+    <div className="md-root md-loginwrap">
+      <form className="md-loginbox" onSubmit={submit}>
+        <div className="md-loginlogo">≈ MeetDeck</div>
+        <div className="md-loginsub">Sign in to load your team's meets &amp; season data.</div>
+        <label className="md-mrow">Username<input value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" placeholder="Coach-Cooper" /></label>
+        <label className="md-mrow">Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+        {error && <div className="md-loginerr">{error}</div>}
+        <button className="md-apply" type="submit">Log in</button>
+      </form>
+    </div>
+  );
+}
+
+// `accounts`/`onSave` come straight from the top-level App's own state (the
+// same state `login()` reads), not an independent copy loaded from storage —
+// otherwise a newly added account couldn't log in until a page refresh.
+function AccountsModal({ onClose, accounts, onSave, currentUsername }) {
+  const [username, setUsername] = useState(""); const [password, setPassword] = useState(""); const [role, setRole] = useState("coach");
+  const [err, setErr] = useState("");
+  const add = () => {
+    if (!username.trim() || !password) { setErr("Username and password required."); return; }
+    if (findAccount(accounts, username)) { setErr("That username already exists."); return; }
+    onSave([...accounts, { username: username.trim(), password, role }]);
+    setUsername(""); setPassword(""); setRole("coach"); setErr("");
+  };
+  const remove = (u) => { if (u.toLowerCase() === (currentUsername || "").toLowerCase()) { setErr("Can't remove the account you're signed in with."); return; } onSave(accounts.filter((a) => a.username !== u)); };
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">👤 Manage accounts</div><div className="md-msub">Admin only — add or remove coach logins.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-setbody">
+          {accounts.map((a) => (
+            <div key={a.username} className="md-meetrow">
+              <div className="md-meetinfo"><div className="md-meetname">{a.username}</div><div className="md-meetmeta">{a.role}</div></div>
+              <button className="md-meetdel" onClick={() => remove(a.username)} aria-label="Remove">🗑</button>
+            </div>
+          ))}
+          <div className="md-mdiv" />
+          <label className="md-mrow">New username<input value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" /></label>
+          <label className="md-mrow">Password<input value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+          <label className="md-mrow">Role<select value={role} onChange={(e) => setRole(e.target.value)}><option value="coach">Coach</option><option value="admin">Admin</option></select></label>
+          {err && <div className="md-loginerr">{err}</div>}
+          <button className="md-mbtn primary" onClick={add}>Add account</button>
+        </div>
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
     </div>
   );
 }
@@ -1891,12 +2080,12 @@ function AllLanesStrip({ heat, homeTeam, onPick }) {
   if (!lanes.length) return <div className="md-odempty">No swimmers in this heat.</div>;
   const n = lanes.length;
   const cardW = (400 - 10 - Math.max(0, n - 1) * 3) / n; // panel is 400px wide (see .md-grid)
-  const tightTeam = cardW < 42;
+  const tightName = cardW < 40, tightTeam = cardW < 42;
   return (
     <div className="md-allstrip">
       {lanes.map((l) => { const id = entryId(heat.evIdx, heat.htIdx, l.lane);
         const teamLabel = tightTeam ? (TEAM_MICRO[l.team] || l.team.slice(0, 2)) : l.team;
-        const nameLabel = firstNameOnly(l.name);
+        const nameLabel = tightName ? abbrevName(l.name) : firstNameOnly(l.name);
         return <button key={l.lane} className={"md-odcard allfit" + (l.team === homeTeam ? " mine" : "")} title={`${l.name} · ${l.team}`} onClick={(e) => onPick(id, e.currentTarget)}>
           <span className="md-odlane">{l.lane}</span>
           <span className="md-odcname">{nameLabel}</span>
@@ -2020,13 +2209,16 @@ function MeetSetupModal({ onClose, meetName, setMeetName, meetDate, setMeetDate,
   );
 }
 
-function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete }) {
+function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete, session, isAdmin, onLogout, onManageAccounts }) {
   const [pendingDelete, setPendingDelete] = useState(null);
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
         <div className="md-mhead"><div><div className="md-mtitle">⚙ Settings</div><div className="md-msub">Setup, team, saved meets &amp; data</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
+          {session && <div className="md-acctrow"><span>Signed in as <b>{session.username}</b>{isAdmin ? " · admin" : ""}</span><button className="md-mbtn sm" onClick={onLogout}>Log out</button></div>}
+          {isAdmin && <button className="md-mbtn" onClick={onManageAccounts}>👤 Manage accounts</button>}
+          <div className="md-mdiv" />
           <button className="md-mbtn" onClick={onMeetSetup}>Meet set up</button>
           <button className="md-mbtn" onClick={onResults}>Results</button>
           <div className="md-mdiv" />
@@ -2045,7 +2237,7 @@ function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onR
             )) : <div className="md-prevempty">No saved meets yet.</div>}
           </div>
           <div className="md-mdiv" />
-          <button className="md-mbtn danger" onClick={onClear}>🗑 Clear all data &amp; reset</button>
+          {isAdmin && <button className="md-mbtn danger" onClick={onClear}>🗑 Clear all data &amp; reset</button>}
         </div>
         {pendingDelete && <div className="md-confirm" onClick={() => setPendingDelete(null)}>
           <div className="md-confirmbox" onClick={(e) => e.stopPropagation()}>
@@ -2070,16 +2262,28 @@ function TeamScore({ r, big }) {
   return <span className={"md-tscore" + (big ? " big" : "")}><span className="md-tsdot" style={{ background: teamColor(r.t) }} /><span className="md-tscode">{r.t}</span><span className="md-tspts">{r.pts}</span><span className="md-tspct">{r.pct}%<small>imp</small></span></span>;
 }
 
-function LaneRow({ lane, d, place, rec, active, mine, selected, onSelect, onTime }) {
+function LaneRow({ lane, d, place, rec, active, mine, selected, onSelect, onTime, eventName, clockActive, onLap, onSplitEdit }) {
   const best = isBest(d.time, lane.seed), br = brokeRecord(d.time, rec), dq = hasDq(d), scr = isScratched(d), ns = isNoShow(d), off = scr || ns, tagCount = Object.keys(d.tags || {}).length;
   const fs = toSeconds(d.time), ss = toSeconds(lane.seed);
   const delta = !isNaN(fs) && !isNaN(ss) ? fs - ss : null; // negative = improved
   const deltaStr = delta === null ? null : (delta < 0 ? "−" : "+") + Math.abs(delta).toFixed(2);
+  const req = active && eventName ? requiredTapsFor(eventName) : 1;
+  const tapsLeft = active && clockActive && !off && !d.time;
+  const setSplit = (i, v) => { const ns2 = [...(d.splits || [])]; ns2[i] = v; onSplitEdit && onSplitEdit(ns2); };
   return (
-    <div className={"md-lane clickable" + (selected ? " sel" : "") + (dq ? " dq" : "") + (off ? " scr" : "") + (mine ? " mine" : "")} onClick={(e) => onSelect(e.currentTarget)}>
+    <div className={"md-lane clickable" + (selected ? " sel" : "") + (dq ? " dq" : "") + (off ? " scr" : "") + (mine ? " mine" : "")} onClick={(e) => (tapsLeft ? onLap && onLap() : onSelect(e.currentTarget))}>
       <span className="md-lanenum">{lane.lane}</span>
-      <span className="md-laneid"><span className="md-laneswimmer">{lane.name}{br && !dq && !off && <span className="md-br">BR</span>}</span><span className="md-laneteam" style={{ color: teamColor(lane.team) }}>{lane.team}{lane.age ? " · " + lane.age : ""}</span></span>
+      <span className="md-laneid">
+        <span className="md-laneswimmer">{lane.name}{br && !dq && !off && <span className="md-br">BR</span>}</span>
+        <span className="md-laneteam" style={{ color: teamColor(lane.team) }}>{lane.team}{lane.age ? " · " + lane.age : ""}</span>
+        {active && req > 1 && !off && (
+          <span className="md-splitrow2" onClick={(e) => e.stopPropagation()}>
+            {Array.from({ length: req }).map((_, i) => <input key={i} className="md-splitbox" placeholder={`#${i + 1}`} value={(d.splits || [])[i] || ""} onChange={(e) => setSplit(i, e.target.value)} />)}
+          </span>
+        )}
+      </span>
       <span className="md-lanemarks">
+        {tapsLeft && req > 1 && <span className="md-tapbadge">⏱ tap {(d.splits || []).length}/{req}</span>}
         {ns && <span className="md-scrbadge">NS</span>}
         {deltaStr && !dq && !off && <span className={"md-delta sm" + (delta < 0 ? " neg" : " pos")}>{deltaStr}</span>}
         {place && !dq && !off && <span className="md-place">{ORD(place)}</span>}
@@ -2122,9 +2326,27 @@ function SheetRow({ lane, d, place, rec, mine, selected, onSelect, onSwimmer, le
   );
 }
 
-function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progMeets, rect, onClose, onDq, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenProfile, onOpenAgeGroup }) {
+// Left column (On Deck / In The Water / Previous) is a fixed 400px — never let
+// a floating popover's left edge land inside it, or it visually covers those
+// live panels; push it just past the column instead. `depth` staggers stacked
+// popovers (age-group drill-down) so each is still visible behind the next.
+const POV_SAFE_X = 410;
+function popoverPos(rect, depth) {
+  const W = 320, m = 10, vw = window.innerWidth, vh = window.innerHeight, h = 300;
+  const off = (depth || 0) * 18;
+  let top = Math.min(rect.bottom + 10, vh - h - m) + off;
+  if (top < m) top = m;
+  let left = Math.max(POV_SAFE_X, Math.min(rect.left, vw - W - m)) + off;
+  if (left + W > vw - m) left = Math.max(POV_SAFE_X, vw - W - m);
+  return { top, left };
+}
+function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progMeets, rect, depth, onClose, onDq, onDqQuick, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenAgeGroup }) {
   const ref = useRef(null);
-  const [pos, setPos] = useState({ top: rect.bottom + 10, left: rect.left, above: false, caret: 24 });
+  const holdTimer = useRef(null); const held = useRef(false);
+  const dqDown = () => { held.current = false; holdTimer.current = setTimeout(() => { held.current = true; onDq(); }, 2000); };
+  const dqUp = () => { clearTimeout(holdTimer.current); if (!held.current) onDqQuick(); };
+  const dqCancel = () => clearTimeout(holdTimer.current);
+  const [pos, setPos] = useState(() => popoverPos(rect, depth));
   const [openCat, setOpenCat] = useState(null);
   const [showSplits, setShowSplits] = useState(false);
   const [imStroke, setImStroke] = useState("Fly");
@@ -2134,18 +2356,22 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progM
   const progTimes = showProg ? swimmerStrokeTimes(info.sw.name, info.sw.team, progStroke, progMeets || []) : [];
   useLayoutEffect(() => {
     const W = 320, m = 10, vw = window.innerWidth, vh = window.innerHeight, h = ref.current ? ref.current.offsetHeight : 300;
-    let above = false, top = rect.bottom + 10;
-    if (top + h > vh - m) { const up = rect.top - h - 10; if (up > m) { top = up; above = true; } else top = Math.max(m, vh - h - m); }
-    const left = Math.min(Math.max(m, rect.left), vw - W - m);
-    setPos({ top, left, above, caret: Math.min(Math.max(16, rect.left + rect.width / 2 - left), W - 24) });
-  }, [rect]);
-  const dq = hasDq(d), ns = isNoShow(d), scr = isScratched(d);
+    const off = (depth || 0) * 18;
+    let top = rect.bottom + 10 + off;
+    if (top + h > vh - m) top = Math.max(m, vh - h - m);
+    let left = Math.max(POV_SAFE_X, Math.min(rect.left, vw - W - m)) + off;
+    if (left + W > vw - m) left = Math.max(POV_SAFE_X, vw - W - m);
+    setPos({ top, left });
+  }, [rect, depth]);
+  const dq = hasDq(d), ns = isNoShow(d), scr = isScratched(d), pend = isPendingDq(d);
   return (
-    <div ref={ref} className={"md-pov" + (pos.above ? " above" : "")} style={{ top: pos.top, left: pos.left }} role="dialog">
-      <span className="md-caret" style={{ left: pos.caret }} />
-      <div className="md-povhead"><div><div className="md-povname"><span className="md-povnamelink" onClick={() => onOpenProfile && onOpenProfile()}>{info.sw.name}</span> {info.sw.age > 0 && <span className="md-agechip" onClick={() => onOpenAgeGroup && onOpenAgeGroup()}>{info.sw.age}</span>}<span className="md-povteam" style={{ color: teamColor(info.sw.team) }}>{info.sw.team}</span></div><div className="md-povmeta">{shortEvent(info.eventName)} · H{info.heatNum} · Lane {info.ln}{info.sw.seed ? ` · seed ${info.sw.seed}` : ""}</div></div><button className="md-x sm" onClick={onClose}>✕</button></div>
+    <div ref={ref} className="md-pov" style={{ top: pos.top, left: pos.left }} role="dialog">
+      <div className="md-povhead"><div><div className="md-povname">{info.sw.name} {info.sw.age > 0 && <span className="md-agechip" onClick={(e) => onOpenAgeGroup && onOpenAgeGroup(e.currentTarget)}>{info.sw.age}</span>}<span className="md-povteam" style={{ color: teamColor(info.sw.team) }}>{info.sw.team}</span></div><div className="md-povmeta">{shortEvent(info.eventName)} · H{info.heatNum} · Lane {info.ln}{info.sw.seed ? ` · seed ${info.sw.seed}` : ""}</div></div><button className="md-x sm" onClick={onClose}>✕</button></div>
       <div className="md-povtop">
-        <button className={"md-dq" + (dq ? " on" : "")} onClick={onDq}>{dq ? `DQ ${dqLabel(d)}` : "Record DQ(s)"}</button>
+        <button className={"md-dq" + (dq ? " on" : "") + (pend ? " pend" : "")}
+          onPointerDown={dqDown} onPointerUp={dqUp} onPointerLeave={dqCancel} onContextMenu={(e) => e.preventDefault()}>
+          {pend ? "DQ — reason pending" : dq ? `DQ ${dqLabel(d)}` : "Tap: DQ · Hold 2s: pick reason"}
+        </button>
       </div>
       <div className="md-povtop" style={{ marginTop: 8, marginBottom: 4 }}>
         <button className={"md-nsbtn" + (ns ? " on" : "")} onClick={onNoShow}>{ns ? "NS — no-show" : "No-show (NS)"}</button>
@@ -2158,7 +2384,13 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progM
         <div className="md-workhdr">Work on{imEvent ? ` (${imStroke})` : ""}:</div>
         <div className="md-worktags">{tags.map((t) => { const key = imEvent ? `${imStroke} · ${t.label}` : t.label, on = !!(d.tags && d.tags[key]); return <button key={t.label} className={"md-worktag" + (on ? " on" : "")} style={on ? { background: t.color, borderColor: t.color, color: "#fff" } : {}} onClick={() => onToggle(key)}>{t.label}</button>; })}</div>
         {!hideSplits && <button className={"md-splitbtn" + (showSplits ? " on" : "")} onClick={() => setShowSplits((s) => !s)}>⏱ Splits {(d.splits && d.splits.length) ? `(${d.splits.filter(Boolean).length})` : ""}</button>}
-        {!hideSplits && showSplits && <input className="md-notearea one" placeholder="Splits e.g. 13.2  27.9  42.1" value={(d.splits || []).join("  ")} onChange={(e) => onSplits(e.target.value.split(/[\s,]+/).filter(Boolean))} />}
+        {!hideSplits && showSplits && (
+          <div className="md-splitboxrow">
+            {Array.from({ length: Math.max(requiredTapsFor(info.eventName), (d.splits || []).length) }).map((_, i) => (
+              <input key={i} className="md-splitbox lg" placeholder={`#${i + 1}`} value={(d.splits || [])[i] || ""} onChange={(e) => { const ns = [...(d.splits || [])]; ns[i] = e.target.value; onSplits(ns); }} />
+            ))}
+          </div>
+        )}
         <textarea className="md-notearea" placeholder={`Notes on ${info.sw.name.split(",")[0]}…`} value={d.notes || ""} onChange={(e) => onNotes(e.target.value)} />
       </>) : (
         <div className="md-otherteam">Other team — DQ and no-show only.</div>
@@ -2174,8 +2406,52 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progM
   );
 }
 
-// Multi-select DQ modal with tiered age warnings.
-function DQModal({ info, dqs, swimmer, onClose, onClear, onToggle }) {
+// Age-chip drill-down: a small stacked popup listing everyone in that age
+// group across the loaded meet. Tapping a name pushes another swimmer
+// popover on top (via onPick), so popovers "build on each other" instead of
+// navigating away to a full page.
+function AgeGroupPopover({ ageGroup, roster, rect, depth, onClose, onPick }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState(() => popoverPos(rect, depth));
+  useLayoutEffect(() => {
+    const W = 260, m = 10, vw = window.innerWidth, vh = window.innerHeight, h = ref.current ? ref.current.offsetHeight : 240;
+    const off = (depth || 0) * 18;
+    let top = rect.bottom + 10 + off;
+    if (top + h > vh - m) top = Math.max(m, vh - h - m);
+    let left = Math.max(POV_SAFE_X, Math.min(rect.left, vw - W - m)) + off;
+    if (left + W > vw - m) left = Math.max(POV_SAFE_X, vw - W - m);
+    setPos({ top, left });
+  }, [rect, depth]);
+  return (
+    <div ref={ref} className="md-agepov" style={{ top: pos.top, left: pos.left }} role="dialog">
+      <div className="md-agepovhead"><span>Age {ageGroup}</span><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-agepovlist">
+        {roster.length ? roster.map((s) => (
+          <button key={s.id} className="md-agepovrow" onClick={(e) => onPick(s.id, e.currentTarget)}>
+            <span className="md-agepovteam" style={{ background: teamColor(s.team) }}>{s.team}</span>
+            <span>{s.name}</span>
+          </button>
+        )) : <div className="md-prevempty">No one else in this age group in the loaded meet.</div>}
+      </div>
+    </div>
+  );
+}
+
+// Every entry currently flagged DQ with the reason still pending — feeds the
+// non-blocking Finalize DQs panel so reasons can be filled in once the paper
+// DQ slips come in, without having to remember which lane/heat each was in.
+function pendingDqList(events, data) {
+  const out = [];
+  events.forEach((ev, evIdx) => ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => {
+    const id = entryId(evIdx, htIdx, l.lane), d = data[id] || {};
+    if (!isPendingDq(d)) return;
+    const pend = (d.dqs || []).find((q) => q.code === PEND_DQ_CODE);
+    out.push({ id, eventName: ev.name, heatNum: ht.num, lane: l.lane, name: (pend && pend.swimmer) || l.name, team: l.team, swimmer: pend && pend.swimmer });
+  })));
+  return out;
+}
+
+function DQModal({ info, dqs, swimmer, ns, onClose, onClear, onToggle, onNoShow }) {
   const age = info.sw.age;
   useEffect(() => { const h = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose]);
   return (
@@ -2184,11 +2460,32 @@ function DQModal({ info, dqs, swimmer, onClose, onClear, onToggle }) {
         <div className="md-mhead"><div><div className="md-mtitle">Record DQ — select all that apply</div><div className="md-msub">{swimmer ? `${swimmer} (relay) · ` : ""}{info.sw.name} · {info.sw.team}{age > 0 ? ` · age ${age}` : ""} · {shortEvent(info.eventName)} · Lane {info.ln}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         {age > 0 && age <= 6 && <div className="md-warn red">🚩 <b>6 &amp; under — CHALLENGE this DQ.</b> 6u swimmers should not be getting DQed. Talk to the referee before accepting; only record what was clearly and directly observed.</div>}
         {age >= 7 && age <= 8 && <div className="md-warn amber">⚠︎ <b>7–8 — review before accepting.</b> Double-check the call with the official; benefit of the doubt goes to the swimmer.</div>}
+        {!swimmer && <button className={"md-nsbtn" + (ns ? " on" : "")} style={{ marginBottom: 10 }} onClick={onNoShow}>{ns ? "NS — no-show" : "No-show (NS) instead of a DQ"}</button>}
         <div className="md-codes">{Object.entries(DQ_CODES).map(([group, codes]) => (<div key={group} className="md-cgroup"><div className="md-cglabel">{group}</div><div className="md-cgrid">{codes.map(([code, reason]) => { const on = dqs.some((q) => q.code === code); return <button key={code} className={"md-code" + (on ? " on" : "")} onClick={() => onToggle(group, code, reason)} title={reason}><span className="md-ccode">{code}</span><span className="md-creason">{reason}</span></button>; })}</div></div>))}</div>
         <div className="md-mfoot">
           {dqs.length > 0 && <button className="md-clear" onClick={onClear}>Clear all ({dqs.length})</button>}
           <button className="md-apply" onClick={onClose}>Done{dqs.length ? ` — ${dqs.length} selected` : ""}</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Floating, non-blocking review list of every DQ still marked "reason
+// pending" — deliberately NOT a full-screen modal so On Deck / In The Water /
+// Previous stay visible and usable while going through the paper DQ slips.
+function FinalizeDqsPanel({ list, onClose, onPick }) {
+  return (
+    <div className="md-finalizepanel" role="dialog">
+      <div className="md-agepovhead"><span>🚩 Finalize DQs {list.length ? `(${list.length})` : ""}</span><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-agepovlist">
+        {list.length ? list.map((row) => (
+          <button key={row.id + (row.swimmer || "")} className="md-agepovrow" onClick={(e) => onPick(row, e.currentTarget)}>
+            <span className="md-agepovteam" style={{ background: teamColor(row.team) }}>{row.team}</span>
+            <span>{row.name}</span>
+            <span className="md-finalizemeta">{shortEvent(row.eventName)} · H{row.heatNum} · L{row.lane}</span>
+          </button>
+        )) : <div className="md-prevempty">No DQs waiting on a reason.</div>}
       </div>
     </div>
   );
@@ -2246,6 +2543,11 @@ html, body, #root { height: 100%; }
 .md-root { --ink:#0a1628; --line:#1e3a5f; --cyan:#22d3ee; --muted:#7d93b0; --text:#e8f0fb; --sheet:#f4f7fb; --card:#fff; --sline:#e2e8f0; --sink:#0f2036; --dq:#ef4444; --amber:#f59e0b; --green:#10b981; --rec:#e0b400;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color:var(--sink); background:var(--sheet); height:100vh; display:flex; flex-direction:column; overflow:hidden; -webkit-font-smoothing:antialiased; }
 .md-lanenum,.md-timein,.md-timeout,.md-stime,.md-tspts,.md-restime { font-variant-numeric:tabular-nums; }
+.md-loginwrap { align-items:center; justify-content:center; padding:20px; }
+.md-loginbox { width:100%; max-width:340px; display:flex; flex-direction:column; gap:12px; background:var(--card); border-radius:16px; padding:26px; box-shadow:0 24px 60px -14px rgba(6,14,28,.35); }
+.md-loginlogo { font-size:22px; font-weight:800; }
+.md-loginsub { font-size:13px; color:#64748b; margin-bottom:4px; }
+.md-loginerr { font-size:12.5px; font-weight:700; color:var(--dq); }
 .md-top { display:flex; align-items:center; gap:14px; padding:8px 14px; background:var(--ink); color:var(--text); border-bottom:1px solid var(--line); flex:none; }
 .md-logowrap { position:relative; flex:none; }
 .md-logo { width:40px; height:40px; display:grid; place-items:center; font-size:25px; color:var(--ink); background:var(--cyan); border:none; border-radius:11px; font-weight:800; cursor:pointer; }
@@ -2260,6 +2562,8 @@ html, body, #root { height: 100%; }
 .md-mbtn { text-align:left; padding:10px 12px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:13.5px; cursor:pointer; color:var(--sink); }
 .md-mbtn.danger { border-color:#fecaca; color:#b42318; } .md-mbtn.danger:hover { background:#fef2f2; }
 .md-mbtn:hover { background:#f1f5f9; } .md-mbtn.primary { background:var(--cyan); border-color:var(--cyan); color:#062a33; }
+.md-mbtn.sm { padding:6px 10px; font-size:12px; }
+.md-acctrow { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:12.5px; color:#64748b; }
 .md-strip { display:flex; align-items:center; gap:8px; flex-wrap:wrap; overflow-x:auto; }
 .md-strip.dual { gap:14px; }
 .md-tscore { display:inline-flex; align-items:center; gap:6px; background:#0c1c33; border:1px solid var(--line); border-radius:10px; padding:5px 10px; }
@@ -2297,6 +2601,11 @@ html, body, #root { height: 100%; }
 .md-laneid { display:flex; flex-direction:column; min-width:0; line-height:1.15; }
 .md-laneswimmer { font-weight:700; font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; gap:5px; }
 .md-laneteam { font-size:9.5px; font-weight:700; }
+.md-splitrow2 { display:flex; gap:3px; margin-top:3px; }
+.md-splitbox { width:38px; height:20px; border-radius:5px; border:1px solid var(--line); background:#0a1628; color:var(--text); font-size:10px; padding:0 4px; text-align:center; }
+.md-splitboxrow { display:flex; gap:6px; margin:2px 0 8px; }
+.md-splitbox.lg { width:auto; flex:1; height:32px; border-radius:8px; border:1px solid var(--sline); background:#fff; color:var(--sink); font-size:13px; text-align:center; }
+.md-tapbadge { background:#123049; color:var(--cyan); border:1px solid #1d5a78; font-size:9.5px; font-weight:800; padding:1px 6px; border-radius:6px; }
 .md-lanemarks { display:flex; align-items:center; gap:4px; }
 .md-place { background:#0b3a55; color:var(--cyan); border:1px solid #12557a; font-size:9.5px; font-weight:800; padding:1px 5px; border-radius:5px; }
 .md-br { background:var(--rec); color:#3a2e00; font-size:9px; font-weight:900; padding:1px 4px; border-radius:4px; font-style:normal; }
@@ -2407,17 +2716,24 @@ html, body, #root { height: 100%; }
 
 .md-povscrim { position:fixed; inset:0; z-index:60; }
 .md-pov { position:fixed; z-index:61; width:320px; max-height:74vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:12px; }
-.md-caret { position:absolute; top:-8px; width:16px; height:16px; background:#fff; border-left:1px solid var(--sline); border-top:1px solid var(--sline); transform:rotate(45deg); }
-.md-pov.above .md-caret { top:auto; bottom:-8px; transform:rotate(225deg); }
 .md-povhead { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:10px; }
 .md-povname { font-weight:800; font-size:16px; display:flex; align-items:center; gap:7px; }
 .md-agechip { background:#eef4fb; color:#33608a; font-size:11px; font-weight:800; padding:2px 7px; border-radius:16px; cursor:pointer; }
 .md-agechip:hover { background:#dbeafe; }
-.md-povnamelink { cursor:pointer; text-decoration:underline; text-decoration-color:transparent; transition:text-decoration-color .12s; } .md-povnamelink:hover { text-decoration-color:currentColor; }
 .md-povmeta { font-size:12px; color:#64748b; margin-top:1px; }
+.md-agepov { position:fixed; z-index:61; width:260px; max-height:60vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:10px; }
+.md-agepovhead { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; font-weight:800; font-size:13.5px; }
+.md-agepovlist { display:flex; flex-direction:column; gap:2px; }
+.md-agepovrow { display:flex; align-items:center; gap:8px; padding:6px 7px; border-radius:8px; border:none; background:none; text-align:left; font-size:13px; font-weight:700; cursor:pointer; color:var(--sink); }
+.md-agepovrow:hover { background:#f1f5f9; }
+.md-agepovteam { font-size:10.5px; font-weight:800; padding:1px 6px; border-radius:10px; color:#fff; }
+.md-finalizepanel { position:fixed; z-index:55; top:64px; right:14px; width:290px; max-height:70vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:10px; }
+.md-finalizepanel .md-agepovrow { flex-direction:column; align-items:flex-start; gap:1px; }
+.md-finalizemeta { font-size:10.5px; font-weight:600; color:#94a3b8; }
 .md-x { width:34px; height:34px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-size:15px; cursor:pointer; flex:none; } .md-x.sm { width:28px; height:28px; font-size:13px; } .md-x:hover { background:#f1f5f9; }
 .md-dq { width:100%; padding:12px; border-radius:11px; border:2px solid var(--dq); background:#fff; color:var(--dq); font-weight:800; font-size:14px; cursor:pointer; margin-bottom:10px; text-align:left; line-height:1.3; }
 .md-dq:hover { background:#fef2f2; } .md-dq.on { background:var(--dq); color:#fff; }
+.md-dq.pend { border-color:var(--amber); color:#92600a; background:#fff7e6; }
 .md-povtags { display:flex; flex-direction:column; gap:6px; }
 .md-catbtn { width:100%; display:flex; align-items:center; gap:9px; padding:10px 11px; border-radius:10px; border:1.5px solid var(--sline); background:#fff; font-weight:700; font-size:13.5px; color:#334155; cursor:pointer; }
 .md-catbtn:hover { border-color:#94a3b8; } .md-catbtn.has { background:#fbfdff; }
@@ -2491,9 +2807,7 @@ html, body, #root { height: 100%; }
 .md-splitteam { font-weight:800; font-size:13px; flex:1; }
 .md-splittime { width:70px; height:28px; text-align:center; border-radius:7px; border:1px solid var(--line); background:#0a1628; color:var(--cyan); font-weight:700; font-size:12.5px; }
 .md-legs { display:flex; flex-direction:column; gap:3px; }
-.md-leg { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:8px; border:1px solid transparent; background:#0a1628; color:var(--muted); opacity:.55; }
-.md-leg.done { opacity:.8; } .md-leg.cur { opacity:1; background:#102b47; border-color:var(--cyan); color:var(--text); }
-.md-legsel { flex:1; display:flex; align-items:center; gap:8px; background:none; border:none; color:inherit; cursor:pointer; text-align:left; padding:0; }
+.md-leg { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:8px; border:1px solid transparent; background:#0a1628; color:var(--text); }
 .md-legnote { flex:none; width:24px; height:24px; border-radius:6px; border:1px solid var(--line); background:#0c1c33; color:var(--cyan); font-size:12px; cursor:pointer; }
 .md-legnote:hover { border-color:var(--cyan); }
 .md-mixtag { font-size:12px; font-weight:800; color:#7c3aed; background:#f3e8ff; border:1px solid #ddd6fe; padding:6px 12px; border-radius:9px; }
@@ -2501,11 +2815,9 @@ html, body, #root { height: 100%; }
 .md-gtick.girls { background:#ec4899; } .md-gtick.boys { background:#3b82f6; }
 .md-ttlabel { font-weight:800; font-size:14px; color:var(--cyan); }
 .md-legnum { width:18px; height:18px; display:grid; place-items:center; font-size:10px; font-weight:800; border-radius:5px; background:#0c1c33; border:1px solid var(--line); flex:none; }
-.md-leg.cur .md-legname { font-size:14px; font-weight:800; } .md-legname { font-size:12px; font-weight:600; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.md-legsplit { font-size:11px; font-weight:800; color:var(--cyan); font-variant-numeric:tabular-nums; }
-.md-splitrow { display:flex; gap:6px; margin-top:8px; }
-.md-nextleg { flex:none; padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:#0e2c3a; color:var(--cyan); font-weight:800; font-size:11.5px; cursor:pointer; }
-.md-splitin { flex:1; height:30px; border-radius:8px; border:1px solid var(--line); background:#0a1628; color:var(--text); padding:0 9px; font-size:12.5px; }
+.md-legname { font-size:12px; font-weight:600; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-nextleg { flex:none; width:100%; margin-top:8px; padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#0e2c3a; color:var(--cyan); font-weight:800; font-size:12px; cursor:pointer; }
+.md-nextleg.tap { background:var(--cyan); color:#062a33; border-color:var(--cyan); }
 
 .md-teamsel { display:flex; gap:5px; flex-wrap:wrap; margin-left:auto; }
 .md-teamchip { padding:5px 10px; border-radius:16px; border:1.5px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:12px; cursor:pointer; }
@@ -2652,7 +2964,7 @@ html, body, #root { height: 100%; }
 .md-panel.water.prestart { flex:none; max-height:118px; overflow:hidden; }
 .md-allstrip { display:flex; align-items:stretch; gap:3px; padding:5px; height:100%; overflow:hidden; }
 .md-odcard.allfit { padding:6px 6px; }
-.md-odcard.allfit .md-odcname, .md-odcard.allfit .md-odcteam { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-odcard.allfit .md-odcname, .md-odcard.allfit .md-odcteam { white-space:nowrap; overflow:hidden; text-overflow:clip; }
 .md-waiting { font-style:normal; color:var(--muted); font-weight:700; }
 .md-prestartbox { padding:12px; display:flex; flex-direction:column; gap:10px; }
 .md-startbtn { padding:14px; border-radius:12px; border:none; background:var(--cyan); color:#062a33; font-weight:900; font-size:16px; cursor:pointer; letter-spacing:.02em; }
