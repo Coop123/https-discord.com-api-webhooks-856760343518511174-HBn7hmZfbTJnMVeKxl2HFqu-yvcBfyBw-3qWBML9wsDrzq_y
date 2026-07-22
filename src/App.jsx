@@ -2438,7 +2438,7 @@ function LoginScreen({ onLogin, error }) {
       <form className="md-loginbox" onSubmit={submit}>
         <div className="md-loginlogo">≈ MeetDeck</div>
         <div className="md-loginsub">Sign in to load your team's meets &amp; season data.</div>
-        <label className="md-mrow">Username<input value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" placeholder="Coach-Cooper" /></label>
+        <label className="md-mrow">Username<input value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" placeholder="username" /></label>
         <label className="md-mrow">Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
         {error && <div className="md-loginerr">{error}</div>}
         <button className="md-apply" type="submit">Log in</button>
