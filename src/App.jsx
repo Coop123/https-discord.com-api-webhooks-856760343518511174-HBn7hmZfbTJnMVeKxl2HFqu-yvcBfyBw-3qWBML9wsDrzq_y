@@ -1356,41 +1356,66 @@ function simulateRelayField(projected, iters = 3000) {
   const out = {}; projected.forEach((r) => (out[r.team] = wins[r.team] / iters)); return out;
 }
 
-// Drag-and-drop lineup editor for one team's relay: 4 leg slots plus a bench
-// of the rest of the team's roster. Drop a bench chip onto a leg to swap
-// them in; drop a leg chip onto another leg to swap the two swimmers'
-// positions. Built on Pointer Events (not native HTML5 drag-and-drop, which
-// iOS/iPadOS Safari doesn't support for touch) with setPointerCapture so the
-// gesture keeps tracking the finger/cursor regardless of what's underneath;
-// the actual drop target is resolved via elementFromPoint since captured
-// pointers don't fire hover/enter events on other elements.
-function RelayLegDragBoard({ legs, bench, relayType, onAssign }) {
+// Drag-and-drop (or tap-to-select, tap-to-move) lineup editor for one team's
+// relay: 4 leg slots plus a bench of the rest of the team's roster. Drop a
+// bench chip onto a leg to swap them in; drop a leg chip onto another leg to
+// swap the two swimmers' positions. Built on Pointer Events (not native
+// HTML5 drag-and-drop, which iOS/iPadOS Safari doesn't support for touch)
+// with setPointerCapture so the gesture keeps tracking the finger/cursor
+// regardless of what's underneath; the actual drop target is resolved via
+// elementFromPoint since captured pointers don't fire hover/enter events on
+// other elements. A tap that barely moves is treated as select-then-move
+// instead of a drag, for coaches who find two taps easier than a drag.
+function RelayLegDragBoard({ legs, bench, relayType, mixed, doubleANames, doubleASeverity, onAssign }) {
   const dragRef = useRef(null);
   const [overLeg, setOverLeg] = useState(null);
   const [draggingName, setDraggingName] = useState(null);
+  const [selected, setSelected] = useState(null); // tap-to-select: { name, source, legIdx }
+  const [benchFilter, setBenchFilter] = useState("All");
+  const TAP_SLOP = 6; // px of movement below which a gesture counts as a tap, not a drag
   const legAt = (x, y) => { const el = document.elementFromPoint(x, y); const slot = el && el.closest && el.closest("[data-leg-idx]"); return slot ? Number(slot.getAttribute("data-leg-idx")) : null; };
-  const onDown = (e, name, source, legIdx) => { dragRef.current = { name, source, legIdx }; setDraggingName(name); e.currentTarget.setPointerCapture(e.pointerId); e.preventDefault(); };
-  const onMove = (e) => { if (!dragRef.current) return; setOverLeg(legAt(e.clientX, e.clientY)); };
-  const endDrag = (e) => { if (!dragRef.current) return; const idx = legAt(e.clientX, e.clientY); if (idx != null) onAssign(dragRef.current, idx); dragRef.current = null; setDraggingName(null); setOverLeg(null); };
+  const isSame = (a, b) => !!a && !!b && a.name === b.name && a.source === b.source && a.legIdx === b.legIdx;
+  const onDown = (e, name, source, legIdx) => { dragRef.current = { name, source, legIdx, x0: e.clientX, y0: e.clientY, moved: false }; setDraggingName(name); e.currentTarget.setPointerCapture(e.pointerId); e.preventDefault(); };
+  const onMove = (e) => { if (!dragRef.current) return; if (Math.hypot(e.clientX - dragRef.current.x0, e.clientY - dragRef.current.y0) > TAP_SLOP) dragRef.current.moved = true; setOverLeg(legAt(e.clientX, e.clientY)); };
+  const endDrag = (e) => {
+    if (!dragRef.current) return;
+    const cur = dragRef.current; dragRef.current = null; setDraggingName(null); setOverLeg(null);
+    if (cur.moved) { const idx = legAt(e.clientX, e.clientY); if (idx != null) onAssign({ name: cur.name, source: cur.source, legIdx: cur.legIdx }, idx); setSelected(null); return; }
+    // Tap (negligible movement): first tap selects, second tap on a leg moves
+    // the selection there, tapping the same chip again deselects, and
+    // tapping a different bench chip just re-selects that one instead.
+    const tapped = { name: cur.name, source: cur.source, legIdx: cur.legIdx };
+    if (!selected) { setSelected(tapped); return; }
+    if (isSame(selected, tapped)) { setSelected(null); return; }
+    if (tapped.legIdx != null) { onAssign(selected, tapped.legIdx); setSelected(null); return; }
+    setSelected(tapped);
+  };
+  const doubleACls = (name) => doubleANames && doubleANames.includes(name) ? " doubleA-" + doubleASeverity : "";
   const chip = (name, age, gender, source, legIdx, cls) => (
-    <button key={name} type="button" className={"md-rbchip" + (cls ? " " + cls : "") + (draggingName === name ? " dragging" : "")} style={{ touchAction: "none" }}
+    <button key={name} type="button" className={"md-rbchip" + (cls ? " " + cls : "") + (draggingName === name ? " dragging" : "") + (isSame(selected, { name, source, legIdx }) ? " selected" : "") + doubleACls(name)} style={{ touchAction: "none" }}
       onPointerDown={(e) => onDown(e, name, source, legIdx)} onPointerMove={onMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
       {gender && <em className={"md-gtick " + gender.toLowerCase()}>{gender[0]}</em>}{name}{age ? ` (${age})` : ""}
     </button>
   );
+  const shownBench = mixed && benchFilter !== "All" ? bench.filter((c) => c.gender === benchFilter) : bench;
   return (
     <div className="md-rbdrag">
       <div className="md-rbdraglegs">
         {legs.map((l, i) => (
-          <div key={i} data-leg-idx={i} className={"md-rbdragleg" + (overLeg === i ? " over" : "")}>
+          <div key={i} data-leg-idx={i} className={"md-rbdragleg" + (overLeg === i ? " over" : "") + (selected ? " selectable" : "")}>
             {relayType === "Medley" && <span className="md-rbeditstroke">{l.stroke}</span>}
             {chip(l.name, l.age, l.gender, "leg", i)}
           </div>
         ))}
       </div>
-      <div className="md-rbbenchlabel">Drag a name onto a leg to swap it in — drag between legs to swap positions</div>
+      <div className="md-rbbenchlabel">Drag a name onto a leg — or tap a name, then tap the leg to move them there</div>
+      {mixed && (
+        <div className="md-rbbenchfilter">
+          {["All", "Girls", "Boys"].map((g) => <button key={g} type="button" className={"md-rbfilterbtn" + (benchFilter === g ? " on" : "")} onClick={() => setBenchFilter(g)}>{g}</button>)}
+        </div>
+      )}
       <div className="md-rbbench">
-        {bench.length ? bench.map((c) => chip(c.name, c.age, c.gender, "bench", null, "bench")) : <span className="md-rbbenchempty">No one else on the roster for this age group.</span>}
+        {shownBench.length ? shownBench.map((c) => chip(c.name, c.age, c.gender, "bench", null, "bench")) : <span className="md-rbbenchempty">No one else on the roster for this age group{mixed && benchFilter !== "All" ? " (" + benchFilter.toLowerCase() + ")" : ""}.</span>}
       </div>
     </div>
   );
@@ -1452,6 +1477,11 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
         </div>
         <div className="md-rblist">
           {projected.length ? projected.map((r, i) => { const key = keyFor(r.team); const isLocked = !!locked[key]; const hasOverride = overrides[key] && overrides[key].some(Boolean); const roster = editing === r.team ? rosterFor(r.team) : [];
+            const excluded = excludeByTeam(r.team); // this team's other-type A relay, locked in — those 4 aren't eligible here
+            const otherLocked = locked[keyFor(r.team, otherType)];
+            const depth = seasonRoster(meets, r.team).filter((c) => ageGroupOf(c.age) === ag).length;
+            const doubleANames = otherLocked ? r.legs.filter((l) => otherLocked.swimmers.some((s) => s.name === l.name)).map((l) => l.name) : [];
+            const doubleASeverity = depth < 8 ? "yellow" : "red";
             return (
             <div key={r.team} className={"md-rbteam" + (r.team === homeTeam ? " mine" : "") + (isLocked ? " locked" : "")}>
               <div className="md-rbhead"><span className="md-rbrank">{i + 1}</span><span className="md-rbteamname" style={{ color: teamColor(r.team) }}>{r.team}</span>
@@ -1464,14 +1494,17 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
                 <div className="md-rbeditgrid">
                   <RelayLegDragBoard
                     legs={r.legs}
-                    bench={roster.filter((c) => !r.legs.some((l) => l.name === c.name)).map((c) => ({ ...c, gender: genderMap[c.name + "|" + r.team] }))}
+                    bench={roster.filter((c) => !r.legs.some((l) => l.name === c.name) && (!excluded || !excluded.has(c.name))).map((c) => ({ ...c, gender: genderMap[c.name + "|" + r.team] }))}
                     relayType={relayType}
+                    mixed={mixed}
+                    doubleANames={doubleANames}
+                    doubleASeverity={doubleASeverity}
                     onAssign={(drag, targetIdx) => onAssign(r, drag, targetIdx)}
                   />
                   {hasOverride && <button className="md-rbreset" onClick={() => setOverrides((o) => ({ ...o, [key]: null }))}>↺ Reset to auto-picked</button>}
                 </div>
               ) : (
-                <div className="md-rbswimmers">{r.legs.map((l, j) => <span key={j} className="md-rbswim">{l.gender ? <em className={"md-gtick " + l.gender.toLowerCase()}>{l.gender[0]}</em> : null}{relayType === "Medley" && <b className="md-rbstroke">{l.stroke} </b>}{l.name} <em>{fmtT(l.likely)}</em></span>)}</div>
+                <div className="md-rbswimmers">{r.legs.map((l, j) => <span key={j} className={"md-rbswim" + (doubleANames.includes(l.name) ? " doubleA-" + doubleASeverity : "")}>{l.gender ? <em className={"md-gtick " + l.gender.toLowerCase()}>{l.gender[0]}</em> : null}{relayType === "Medley" && <b className="md-rbstroke">{l.stroke} </b>}{l.name} <em>{fmtT(l.likely)}</em></span>)}</div>
               )}
               <div className="md-rbprob"><div className="md-rbprobbar"><div className="md-rbprobfill" style={{ width: ((winProb[r.team] || 0) * 100).toFixed(0) + "%" }} /></div><span className="md-rbprobval">{((winProb[r.team] || 0) * 100).toFixed(0)}%</span></div>
             </div>
@@ -2902,6 +2935,8 @@ html, body, #root { height: 100%; }
 .md-rbgap { font-size:11px; font-weight:800; color:#b42318; }
 .md-rbswimmers { display:flex; flex-wrap:wrap; gap:6px 12px; }
 .md-rbswim { font-size:12px; color:#475569; font-weight:600; } .md-rbswim em { color:#94a3b8; font-style:normal; font-variant-numeric:tabular-nums; }
+.md-rbswim.doubleA-red { color:#b42318; font-weight:800; } .md-rbswim.doubleA-red em { color:#b42318; }
+.md-rbswim.doubleA-yellow { color:#92600a; font-weight:800; } .md-rbswim.doubleA-yellow em { color:#92600a; }
 .md-rbstroke { color:#0e7490; font-weight:800; margin-right:2px; }
 .md-rbproj { font-size:11px; color:#0e7490; font-weight:700; margin-left:4px; }
 .md-rbtabs { display:flex; gap:4px; background:#f1f5f9; border-radius:9px; padding:3px; }
@@ -2916,10 +2951,17 @@ html, body, #root { height: 100%; }
 .md-rbdraglegs { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; margin-bottom:10px; }
 .md-rbdragleg { border:2px dashed transparent; border-radius:9px; padding:2px; transition:border-color .1s; }
 .md-rbdragleg.over { border-color:#0e7490; background:#ecfeff; }
+.md-rbdragleg.selectable { border-color:#cbd5e1; }
 .md-rbchip { width:100%; display:flex; align-items:center; gap:5px; padding:8px 10px; border-radius:8px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:12.5px; color:var(--sink); cursor:grab; user-select:none; }
 .md-rbchip:active, .md-rbchip.dragging { cursor:grabbing; opacity:.45; box-shadow:0 4px 10px rgba(0,0,0,.15); }
 .md-rbchip.bench { background:#fff; border-style:dashed; color:#475569; font-weight:600; }
+.md-rbchip.selected { border-color:#0e7490; border-width:2px; box-shadow:0 0 0 2px #ecfeff; }
+.md-rbchip.doubleA-red { background:#fef2f2; border-color:#fecaca; color:#b42318; }
+.md-rbchip.doubleA-yellow { background:#fffbeb; border-color:#fde68a; color:#92600a; }
 .md-rbbenchlabel { font-size:10.5px; color:#94a3b8; font-weight:700; margin-bottom:6px; }
+.md-rbbenchfilter { display:flex; gap:5px; margin-bottom:8px; }
+.md-rbfilterbtn { padding:4px 10px; border-radius:14px; border:1.5px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:11px; cursor:pointer; }
+.md-rbfilterbtn.on { background:var(--sink); border-color:var(--sink); color:#fff; }
 .md-rbbench { display:flex; flex-wrap:wrap; gap:6px; }
 .md-rbbenchempty { font-size:12px; color:#94a3b8; }
 .md-rbprob { display:flex; align-items:center; gap:8px; margin-top:6px; }
