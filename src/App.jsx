@@ -226,12 +226,33 @@ function seasonGenderMap(meets) {
 }
 // Best known time for a swimmer in a stroke category across a set of meets
 // (final if swum, else seed) — the season-wide counterpart to bestStrokeSeed.
+// Also checks their recorded relay-leg splits in that stroke (see
+// swimmerRelaySplitBest below), since a fast split is real evidence of pace
+// even when they haven't swum that stroke as an individual event.
 function seasonBestStroke(meets, name, team, cat) {
   let best = Infinity;
   meets.forEach((m) => (m.events || []).forEach((ev, ei) => { if (isRelayEvent(ev.name) || categorize(ev.name) !== cat) return;
     ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (l.name !== name || l.team !== team) return;
       const d = (m.data || {})[entryId(ei, hi, l.lane)] || {}; const t = toSeconds(d.time), s = toSeconds(l.seed), v = !isNaN(t) ? t : s;
       if (!isNaN(v) && v < best) best = v; })); }));
+  const splitBest = swimmerRelaySplitBest(meets, name, team, cat);
+  if (splitBest != null && splitBest < best) best = splitBest;
+  return isFinite(best) ? best : null;
+}
+// A swimmer's best split time in a stroke, pulled from relay legs they've
+// actually swum — free relay legs are always Free, medley legs map by
+// position (MEDLEY_LEGS). Lets relay leg-time estimates (and the season-best
+// lookup above) draw on real race splits, not just individual-event times.
+function swimmerRelaySplitBest(meets, name, team, stroke) {
+  let best = Infinity;
+  meets.forEach((m) => (m.events || []).forEach((ev, ei) => { if (!isRelayEvent(ev.name)) return;
+    const isMedley = /medley/i.test(ev.name);
+    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (!l.swimmers || l.team !== team) return;
+      l.swimmers.forEach((s, leg) => { if (s.name !== name) return;
+        const legStroke = isMedley ? (MEDLEY_LEGS[leg] || "Free") : "Free";
+        if (legStroke !== stroke) return;
+        const d = (m.data || {})[entryId(ei, hi, l.lane)] || {}; const sp = toSeconds((d.splits || [])[leg]);
+        if (!isNaN(sp) && sp < best) best = sp; }); })); }));
   return isFinite(best) ? best : null;
 }
 // 15-18 has no individual 50 free on the program — only 100 free — and 15-18
@@ -242,12 +263,8 @@ function seasonBestStroke(meets, name, team, cat) {
 // a swimmer with little or no improvement history. Prefers an actual
 // recorded relay split from a "Relay splits" entry, when there is one.
 function estimate1518Free50(meets, name, team, gender) {
-  let splitBest = Infinity;
-  meets.forEach((m) => (m.events || []).forEach((ev, ei) => { if (!isRelayEvent(ev.name) || !/free/i.test(ev.name)) return;
-    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (!l.swimmers || l.team !== team) return;
-      l.swimmers.forEach((s, leg) => { if (s.name !== name) return;
-        const d = (m.data || {})[entryId(ei, hi, l.lane)] || {}; const sp = toSeconds((d.splits || [])[leg]);
-        if (!isNaN(sp) && sp < splitBest) splitBest = sp; }); })); }));
+  const splitBestRaw = swimmerRelaySplitBest(meets, name, team, "Free");
+  const splitBest = splitBestRaw != null ? splitBestRaw : Infinity;
   let hundredBest = Infinity;
   meets.forEach((m) => (m.events || []).forEach((ev, ei) => { if (isRelayEvent(ev.name) || categorize(ev.name) !== "Free" || !/\b100\b/.test(ev.name)) return;
     ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (l.name !== name || l.team !== team) return;
@@ -464,8 +481,8 @@ function RaceClockDisplay({ startedAt, stopped }) {
 
 // Relay splits — floating (not full-screen). One card per relay lane, in lane
 // order, with the four legs vertical, current leg highlighted, split entry.
-function RelaySplitsPanel({ heat, evIdx, htIdx, data, homeTeam, onClose, update, get, openPop, clockActive }) {
-  const relays = heat.lanes.filter((l) => l.swimmers && l.team === homeTeam).sort((a, b) => a.lane - b.lane);
+function RelaySplitsPanel({ heat, evIdx, htIdx, scopeLane, data, homeTeam, onClose, update, get, openPop, clockActive }) {
+  const relays = heat.lanes.filter((l) => l.swimmers && l.team === homeTeam && (scopeLane == null || l.lane === scopeLane)).sort((a, b) => a.lane - b.lane);
   const relayTap = (id, splits) => { if (!clockActive) return;
     const leg = splits.length, elapsedSec = (Date.now() - clockActive.startedAt) / 1000;
     const prevCum = splits.reduce((s, x) => s + (toSeconds(x) || 0), 0);
@@ -482,13 +499,13 @@ function RelaySplitsPanel({ heat, evIdx, htIdx, data, homeTeam, onClose, update,
             return (
               <div key={l.lane} className={"md-splitcard" + (l.team === homeTeam ? " mine" : "")}>
                 <div className="md-splitcardhead"><span className="md-splitlane">L{l.lane}</span><span className="md-splitteam" style={{ color: teamColor(l.team) }}>{l.team} {l.relay}</span>
-                  <input className="md-splittime" placeholder="––.––" value={d.time || ""} onChange={(e) => update(id, { time: e.target.value })} /></div>
+                  <input className="md-splittime" inputMode="decimal" placeholder="––.––" value={d.time || ""} onChange={(e) => update(id, { time: e.target.value })} /></div>
                 <div className="md-legs">
                   {l.swimmers.map((s, i) => (
                     <div key={i} className="md-leg">
                       <span className="md-legnum">{i + 1}</span>
                       <span className="md-legname">{s.name}{s.age ? ` (${s.age})` : ""}</span>
-                      <input className="md-splitbox" placeholder={`#${i + 1}`} value={splits[i] || ""} onChange={(e) => { const ns = splits.slice(); ns[i] = e.target.value; update(id, { splits: ns }); }} />
+                      <input className="md-splitbox" inputMode="decimal" placeholder={`#${i + 1}`} value={splits[i] || ""} onChange={(e) => { const ns = splits.slice(); ns[i] = e.target.value; update(id, { splits: ns }); }} />
                       <button className="md-legnote" title="Notes / tags" onClick={(e) => openPop(id + "#" + i, e.currentTarget)}>✎</button>
                     </div>
                   ))}
@@ -595,6 +612,18 @@ function swimmerStrokeTimes(name, team, cat, meets) {
     }));
   }));
   return out.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+}
+// The Progression display (unlike the projection math above, which wants
+// every known time including seeds-only) should only show swims that
+// actually happened, and never the same swim twice — which can otherwise
+// happen once a live meet gets saved into the season and both copies feed
+// the same progMeets list.
+function completedStrokeProgression(list) {
+  const seen = new Set(), out = [];
+  list.forEach((t) => { if (!t.final) return;
+    const key = t.ev + "|" + t.final + "|" + (t.seed || "");
+    if (seen.has(key)) return; seen.add(key); out.push(t); });
+  return out;
 }
 
 // Aggregate saved meets → per-swimmer season totals. Time-trial meets earn no
@@ -1019,7 +1048,7 @@ function swimsForMeet(name, team, meet) {
 // the person, not whatever League filter happens to be active.
 function computeSwimmerProfile(name, team, seasonMeets, liveMeet) {
   const sorted = [...(seasonMeets || [])].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-  const notes = [], dqs = [], improvements = [];
+  const notes = [], dqs = [], improvements = [], splits = [];
   let totalPts = 0, improveSum = 0, improveN = 0;
   sorted.forEach((m) => { const table = m.mode === "champs" ? CHAMPS : DUAL; const tt = m.mode === "timetrial"; const data = m.data || {};
     (m.events || []).forEach((ev, ei) => {
@@ -1029,12 +1058,17 @@ function computeSwimmerProfile(name, team, seasonMeets, liveMeet) {
           const id = entryId(ei, hi, l.lane) + "#" + leg; const d = data[id] || {};
           if (d.notes) notes.push({ note: d.notes, ev: shortEvent(ev.name), meet: m.meetName, date: m.date });
           (d.dqs || []).forEach((q) => dqs.push({ ...q, ev: shortEvent(ev.name), meet: m.meetName, date: m.date }));
+          // Splits belong to the swimmer, not just the relay entry, so they
+          // can surface on this profile and feed future relay leg estimates.
+          const relayData = data[entryId(ei, hi, l.lane)] || {}; const sp = (relayData.splits || [])[leg];
+          if (sp) splits.push({ split: sp, leg: leg + 1, stroke: /medley/i.test(ev.name) ? (MEDLEY_LEGS[leg] || "Free") : "Free", ev: shortEvent(ev.name), meet: m.meetName, date: m.date });
         }); return; }
         if (l.name !== name || l.team !== team) return;
         const id = entryId(ei, hi, l.lane); const d = data[id] || {};
         if (d.notes) notes.push({ note: d.notes, ev: shortEvent(ev.name), meet: m.meetName, date: m.date });
         (d.dqs || []).forEach((q) => dqs.push({ ...q, ev: shortEvent(ev.name), meet: m.meetName, date: m.date }));
         if (!tt && !isRelayEvent(ev.name)) { const p = placeOf[id]; if (p) totalPts += (table[p] || 0); }
+        (d.splits || []).forEach((sp, i) => { if (sp) splits.push({ split: sp, leg: i + 1, stroke: categorize(ev.name), ev: shortEvent(ev.name), meet: m.meetName, date: m.date }); });
         const fs = toSeconds(d.time), ss = toSeconds(l.seed);
         if (!isNaN(fs) && !isNaN(ss) && ss > 0) { const drop = ss - fs; improveSum += drop / ss; improveN++;
           if (drop > 0) improvements.push({ ev: shortEvent(ev.name), drop, seed: l.seed, time: d.time, meet: m.meetName, date: m.date }); }
@@ -1044,7 +1078,7 @@ function computeSwimmerProfile(name, team, seasonMeets, liveMeet) {
   improvements.sort((a, b) => b.drop - a.drop);
   const lastMeet = sorted[sorted.length - 1];
   return {
-    notes: notes.reverse(), dqs: dqs.reverse(), improvements: improvements.slice(0, 5),
+    notes: notes.reverse(), dqs: dqs.reverse(), improvements: improvements.slice(0, 5), splits: splits.reverse(),
     improvePct: improveN ? Math.round((improveSum / improveN) * 1000) / 10 : 0, totalPts,
     lastMeet, lastMeetSwims: lastMeet ? swimsForMeet(name, team, lastMeet) : [],
     upcomingSwims: liveMeet ? swimsForMeet(name, team, liveMeet) : [],
@@ -1142,6 +1176,12 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet }) {
             {prof.improvements.length ? prof.improvements.map((im, i) => (
               <div key={i} className="md-statrow"><span className="md-statname">{im.ev}</span><span className="md-statsub">{im.seed} → {im.time} · {im.meet}</span><span className="md-statval green">−{im.drop.toFixed(2)}</span></div>
             )) : <div className="md-prevempty">No improvements on record yet.</div>}
+          </div>
+          <div className="md-lgsection">
+            <div className="md-lgsectitle">⏱ Splits</div>
+            {prof.splits.length ? prof.splits.map((sp, i) => (
+              <div key={i} className="md-statrow"><span className="md-statname">{sp.ev}<em className="md-statage">leg {sp.leg} · {sp.stroke}</em></span><span className="md-statsub">{sp.meet}</span><span className="md-statval">{sp.split}</span></div>
+            )) : <div className="md-prevempty">No splits recorded yet.</div>}
           </div>
           <div className="md-lgsection">
             <div className="md-lgsectitle">📝 Notes</div>
@@ -1322,14 +1362,21 @@ function CompareBoard({ people, slots, onAssign, onSwap, onRemove }) {
   const [selected, setSelected] = useState(null); // { key, source, slotIdx }
   const [ageSel, setAgeSel] = useState([]);
   const [genderSel, setGenderSel] = useState([]);
+  // Team filter: circular multi-select, all teams on by default — click one
+  // off to hide it from the bank, same "turn off what you don't want" idea
+  // as the relay builder's team-compare toggles.
+  const allTeams = useMemo(() => [...new Set(people.map((p) => p.team))].sort(), [people]);
+  const [teamOff, setTeamOff] = useState([]);
+  const toggleTeamOff = (t) => setTeamOff((s) => s.includes(t) ? s.filter((x) => x !== t) : [...s, t]);
   const TAP_SLOP = 6;
   const keyOf = (name, team) => name + "|" + team;
   const availAges = useMemo(() => AGE_GROUPS.filter((g) => people.some((p) => ageGroupOf(p.age) === g)), [people]);
   const bank = useMemo(() => people.filter((p) =>
     (!ageSel.length || ageSel.includes(ageGroupOf(p.age))) &&
     (!genderSel.length || genderSel.includes(p.gender)) &&
+    !teamOff.includes(p.team) &&
     !slots.some((s) => s && s.name === p.name && s.team === p.team)
-  ), [people, ageSel, genderSel, slots]);
+  ), [people, ageSel, genderSel, teamOff, slots]);
   const toggleAge = (g) => setAgeSel((s) => s.includes(g) ? s.filter((x) => x !== g) : [...s, g]);
   const toggleGender = (g) => setGenderSel((s) => s.includes(g) ? s.filter((x) => x !== g) : [...s, g]);
 
@@ -1374,6 +1421,11 @@ function CompareBoard({ people, slots, onAssign, onSwap, onRemove }) {
         <div className="md-cmpbankfilters">
           <div className="md-cmpcheckgrp"><span className="md-cmpchecklabel">Gender</span>{["Girls", "Boys"].map((g) => <label key={g} className="md-cmpcheck"><input type="checkbox" checked={genderSel.includes(g)} onChange={() => toggleGender(g)} />{g}</label>)}</div>
           <div className="md-cmpcheckgrp"><span className="md-cmpchecklabel">Age</span>{availAges.length ? availAges.map((g) => <label key={g} className="md-cmpcheck"><input type="checkbox" checked={ageSel.includes(g)} onChange={() => toggleAge(g)} />{g}</label>) : <span className="md-cmpchecklabel">—</span>}</div>
+          <div className="md-cmpcheckgrp"><span className="md-cmpchecklabel">Teams</span>{allTeams.map((t) => (
+            <label key={t} className="md-cmpteamdot"><input type="checkbox" checked={!teamOff.includes(t)} onChange={() => toggleTeamOff(t)} />
+              <span className="md-cmpteamcircle" style={{ background: teamOff.includes(t) ? "#fff" : teamColor(t), borderColor: teamColor(t) }} />{t}
+            </label>
+          ))}</div>
         </div>
         <div className="md-rbbenchlabel">Drag a swimmer onto a slot — or tap a name, then tap the slot</div>
         <div className="md-rbbench md-cmpbanklist">
@@ -1682,6 +1734,12 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const setLeg = (team, legIdx, name) => { const key = keyFor(team); setOverrides((o) => { const cur = (o[key] || [null, null, null, null]).slice(); cur[legIdx] = name || null; return { ...o, [key]: cur }; });
     setLocked((l) => { if (!l[key]) return l; const { [key]: _, ...rest } = l; return rest; }); };
   const toggleLock = (r) => { const key = keyFor(r.team); setLocked((l) => { if (l[key]) { const { [key]: _, ...rest } = l; return rest; } return { ...l, [key]: r }; }); };
+  // Full revert: clears both manual leg overrides AND lock state for a team,
+  // back to whatever the builder auto-picks right now — unlike "Reset to
+  // auto-picked" (overrides only, while still editing), this undoes everything.
+  const revertTeam = (team) => { const key = keyFor(team);
+    setOverrides((o) => { if (!o[key]) return o; const { [key]: _, ...rest } = o; return rest; });
+    setLocked((l) => { if (!l[key]) return l; const { [key]: _, ...rest } = l; return rest; }); };
   const onAssign = (r, drag, targetIdx) => {
     if (drag.source === "leg") { if (drag.legIdx === targetIdx) return; setLeg(r.team, targetIdx, drag.name); setLeg(r.team, drag.legIdx, r.legs[targetIdx].name); }
     else setLeg(r.team, targetIdx, drag.name);
@@ -1700,6 +1758,7 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
           {rankIdx > 0 && <span className="md-rbgap">+{fmtT(r.projTotal - projected[0].projTotal)}</span>}
           <button className={"md-rblock" + (isLocked ? " on" : "")} onClick={() => toggleLock(r)}>{isLocked ? "🔒 Locked" : "🔓 Lock in"}</button>
           <button className={"md-rbedit" + (hasOverride ? " on" : "")} onClick={() => setEditing(editing === r.team ? null : r.team)}>✎ {editing === r.team ? "Done" : "Edit"}</button>
+          {(isLocked || hasOverride) && <button className="md-rbrevert" onClick={() => revertTeam(r.team)} title="Undo lock + edits, back to auto-picked">↺ Revert</button>}
         </div>
         {editing === r.team ? (
           <div className="md-rbeditgrid">
@@ -1892,7 +1951,11 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   const [ageStack, setAgeStack] = useState([]); // age-chip drill-down, stacked on top of `pop`
   const [odOpen, setOdOpen] = useState(true);
   const [prevOpen, setPrevOpen] = useState(true);
-  const [relaySplits, setRelaySplits] = useState(false);
+  // Relay splits popup scope: null (closed), or { evIdx, htIdx, lane }, where
+  // lane null means every home-team relay lane in that heat (the blue-dot /
+  // auto-open-on-start behavior) and a lane number scopes it to just the one
+  // relay entry tapped (which may be on-deck or previous, not just current).
+  const [relaySplitsScope, setRelaySplitsScope] = useState(null);
   const [startedHeats, setStartedHeats] = useState({});
   const [showFinalizeDqs, setShowFinalizeDqs] = useState(false);
   const autoFinalizeShown = useRef(false);
@@ -1932,9 +1995,27 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   // persisted): it only drives tap-to-lap while this heat is up, and resets
   // whenever Start is pressed again or the board moves to a different heat.
   const [raceClock, setRaceClock] = useState(null); // { key, startedAt }
-  const startRace = () => curKey && (setStartedHeats((s) => ({ ...s, [curKey]: true })), setRaceClock({ key: curKey, startedAt: Date.now() }));
+  const startRace = () => { if (!curKey) return; setStartedHeats((s) => ({ ...s, [curKey]: true })); setRaceClock({ key: curKey, startedAt: Date.now() }); if (current && isRelayEvent(current.eventName)) setRelaySplitsScope({ evIdx: current.evIdx, htIdx: current.htIdx, lane: null }); };
   const clockActive = raceClock && raceClock.key === curKey ? raceClock : null;
   useEffect(() => { setRaceClock((c) => (c && c.key === curKey ? c : null)); }, [curKey]);
+  // The heat the splits popup is currently scoped to — may not be `current`
+  // (a coach can tap a relay while it's still on-deck to preview it early).
+  const relaySplitsHeat = useMemo(() => relaySplitsScope ? flatHeats.find((f) => f.evIdx === relaySplitsScope.evIdx && f.htIdx === relaySplitsScope.htIdx) : null, [relaySplitsScope, flatHeats]);
+  // Auto-close it once every home-team relay entry it's scoped to has a
+  // finish time recorded — no manual close needed. Keyed only on `data` (via
+  // a ref for the rest) so reopening an already-finished heat's panel (blue
+  // dot, tapping the relay again) doesn't get instantly closed right back —
+  // this should only fire on an actual transition to "done", not every time
+  // the scope changes while the heat happens to already be complete.
+  const relaySplitsCloseCheck = useRef();
+  relaySplitsCloseCheck.current = () => {
+    if (!relaySplitsScope || !relaySplitsHeat || !isRelayEvent(relaySplitsHeat.eventName)) return;
+    const homeLanes = relaySplitsHeat.lanes.filter((l) => l.swimmers && l.team === homeTeam && (relaySplitsScope.lane == null || l.lane === relaySplitsScope.lane));
+    if (!homeLanes.length) return;
+    const allDone = homeLanes.every((l) => !!(data[entryId(relaySplitsScope.evIdx, relaySplitsScope.htIdx, l.lane)] || {}).time);
+    if (allDone) setRelaySplitsScope(null);
+  };
+  useEffect(() => { relaySplitsCloseCheck.current(); }, [data]);
   const recordLap = (id, eventName) => {
     if (!clockActive) return;
     const d = get(id); if (d.time) return;
@@ -2081,7 +2162,15 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     return { ei, hi, ln, evId: ev.id, eventName: ev.name, heatNum: ht.num, sw: lane }; }, [events]);
   const popInfo = useMemo(() => swimmerAt(pop?.id), [pop, swimmerAt]);
   const dqInfo = useMemo(() => swimmerAt(dqTarget), [dqTarget, swimmerAt]);
-  const openPop = (id, el) => { setPop({ id, rect: el.getBoundingClientRect() }); setAgeStack([]); };
+  // Tapping a home-team relay's own row (not a specific leg swimmer inside an
+  // already-open splits panel, which still wants the usual notes popover)
+  // opens the splits popup scoped to just that relay instead of the DQ/notes
+  // ActionPopover — splits are what a coach actually wants from a relay tap.
+  const openPop = (id, el) => {
+    const info = swimmerAt(id);
+    if (info && info.leg === undefined && info.sw && info.sw.swimmers && info.sw.team === homeTeam) { setRelaySplitsScope({ evIdx: info.ei, htIdx: info.hi, lane: info.ln }); return; }
+    setPop({ id, rect: el.getBoundingClientRect() }); setAgeStack([]);
+  };
   // Shared renderer for the swimmer action popover, used both for the base
   // popover (opened from any lane on the board) and for each "swimmer" level
   // pushed onto ageStack by the age-chip drill-down, so every level has full
@@ -2090,7 +2179,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     const info = swimmerAt(id); if (!info) return null;
     const d = get(id);
     return (
-      <ActionPopover key={key} info={info} d={d} mine={info.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(info.eventName)} hideSplits={info.leg !== undefined} relaySwimmer={info.leg !== undefined} progMeets={progMeets} rect={rect} depth={depth} onClose={onCloseThis}
+      <ActionPopover key={key} info={info} d={d} mine={info.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(info.eventName)} hideSplits={info.leg !== undefined || !!info.sw.swimmers} relaySwimmer={info.leg !== undefined} progMeets={progMeets} rect={rect} depth={depth} onClose={onCloseThis}
         onDq={() => { setDqTarget(info.relayBase || id); setDqSwimmer(info.leg !== undefined ? info.sw.name : null); setDqNsTarget(id); setPop(null); setAgeStack([]); }}
         onDqQuick={() => toggleQuickDq(info.relayBase || id, info.leg !== undefined ? info.sw.name : null)}
         onToggle={(k) => toggleTag(id, k)} onSplits={(a) => update(id, { splits: a })} onNotes={(v) => update(id, { notes: v })} onNoShow={() => update(id, { noshow: !isNoShow(get(id)) })}
@@ -2154,7 +2243,8 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           </div>
 
           <div className={"md-panel water" + (isStarted ? " grow" : " prestart")}>
-            <div className="md-phead"><span className="md-eyebrow water-e">● In the water{!isStarted && <em className="md-waiting"> · ready</em>}</span>
+            <div className="md-phead"><span className="md-eyebrow water-e">● In the water{!isStarted && <em className="md-waiting"> · ready</em>}
+                {isRelayEvent(current?.eventName) && <button className="md-splitsdot" onClick={() => setRelaySplitsScope({ evIdx: current.evIdx, htIdx: current.htIdx, lane: null })} aria-label="Open relay splits for the whole team" title="Relay splits — whole team" />}</span>
               {isStarted
                 ? <button className="md-endrace" onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1} aria-label="Stop / end race" />
                 : <button className="md-startsq" onClick={startRace} aria-label="Start race">▶</button>}
@@ -2163,7 +2253,6 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
                 <button onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1}>›</button></span></div>
             {clockActive && <RaceClockDisplay startedAt={clockActive.startedAt} stopped={curHeatComplete} />}
             {isStarted ? (<>
-              {isRelayEvent(current?.eventName) && <button className="md-relaybtn" onClick={() => setRelaySplits(true)}>🏊 Relay splits & legs</button>}
               <div className="md-lanes">
                 {slots(current, lanesPerHeat).map((l, i) => l ? (() => { const id = entryId(current.evIdx, current.htIdx, l.lane);
                   return <LaneRow key={id} lane={l} d={get(id)} place={curHeatPlaces[id]} rec={records[current.evId]} active mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })}
@@ -2292,7 +2381,8 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       {toast && !relayUndo && <div className="md-toast">{toast}</div>}
       {modal === "relay" && <RelayBuilderModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} />}
       {modal === "export" && <ExportModal onClose={() => setModal(null)} events={events} data={data} myTeam={homeTeam} places={places} records={records} meetName={meetName} />}
-      {relaySplits && current && isRelayEvent(current.eventName) && <RelaySplitsPanel heat={current} evIdx={current.evIdx} htIdx={current.htIdx} data={data} homeTeam={homeTeam} onClose={() => setRelaySplits(false)} update={update} get={get} openPop={openPop} clockActive={clockActive} />}
+      {relaySplitsScope && relaySplitsHeat && isRelayEvent(relaySplitsHeat.eventName) && <RelaySplitsPanel heat={relaySplitsHeat} evIdx={relaySplitsScope.evIdx} htIdx={relaySplitsScope.htIdx} scopeLane={relaySplitsScope.lane} data={data} homeTeam={homeTeam} onClose={() => setRelaySplitsScope(null)} update={update} get={get} openPop={openPop}
+        clockActive={curKey === relaySplitsScope.evIdx + ":" + relaySplitsScope.htIdx ? clockActive : null} />}
     </div>
   );
 }
@@ -2713,7 +2803,7 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progM
   const [showProg, setShowProg] = useState(false);
   const [progStroke, setProgStroke] = useState("Free");
   const tags = TAG_TREE.filter((c) => !(c.minAge && info.sw.age && info.sw.age < c.minAge && !imEvent));
-  const progTimes = showProg ? swimmerStrokeTimes(info.sw.name, info.sw.team, progStroke, progMeets || []) : [];
+  const progTimes = showProg ? completedStrokeProgression(swimmerStrokeTimes(info.sw.name, info.sw.team, progStroke, progMeets || [])) : [];
   useLayoutEffect(() => {
     const W = 320, m = 10, vw = window.innerWidth, vh = window.innerHeight, h = ref.current ? ref.current.offsetHeight : 300;
     const off = (depth || 0) * 18;
@@ -2746,7 +2836,7 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progM
         {!hideSplits && showSplits && (
           <div className="md-splitboxrow">
             {Array.from({ length: Math.max(requiredTapsFor(info.eventName), (d.splits || []).length) }).map((_, i) => (
-              <input key={i} className="md-splitbox lg" placeholder={`#${i + 1}`} value={(d.splits || [])[i] || ""} onChange={(e) => { const ns = [...(d.splits || [])]; ns[i] = e.target.value; onSplits(ns); }} />
+              <input key={i} className="md-splitbox lg" inputMode="decimal" placeholder={`#${i + 1}`} value={(d.splits || [])[i] || ""} onChange={(e) => { const ns = [...(d.splits || [])]; ns[i] = e.target.value; onSplits(ns); }} />
             ))}
           </div>
         )}
@@ -2991,6 +3081,8 @@ html, body, #root { height: 100%; }
 .md-panel.results { flex:none; max-height:30vh; border-color:#6b5b13; box-shadow:0 0 0 1px rgba(224,180,0,.2) inset; }
 .md-phead { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 11px; background:linear-gradient(180deg,#122b4d,#0d2038); border-bottom:1px solid var(--line); flex:none; }
 .water-e { color:var(--cyan); } .md-pmeta { color:var(--muted); font-size:11.5px; font-weight:700; text-align:right; }
+.md-splitsdot { display:inline-block; width:10px; height:10px; margin-left:6px; border-radius:50%; background:#2563eb; border:none; padding:0; cursor:pointer; vertical-align:middle; box-shadow:0 0 0 3px rgba(37,99,235,.18); }
+.md-splitsdot:hover { background:#1d4ed8; }
 .md-raceclock { flex:none; padding:4px 11px; text-align:center; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:22px; font-weight:800; letter-spacing:.04em; color:var(--cyan); background:#0a1a2e; border-bottom:1px solid var(--line); }
 .md-raceclock.stopped { color:var(--green); }
 .md-pnav { display:flex; align-items:center; gap:7px; }
@@ -3205,8 +3297,6 @@ html, body, #root { height: 100%; }
 .md-extable td.nm { font-weight:800; color:#0f2036; background:#f8fafc; white-space:nowrap; position:sticky; left:0; }
 .md-exempty { text-align:center; color:#94a3b8; padding:22px; }
 .md-exmsg { margin:0 18px; padding:10px 12px; background:#ecfeff; border:1px solid #a5f3fc; color:#0e7490; border-radius:10px; font-size:13px; font-weight:600; }
-.md-relaybtn { margin:5px 5px 0; padding:8px; border-radius:9px; border:1px solid #1f6b7d; background:#0e2c3a; color:var(--cyan); font-weight:800; font-size:12px; cursor:pointer; }
-.md-relaybtn:hover { background:#123a4c; }
 .md-lane.mine { box-shadow:inset 3px 0 0 #facc15; } .md-swim.mine { box-shadow:inset 3px 0 0 #facc15; }
 .md-povteam { font-size:11px; font-weight:800; margin-left:6px; }
 .md-splitbtn { width:100%; margin-top:8px; padding:9px; border-radius:9px; border:1.5px solid var(--sline); background:#fff; color:#0e7490; font-weight:800; font-size:13px; cursor:pointer; }
@@ -3269,6 +3359,8 @@ html, body, #root { height: 100%; }
 .md-rbteam.locked { border-color:#0e7490; box-shadow:0 0 0 1px #0e7490 inset; }
 .md-rblock { padding:4px 9px; border-radius:7px; border:1px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:11px; cursor:pointer; }
 .md-rblock.on { border-color:#0e7490; color:#0e7490; background:#ecfeff; }
+.md-rbrevert { padding:4px 9px; border-radius:7px; border:1px dashed #7c3aed; background:#fff; color:#7c3aed; font-weight:800; font-size:11px; cursor:pointer; }
+.md-rbrevert:hover { background:#f5f3ff; }
 .md-rbhead { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
 .md-rbrank { width:22px; height:22px; display:grid; place-items:center; border-radius:6px; background:#0f2036; color:#fff; font-weight:900; font-size:12px; }
 .md-rbteamname { font-weight:800; font-size:15px; flex:1; }
@@ -3315,6 +3407,9 @@ html, body, #root { height: 100%; }
 .md-cmpchecklabel { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; }
 .md-cmpcheck { display:inline-flex; align-items:center; gap:4px; font-size:12px; font-weight:700; color:var(--sink); cursor:pointer; }
 .md-cmpcheck input { margin:0; }
+.md-cmpteamdot { display:inline-flex; align-items:center; gap:4px; font-size:11.5px; font-weight:800; color:var(--sink); cursor:pointer; }
+.md-cmpteamdot input { display:none; }
+.md-cmpteamcircle { width:14px; height:14px; border-radius:50%; border:2px solid; display:inline-block; transition:background .1s; }
 .md-cmpmodebtn { margin-left:auto; align-self:center; background:#2563eb; color:#fff; border:none; border-radius:9px; padding:9px 16px; font-weight:800; font-size:13px; cursor:pointer; }
 .md-cmpmodebtn:hover { background:#1d4ed8; }
 .md-cmpsimplewrap { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:0 18px 12px; align-items:start; }
