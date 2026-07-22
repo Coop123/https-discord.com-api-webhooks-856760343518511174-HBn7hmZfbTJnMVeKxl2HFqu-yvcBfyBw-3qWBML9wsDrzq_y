@@ -241,10 +241,11 @@ function seasonBestStroke(meets, name, team, cat) {
 }
 // 15-18 has no individual 50 free on the program — only 100 free — and 15-18
 // relays are never swum as 100s, so estimate the 50-pace from half their 100
-// free time minus a gender-based cut (going out on a flying relay start is
-// faster than a paced 100 split; boys get more cut than girls). Prefers an
-// actual recorded relay split from a "Relay splits" entry, when there is one.
-const FREE50_CUT = { Girls: 0.15, Boys: 0.25 };
+// free time minus a cut for the flying relay start (faster than a paced 100
+// split). The cut is scaled off the swimmer's own improvement trend rather
+// than a flat gender-based rate, and capped at 10% so it never over-credits
+// a swimmer with little or no improvement history. Prefers an actual
+// recorded relay split from a "Relay splits" entry, when there is one.
 function estimate1518Free50(meets, name, team, gender) {
   let splitBest = Infinity;
   meets.forEach((m) => (m.events || []).forEach((ev, ei) => { if (!isRelayEvent(ev.name) || !/free/i.test(ev.name)) return;
@@ -258,7 +259,10 @@ function estimate1518Free50(meets, name, team, gender) {
       const d = (m.data || {})[entryId(ei, hi, l.lane)] || {}; const t = toSeconds(d.time), s = toSeconds(l.seed), v = !isNaN(t) ? t : s;
       if (!isNaN(v) && v < hundredBest) hundredBest = v; })); }));
   let estimated = Infinity;
-  if (isFinite(hundredBest)) { const cut = FREE50_CUT[gender] ?? 0.2; estimated = (hundredBest / 2) * (1 - cut); }
+  if (isFinite(hundredBest)) {
+    const cut = Math.min(0.10, Math.max(0, swimmerImprovementStats(name, team, "Free", meets).mean));
+    estimated = (hundredBest / 2) * (1 - cut);
+  }
   const best = Math.min(splitBest, estimated);
   return isFinite(best) ? best : null;
 }
