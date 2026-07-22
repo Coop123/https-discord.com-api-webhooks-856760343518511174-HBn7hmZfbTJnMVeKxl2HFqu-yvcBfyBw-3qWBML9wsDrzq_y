@@ -130,16 +130,11 @@ function requiredTapsFor(name) {
 }
 
 function eventList(ev, evIdx, data) { const out = []; ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { const id = entryId(evIdx, htIdx, l.lane); const d = data[id] || {}; out.push({ id, l, secs: toSeconds(d.time), dq: hasDq(d), scr: isScratched(d), ns: isNoShow(d), time: d.time }); })); return out; }
-// Every distinct swimmer (incl. relay legs) across the whole loaded meet whose
-// age falls in the given age group — used by the popover's age-chip drill-down
-// so it can list "everyone else in this age group" without leaving the board.
-function ageGroupRoster(events, ageGroup) {
-  const seen = new Set(), out = [];
-  events.forEach((ev, evIdx) => ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => {
-    if (l.swimmers) { l.swimmers.forEach((s, i) => { if (ageGroupOf(s.age) !== ageGroup) return; const key = s.name + "|" + l.team; if (seen.has(key)) return; seen.add(key); out.push({ id: entryId(evIdx, htIdx, l.lane) + "#" + i, name: s.name, team: l.team, age: s.age }); }); }
-    else { if (ageGroupOf(l.age) !== ageGroup) return; const key = l.name + "|" + l.team; if (seen.has(key)) return; seen.add(key); out.push({ id: entryId(evIdx, htIdx, l.lane), name: l.name, team: l.team, age: l.age }); }
-  })));
-  return out.sort((a, b) => a.team.localeCompare(b.team) || a.name.localeCompare(b.name));
+// Everyone in the given age group across the whole season, ranked by Power —
+// used by the popover's age-chip drill-down so "open the ranks for age
+// group" shows an actual leaderboard rather than just a name list.
+function ageGroupPowerRoster(seasonMeets, ageGroup) {
+  return Object.values(computePower(seasonMeets || [], { ageGroup })).sort((a, b) => (b.power ?? -1) - (a.power ?? -1));
 }
 function rankedEvent(ev, evIdx, data, filter) { const relay = isRelayEvent(ev.name); let list = eventList(ev, evIdx, data).filter((e) => !isNaN(e.secs) && !e.dq && !e.scr && !e.ns); if (filter) list = list.filter((e) => filter.includes(e.l.team)); if (relay) list = list.filter((e) => e.l.relay === "A"); list.sort((a, b) => a.secs - b.secs); return list; }
 function computePlaces(events, data, filter, mode) { if (mode === "timetrial") return {}; const map = {}; events.forEach((ev, evIdx) => rankedEvent(ev, evIdx, data, filter).forEach((e, i) => (map[e.id] = i + 1))); return map; }
@@ -1222,99 +1217,134 @@ function projectSwimmer(base, stats) {
 // side. Projects each swimmer's next swim (pinpoint + best/conservative
 // spread) from their own improvement history, then a head-to-head win
 // probability from the gap between projections vs. their combined spread.
+// Filterable swimmer bank (age group + gender checkboxes) on one side, 4
+// comparison slots on the other — drag a bank chip onto a slot to add them,
+// drag between slots to swap, or tap-then-tap-a-slot as an alternative to
+// dragging (same Pointer Events pattern as the relay lineup editor, since
+// iOS/iPadOS Safari doesn't support native HTML5 drag-and-drop for touch).
+function CompareBoard({ people, slots, onAssign, onSwap, onRemove }) {
+  const dragRef = useRef(null);
+  const [overSlot, setOverSlot] = useState(null);
+  const [draggingKey, setDraggingKey] = useState(null);
+  const [selected, setSelected] = useState(null); // { key, source, slotIdx }
+  const [ageSel, setAgeSel] = useState([]);
+  const [genderSel, setGenderSel] = useState([]);
+  const TAP_SLOP = 6;
+  const keyOf = (name, team) => name + "|" + team;
+  const availAges = useMemo(() => AGE_GROUPS.filter((g) => people.some((p) => ageGroupOf(p.age) === g)), [people]);
+  const bank = useMemo(() => people.filter((p) =>
+    (!ageSel.length || ageSel.includes(ageGroupOf(p.age))) &&
+    (!genderSel.length || genderSel.includes(p.gender)) &&
+    !slots.some((s) => s && s.name === p.name && s.team === p.team)
+  ), [people, ageSel, genderSel, slots]);
+  const toggleAge = (g) => setAgeSel((s) => s.includes(g) ? s.filter((x) => x !== g) : [...s, g]);
+  const toggleGender = (g) => setGenderSel((s) => s.includes(g) ? s.filter((x) => x !== g) : [...s, g]);
+
+  const slotAt = (x, y) => { const el = document.elementFromPoint(x, y); const slot = el && el.closest && el.closest("[data-slot-idx]"); return slot ? Number(slot.getAttribute("data-slot-idx")) : null; };
+  const isSame = (a, b) => !!a && !!b && a.key === b.key && a.source === b.source && a.slotIdx === b.slotIdx;
+  const onDown = (e, k, source, slotIdx) => { dragRef.current = { key: k, source, slotIdx, x0: e.clientX, y0: e.clientY, moved: false }; setDraggingKey(k); e.currentTarget.setPointerCapture(e.pointerId); e.preventDefault(); };
+  const onMove = (e) => { if (!dragRef.current) return; if (Math.hypot(e.clientX - dragRef.current.x0, e.clientY - dragRef.current.y0) > TAP_SLOP) dragRef.current.moved = true; setOverSlot(slotAt(e.clientX, e.clientY)); };
+  const doAssign = (from, targetIdx) => {
+    if (from.source === "slot") { if (from.slotIdx === targetIdx) return; onSwap(from.slotIdx, targetIdx); return; }
+    const p = people.find((x) => keyOf(x.name, x.team) === from.key); if (p) onAssign(targetIdx, p);
+  };
+  const endDrag = (e) => {
+    if (!dragRef.current) return;
+    const cur = dragRef.current; dragRef.current = null; setDraggingKey(null); setOverSlot(null);
+    if (cur.moved) { const idx = slotAt(e.clientX, e.clientY); if (idx != null) doAssign({ key: cur.key, source: cur.source, slotIdx: cur.slotIdx }, idx); setSelected(null); return; }
+    const tapped = { key: cur.key, source: cur.source, slotIdx: cur.slotIdx };
+    if (!selected) { setSelected(tapped); return; }
+    if (isSame(selected, tapped)) { setSelected(null); return; }
+    if (tapped.slotIdx != null) { doAssign(selected, tapped.slotIdx); setSelected(null); return; }
+    setSelected(tapped);
+  };
+  const chip = (person, source, slotIdx) => {
+    const k = keyOf(person.name, person.team);
+    return (
+      <button key={k} type="button" className={"md-rbchip" + (draggingKey === k ? " dragging" : "") + (isSame(selected, { key: k, source, slotIdx }) ? " selected" : "")} style={{ touchAction: "none" }}
+        onPointerDown={(e) => onDown(e, k, source, slotIdx)} onPointerMove={onMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
+        {person.gender && <em className={"md-gtick " + person.gender.toLowerCase()}>{person.gender[0]}</em>}{person.name}{person.age ? ` (${person.age})` : ""}
+        <span className="md-cmpchipteam" style={{ color: teamColor(person.team) }}>{person.team}</span>
+      </button>
+    );
+  };
+  return (
+    <div className="md-cmpboard">
+      <div className="md-cmpslots">
+        {slots.map((s, i) => (
+          <div key={i} data-slot-idx={i} className={"md-cmpslot" + (overSlot === i ? " over" : "") + (selected ? " selectable" : "")}>
+            {s ? <>{chip(s, "slot", i)}<button className="md-cmpslotremove" onClick={() => onRemove(i)}>✕ remove</button></> : <span className="md-cmpslotempty" onClick={() => { if (selected) { doAssign(selected, i); setSelected(null); } }}>Drop swimmer {i + 1} here</span>}
+          </div>
+        ))}
+      </div>
+      <div className="md-cmpbank">
+        <div className="md-cmpbankfilters">
+          <div className="md-cmpcheckgrp"><span className="md-cmpchecklabel">Gender</span>{["Girls", "Boys"].map((g) => <label key={g} className="md-cmpcheck"><input type="checkbox" checked={genderSel.includes(g)} onChange={() => toggleGender(g)} />{g}</label>)}</div>
+          <div className="md-cmpcheckgrp"><span className="md-cmpchecklabel">Age</span>{availAges.length ? availAges.map((g) => <label key={g} className="md-cmpcheck"><input type="checkbox" checked={ageSel.includes(g)} onChange={() => toggleAge(g)} />{g}</label>) : <span className="md-cmpchecklabel">—</span>}</div>
+        </div>
+        <div className="md-rbbenchlabel">Drag a swimmer onto a slot — or tap a name, then tap the slot</div>
+        <div className="md-rbbench md-cmpbanklist">
+          {bank.length ? bank.map((p) => chip(p, "bank", null)) : <span className="md-rbbenchempty">No swimmers match this filter.</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const meets = useMemo(() => [{ meetName: "This meet", mode: "meet", events, data }, ...seasonMeets], [events, data, seasonMeets]);
   const power = useMemo(() => computePower(meets), [meets]);
   const people = useMemo(() => Object.values(power).sort((a, b) => a.name.localeCompare(b.name)), [power]);
-  const teams = useMemo(() => [...new Set(people.map((p) => p.team))].sort(), [people]);
   const [stroke, setStroke] = useState("Free");
+  const [slots, setSlots] = useState([null, null, null, null]); // { name, team }
 
-  const useSide = (defaultTeam) => {
-    const [team, setTeam] = useState(defaultTeam);
-    const ages = useMemo(() => AGE_GROUPS.filter((g) => people.some((p) => p.team === team && ageGroupOf(p.age) === g)), [team, people]);
-    const [ageSel, setAgeSel] = useState([]); // checked age groups; [] = all
-    const [genderSel, setGenderSel] = useState([]); // checked genders; [] = all
-    const toggleAge = (g) => setAgeSel((s) => s.includes(g) ? s.filter((x) => x !== g) : [...s, g]);
-    const toggleGender = (g) => setGenderSel((s) => s.includes(g) ? s.filter((x) => x !== g) : [...s, g]);
-    const roster = useMemo(() => people.filter((p) => p.team === team
-      && (!ageSel.length || ageSel.includes(ageGroupOf(p.age)))
-      && (!genderSel.length || genderSel.includes(p.gender))
-    ).sort((a, b) => a.name.localeCompare(b.name)), [team, ageSel, genderSel, people]);
-    const [name, setName] = useState(roster[0] ? roster[0].name : "");
-    useEffect(() => { if (roster.length && !roster.some((r) => r.name === name)) setName(roster[0].name); }, [roster.map((r) => r.name).join(",")]);
-    return { team, setTeam, ageSel, toggleAge, ages, genderSel, toggleGender, name, setName, roster };
-  };
-  const A = useSide(homeTeam || teams[0]);
-  const B = useSide(teams.find((t) => t !== (homeTeam || teams[0])) || teams[0]);
+  const assign = (idx, person) => setSlots((s) => { const ns = [...s]; ns[idx] = { name: person.name, team: person.team }; return ns; });
+  const removeSlot = (idx) => setSlots((s) => { const ns = [...s]; ns[idx] = null; return ns; });
+  const swapSlots = (i, j) => setSlots((s) => { const ns = [...s]; [ns[i], ns[j]] = [ns[j], ns[i]]; return ns; });
 
-  const proj = (side) => { if (!side.name) return null;
-    const times = swimmerStrokeTimes(side.name, side.team, stroke, meets).map((t) => toSeconds(t.final) || toSeconds(t.seed)).filter((x) => !isNaN(x));
+  const proj = (slot) => { if (!slot) return null;
+    const times = swimmerStrokeTimes(slot.name, slot.team, stroke, meets).map((t) => toSeconds(t.final) || toSeconds(t.seed)).filter((x) => !isNaN(x));
     if (!times.length) return null;
-    const stats = swimmerImprovementStats(side.name, side.team, stroke, meets);
-    return { name: side.name, team: side.team, ...projectSwimmer(Math.min(...times), stats) };
+    const stats = swimmerImprovementStats(slot.name, slot.team, stroke, meets);
+    return { name: slot.name, team: slot.team, ...projectSwimmer(Math.min(...times), stats) };
   };
-  const pa = proj(A), pb = proj(B);
-  const sdDiff = pa && pb ? Math.sqrt(pa.sdTime ** 2 + pb.sdTime ** 2) || 0.001 : null;
-  const pAwins = pa && pb ? normCdf((pb.likely - pa.likely) / sdDiff) : null;
-
-  const domain = pa && pb ? { min: Math.min(pa.best, pb.best), max: Math.max(pa.conservative, pb.conservative) } : null;
+  const projections = slots.map(proj);
+  const filled = projections.filter(Boolean);
+  const simKey = (p) => p.name + "|" + p.team;
+  const winProb = useMemo(() => filled.length >= 2 ? simulateRelayField(filled.map((p) => ({ team: simKey(p), projTotal: p.likely, sd: p.sdTime || 0.05 }))) : {}, [filled]);
+  const domain = filled.length ? { min: Math.min(...filled.map((p) => p.best)), max: Math.max(...filled.map((p) => p.conservative)) } : null;
   const pct = (t) => domain ? Math.min(100, Math.max(0, ((t - domain.min) / (domain.max - domain.min || 1)) * 100)) : 0;
-
-  const sidePicker = (side, label) => (
-    <div className="md-cmpcol">
-      <div className="md-cmppicks">
-        <select className="md-cmpsel" value={side.team} onChange={(e) => side.setTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}</select>
-        <div className="md-cmpcheckgrp">
-          <span className="md-cmpchecklabel">Gender</span>
-          {["Girls", "Boys"].map((g) => (
-            <label key={g} className="md-cmpcheck"><input type="checkbox" checked={side.genderSel.includes(g)} onChange={() => side.toggleGender(g)} />{g}</label>
-          ))}
-        </div>
-        <div className="md-cmpcheckgrp">
-          <span className="md-cmpchecklabel">Age</span>
-          {side.ages.length ? side.ages.map((g) => (
-            <label key={g} className="md-cmpcheck"><input type="checkbox" checked={side.ageSel.includes(g)} onChange={() => side.toggleAge(g)} />{g}</label>
-          )) : <span className="md-cmpchecklabel">—</span>}
-        </div>
-        <select className="md-cmpsel" value={side.name} onChange={(e) => side.setName(e.target.value)}>{side.roster.length ? side.roster.map((s) => <option key={s.name} value={s.name}>{s.name}</option>) : <option value="">No swimmers</option>}</select>
-      </div>
-    </div>
-  );
-
-  const spread = (p) => !p ? <div className="md-prevempty">No {stroke} time on record.</div> : (
-    <div className="md-cmpspread">
-      <div className="md-cmptrack">
-        <div className="md-cmpband" style={{ left: pct(p.best) + "%", width: Math.max(2, pct(p.conservative) - pct(p.best)) + "%" }} />
-        <div className="md-cmppin" style={{ left: pct(p.likely) + "%" }} title={`pinpoint ${fmtT(p.likely)}`} />
-      </div>
-      <div className="md-cmpspreadlabels"><span>{fmtT(p.best)}</span><span className="mid">{fmtT(p.likely)}</span><span>{fmtT(p.conservative)}</span></div>
-      <div className="md-cmpspreadcap"><span>best case</span><span className="mid">pinpoint</span><span>conservative</span></div>
-      <div className="md-cmprate">current best {fmtT(p.base)} · trending {(p.mean * 100).toFixed(1)}%/swim{p.n < 3 ? " (thin history)" : ""}</div>
-    </div>
-  );
+  const fastest = filled.length ? [...filled].sort((a, b) => a.likely - b.likely)[0] : null;
 
   return (
     <div className="md-scrim" onClick={onClose}>
-      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><div><div className="md-mtitle">Swimmer comparison</div><div className="md-msub">Pick a team, age group, then swimmer for each side. Projections use each swimmer's own improvement spread.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+      <div className="md-modal md-imp md-cmpmodal" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><div><div className="md-mtitle">Swimmer comparison</div><div className="md-msub">Drag up to 4 swimmers from the bank into the slots. Projections use each swimmer's own improvement spread.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl">
           <label className="md-ctl">Stroke<select value={stroke} onChange={(e) => setStroke(e.target.value)}>{PROG_STROKES.map((s) => <option key={s}>{s}</option>)}</select></label>
         </div>
-        <div className="md-cmpwrap">
-          {sidePicker(A, "A")}
-          <div className="md-cmpvs">vs</div>
-          {sidePicker(B, "B")}
-        </div>
-        {pAwins != null && <div className="md-cmpprob">
-          <div className="md-cmpprobbar"><div className="md-cmpprobfill" style={{ width: (pAwins * 100).toFixed(1) + "%" }} /></div>
-          <div className="md-cmpprobrow"><span style={{ color: teamColor(A.team) }}>{A.name || "—"} {(pAwins * 100).toFixed(0)}%</span><span style={{ color: teamColor(B.team) }}>{(100 - pAwins * 100).toFixed(0)}% {B.name || "—"}</span></div>
-        </div>}
-        <div className="md-cmpwrap">
-          <div className="md-cmpcol">{spread(pa)}</div>
-          <div className="md-cmpvs"> </div>
-          <div className="md-cmpcol">{spread(pb)}</div>
-        </div>
-        {pa && pb && <div className="md-cmpwin">Projected (pinpoint): <b style={{ color: teamColor(pa.likely <= pb.likely ? A.team : B.team) }}>{pa.likely <= pb.likely ? A.name : B.name}</b> by {fmtT(Math.abs(pa.likely - pb.likely))} · {(Math.max(pAwins, 1 - pAwins) * 100).toFixed(0)}% confidence</div>}
+        <CompareBoard people={people} slots={slots} onAssign={assign} onSwap={swapSlots} onRemove={removeSlot} />
+        {slots.some(Boolean) && (
+          <div className="md-cmpspreadwrap">
+            {slots.map((s, i) => { const p = projections[i]; if (!s) return null;
+              return (
+                <div key={i} className="md-cmpspreadrow">
+                  <div className="md-cmpspreadname" style={{ color: teamColor(s.team) }}>{s.name} <em>{s.team}</em>{p && winProb[simKey(p)] != null && <b className="md-cmpprobpct">{(winProb[simKey(p)] * 100).toFixed(0)}% to touch first</b>}</div>
+                  {p ? (
+                    <div className="md-cmpspread">
+                      <div className="md-cmptrack">
+                        <div className="md-cmpband" style={{ left: pct(p.best) + "%", width: Math.max(2, pct(p.conservative) - pct(p.best)) + "%" }} />
+                        <div className="md-cmppin" style={{ left: pct(p.likely) + "%" }} title={`pinpoint ${fmtT(p.likely)}`} />
+                      </div>
+                      <div className="md-cmpspreadlabels"><span>{fmtT(p.best)}</span><span className="mid">{fmtT(p.likely)}</span><span>{fmtT(p.conservative)}</span></div>
+                      <div className="md-cmprate">current best {fmtT(p.base)} · trending {(p.mean * 100).toFixed(1)}%/swim{p.n < 3 ? " (thin history)" : ""}</div>
+                    </div>
+                  ) : <div className="md-prevempty">No {stroke} time on record.</div>}
+                </div>
+              ); })}
+          </div>
+        )}
+        {fastest && filled.length >= 2 && <div className="md-cmpwin">Projected fastest: <b style={{ color: teamColor(fastest.team) }}>{fastest.name}</b> ({fmtT(fastest.likely)}) · {((winProb[simKey(fastest)] || 0) * 100).toFixed(0)}% to touch first</div>}
         <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
       </div>
     </div>
@@ -1726,6 +1756,9 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   const pushRelayUndo = (label, fn) => { setRelayUndo({ label, fn }); if (relayUndoTimer.current) clearTimeout(relayUndoTimer.current); relayUndoTimer.current = setTimeout(() => setRelayUndo(null), 8000); };
   const [seasonMeets, setSeasonMeets] = useState([]);
   const progMeets = useMemo(() => [{ date: "This meet", meetName, events, data }, ...seasonMeets], [meetName, events, data, seasonMeets]);
+  // Includes the live in-progress meet (unlike seasonMeets alone) so the
+  // age-group rank popover isn't empty before this meet gets saved to season.
+  const rankMeets = useMemo(() => [{ mode, events, data }, ...seasonMeets], [mode, events, data, seasonMeets]);
   const relayCandidates = useMemo(() => relayReplaceTarget ? relayReplacementCandidates(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, relayReplaceTarget.team) : [], [relayReplaceTarget, events, data]);
   const medleyPlan = useMemo(() => relayReplaceTarget ? medleyReplacementPlan(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.name) : null, [relayReplaceTarget, events, data]);
   const relayOriginalLegs = useMemo(() => { if (!relayReplaceTarget) return []; const ev = events[relayReplaceTarget.evIdx]; const ht = ev && ev.heats[relayReplaceTarget.htIdx]; const l = ht && ht.lanes.find((x) => x.lane === relayReplaceTarget.lane); return l && l.swimmers ? l.swimmers.map((s) => s.name) : []; }, [relayReplaceTarget, events]);
@@ -1829,7 +1862,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   // popover (opened from any lane on the board) and for each "swimmer" level
   // pushed onto ageStack by the age-chip drill-down, so every level has full
   // DQ/scratch/notes functionality, not just the outermost one.
-  const renderSwimmerPop = (id, rect, depth, onCloseThis, pushAge, key) => {
+  const renderSwimmerPop = (id, rect, depth, onCloseThis, pushAge, pushProfile, key) => {
     const info = swimmerAt(id); if (!info) return null;
     const d = get(id);
     return (
@@ -1839,7 +1872,8 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
         onToggle={(k) => toggleTag(id, k)} onSplits={(a) => update(id, { splits: a })} onNotes={(v) => update(id, { notes: v })} onNoShow={() => update(id, { noshow: !isNoShow(get(id)) })}
         onScratch={() => { setScratchTarget({ id, name: info.sw.name, team: info.sw.team, evIdx: info.ei, htIdx: info.hi, lane: info.ln, relay: info.leg !== undefined, leg: info.leg, eventName: info.eventName }); setPop(null); setAgeStack([]); }}
         onUnscratch={() => unscratchOne(id)}
-        onOpenAgeGroup={(el) => { const ag = ageGroupOf(info.sw.age); if (!ag) return; pushAge(ag, el ? el.getBoundingClientRect() : rect); }} />
+        onOpenAgeGroup={(el) => { const ag = ageGroupOf(info.sw.age); if (!ag) return; pushAge(ag, el ? el.getBoundingClientRect() : rect); }}
+        onOpenProfile={(el) => pushProfile(info.sw.name, info.sw.team, el ? el.getBoundingClientRect() : rect)} />
     );
   };
   // Return to Meet setup (not closing out entirely) so lanes-per-heat — which
@@ -1966,10 +2000,12 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 
       {pop && popInfo && (<>
         <div className="md-povscrim" onClick={() => { setPop(null); setAgeStack([]); }} />
-        {renderSwimmerPop(pop.id, pop.rect, 0, () => { setPop(null); setAgeStack([]); }, (ag, rect) => setAgeStack([{ kind: "age", ageGroup: ag, rect }]), "base")}
+        {renderSwimmerPop(pop.id, pop.rect, 0, () => { setPop(null); setAgeStack([]); },
+          (ag, rect) => setAgeStack([{ kind: "age", ageGroup: ag, rect }]),
+          (name, team, rect) => setAgeStack([{ kind: "profile", name, team, rect }]), "base")}
         {ageStack.map((item, i) => item.kind === "age"
-          ? <AgeGroupPopover key={"age" + i} ageGroup={item.ageGroup} roster={ageGroupRoster(events, item.ageGroup)} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} onPick={(id, el) => setAgeStack((s) => [...s.slice(0, i + 1), { kind: "swimmer", id, rect: el.getBoundingClientRect() }])} />
-          : renderSwimmerPop(item.id, item.rect, i + 1, () => setAgeStack((s) => s.slice(0, i)), (ag, rect) => setAgeStack((s) => [...s.slice(0, i + 1), { kind: "age", ageGroup: ag, rect }]), "sw" + i))}
+          ? <AgeGroupPopover key={"age" + i} ageGroup={item.ageGroup} roster={ageGroupPowerRoster(rankMeets, item.ageGroup)} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} onPick={(name, team, el) => setAgeStack((s) => [...s.slice(0, i + 1), { kind: "profile", name, team, rect: el.getBoundingClientRect() }])} />
+          : <SwimmerProfilePopover key={"pf" + i} name={item.name} team={item.team} seasonMeets={seasonMeets} liveMeet={{ meetName, mode, events, data }} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} />)}
       </>)}
       {showFinalizeDqs && <FinalizeDqsPanel list={pendingDqs} onClose={() => setShowFinalizeDqs(false)}
         onPick={(row) => { setDqTarget(row.id); setDqSwimmer(row.swimmer || null); setDqNsTarget(row.id); }} />}
@@ -2008,9 +2044,11 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           <div className="md-scratchbtns">
             <button className="md-mbtn" onClick={() => { scratchOne(scratchTarget.id); setPop(null);
               if (scratchTarget.relay) { pushRelayUndo("Scratched " + scratchTarget.name, () => { unscratchOne(scratchTarget.id); flash("Undone"); }); setRelayReplaceTarget({ evIdx: scratchTarget.evIdx, htIdx: scratchTarget.htIdx, lane: scratchTarget.lane, leg: scratchTarget.leg, name: scratchTarget.name, team: scratchTarget.team, eventName: scratchTarget.eventName }); }
+              else pushRelayUndo("Scratched " + scratchTarget.name, () => { unscratchOne(scratchTarget.id); flash("Undone"); });
               setScratchTarget(null); }}>{scratchTarget.relay ? "Just this relay" : "Just this event"}</button>
             <button className="md-mbtn danger" onClick={() => { scratchAll(scratchTarget.name, scratchTarget.team); setPop(null);
               if (scratchTarget.relay) { pushRelayUndo("Scratched " + scratchTarget.name + " (whole meet)", () => { scratchAll(scratchTarget.name, scratchTarget.team, false); flash("Undone"); }); setRelayReplaceTarget({ evIdx: scratchTarget.evIdx, htIdx: scratchTarget.htIdx, lane: scratchTarget.lane, leg: scratchTarget.leg, name: scratchTarget.name, team: scratchTarget.team, eventName: scratchTarget.eventName }); }
+              else pushRelayUndo("Scratched " + scratchTarget.name + " (whole meet)", () => { scratchAll(scratchTarget.name, scratchTarget.team, false); flash("Undone"); });
               setScratchTarget(null); }}>Whole meet (all events)</button>
             <button className="md-cancel" onClick={() => setScratchTarget(null)}>Cancel</button>
           </div>
@@ -2422,12 +2460,21 @@ function popoverPos(rect, depth) {
   if (left + W > vw - m) left = Math.max(POV_SAFE_X, vw - W - m);
   return { top, left };
 }
-function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progMeets, rect, depth, onClose, onDq, onDqQuick, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenAgeGroup }) {
+function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progMeets, rect, depth, onClose, onDq, onDqQuick, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenAgeGroup, onOpenProfile }) {
   const ref = useRef(null);
-  const holdTimer = useRef(null); const held = useRef(false);
-  const dqDown = () => { held.current = false; holdTimer.current = setTimeout(() => { held.current = true; onDq(); }, 2000); };
-  const dqUp = () => { clearTimeout(holdTimer.current); if (!held.current) onDqQuick(); };
-  const dqCancel = () => clearTimeout(holdTimer.current);
+  const lastDqClick = useRef(0);
+  const dq = hasDq(d), pend = isPendingDq(d);
+  // Double-click/double-tap opens the full code picker (own timing instead of
+  // the native dblclick event, since iOS Safari's double-tap-to-zoom can
+  // swallow it); a single tap does the obviously-right thing instead: mark a
+  // quick pending DQ, clear one, or — if a real code is already set — show
+  // what it is by opening the picker (view mode; reasons are visible there).
+  const dqClick = () => {
+    const now = Date.now(), wasDouble = now - lastDqClick.current < 350;
+    lastDqClick.current = wasDouble ? 0 : now;
+    if (wasDouble) { onDq(); return; }
+    if (dq && !pend) onDq(); else onDqQuick();
+  };
   const [pos, setPos] = useState(() => popoverPos(rect, depth));
   const [openCat, setOpenCat] = useState(null);
   const [showSplits, setShowSplits] = useState(false);
@@ -2445,14 +2492,13 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progM
     if (left + W > vw - m) left = Math.max(POV_SAFE_X, vw - W - m);
     setPos({ top, left });
   }, [rect, depth]);
-  const dq = hasDq(d), ns = isNoShow(d), scr = isScratched(d), pend = isPendingDq(d);
+  const ns = isNoShow(d), scr = isScratched(d);
   return (
     <div ref={ref} className="md-pov" style={{ top: pos.top, left: pos.left }} role="dialog">
-      <div className="md-povhead"><div><div className="md-povname">{info.sw.name} {info.sw.age > 0 && <span className="md-agechip" onClick={(e) => onOpenAgeGroup && onOpenAgeGroup(e.currentTarget)}>{info.sw.age}</span>}<span className="md-povteam" style={{ color: teamColor(info.sw.team) }}>{info.sw.team}</span></div><div className="md-povmeta">{shortEvent(info.eventName)} · H{info.heatNum} · Lane {info.ln}{info.sw.seed ? ` · seed ${info.sw.seed}` : ""}</div></div><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-povhead"><div><div className="md-povname"><span className="md-povnamelink" onClick={(e) => onOpenProfile && onOpenProfile(e.currentTarget)}>{info.sw.name}</span> {info.sw.age > 0 && <span className="md-agechip" onClick={(e) => onOpenAgeGroup && onOpenAgeGroup(e.currentTarget)}>{info.sw.age}</span>}<span className="md-povteam" style={{ color: teamColor(info.sw.team) }}>{info.sw.team}</span></div><div className="md-povmeta">{shortEvent(info.eventName)} · H{info.heatNum} · Lane {info.ln}{info.sw.seed ? ` · seed ${info.sw.seed}` : ""}</div></div><button className="md-x sm" onClick={onClose}>✕</button></div>
       <div className="md-povtop">
-        <button className={"md-dq" + (dq ? " on" : "") + (pend ? " pend" : "")}
-          onPointerDown={dqDown} onPointerUp={dqUp} onPointerLeave={dqCancel} onContextMenu={(e) => e.preventDefault()}>
-          {pend ? "DQ — reason pending" : dq ? `DQ ${dqLabel(d)}` : "Tap: DQ · Hold 2s: pick reason"}
+        <button className={"md-dq" + (dq ? " on" : "") + (pend ? " pend" : "")} onClick={dqClick}>
+          {pend ? "DQ — reason pending" : dq ? `DQ ${dqLabel(d)} — tap to see why` : "Tap: DQ · Double-tap: pick reason"}
         </button>
       </div>
       <div className="md-povtop" style={{ marginTop: 8, marginBottom: 4 }}>
@@ -2488,15 +2534,15 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, progM
   );
 }
 
-// Age-chip drill-down: a small stacked popup listing everyone in that age
-// group across the loaded meet. Tapping a name pushes another swimmer
-// popover on top (via onPick), so popovers "build on each other" instead of
-// navigating away to a full page.
+// Age-chip drill-down: a small stacked popup ranking everyone in that age
+// group across the whole season by Power. Tapping a name pushes that
+// swimmer's profile popover on top (via onPick), so popovers "build on each
+// other" instead of navigating away to a full page.
 function AgeGroupPopover({ ageGroup, roster, rect, depth, onClose, onPick }) {
   const ref = useRef(null);
   const [pos, setPos] = useState(() => popoverPos(rect, depth));
   useLayoutEffect(() => {
-    const W = 260, m = 10, vw = window.innerWidth, vh = window.innerHeight, h = ref.current ? ref.current.offsetHeight : 240;
+    const W = 270, m = 10, vw = window.innerWidth, vh = window.innerHeight, h = ref.current ? ref.current.offsetHeight : 240;
     const off = (depth || 0) * 18;
     let top = rect.bottom + 10 + off;
     if (top + h > vh - m) top = Math.max(m, vh - h - m);
@@ -2506,14 +2552,56 @@ function AgeGroupPopover({ ageGroup, roster, rect, depth, onClose, onPick }) {
   }, [rect, depth]);
   return (
     <div ref={ref} className="md-agepov" style={{ top: pos.top, left: pos.left }} role="dialog">
-      <div className="md-agepovhead"><span>Age {ageGroup}</span><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-agepovhead"><span>Age {ageGroup} — ranked</span><button className="md-x sm" onClick={onClose}>✕</button></div>
       <div className="md-agepovlist">
-        {roster.length ? roster.map((s) => (
-          <button key={s.id} className="md-agepovrow" onClick={(e) => onPick(s.id, e.currentTarget)}>
+        {roster.length ? roster.map((s, i) => (
+          <button key={s.name + "|" + s.team} className="md-agepovrow" onClick={(e) => onPick(s.name, s.team, e.currentTarget)}>
+            <span className="md-agepovrank">{i + 1}</span>
             <span className="md-agepovteam" style={{ background: teamColor(s.team) }}>{s.team}</span>
             <span>{s.name}</span>
+            <span className="md-agepovpower">{s.power ?? "—"}</span>
           </button>
-        )) : <div className="md-prevempty">No one else in this age group in the loaded meet.</div>}
+        )) : <div className="md-prevempty">No season data for this age group yet.</div>}
+      </div>
+    </div>
+  );
+}
+
+// Rich swimmer profile as a small stacked popup (most improved swims, notes,
+// DQs, season points, last/upcoming meet) — the same content as the League
+// profile page, just reachable without leaving the board.
+function SwimmerProfilePopover({ name, team, seasonMeets, liveMeet, rect, depth, onClose }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState(() => popoverPos(rect, depth));
+  useLayoutEffect(() => {
+    const W = 300, m = 10, vw = window.innerWidth, vh = window.innerHeight, h = ref.current ? ref.current.offsetHeight : 400;
+    const off = (depth || 0) * 18;
+    let top = rect.bottom + 10 + off;
+    if (top + h > vh - m) top = Math.max(m, vh - h - m);
+    let left = Math.max(POV_SAFE_X, Math.min(rect.left, vw - W - m)) + off;
+    if (left + W > vw - m) left = Math.max(POV_SAFE_X, vw - W - m);
+    setPos({ top, left });
+  }, [rect, depth]);
+  const prof = useMemo(() => computeSwimmerProfile(name, team, seasonMeets, liveMeet), [name, team, seasonMeets, liveMeet]);
+  return (
+    <div ref={ref} className="md-profilepov" style={{ top: pos.top, left: pos.left }} role="dialog">
+      <div className="md-agepovhead"><span>{name} <em style={{ color: teamColor(team) }}>{team}</em></span><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-profilestats">
+        <div className="md-lgstat"><b>{prof.totalPts}</b><span>season pts</span></div>
+        <div className="md-lgstat"><b>{prof.improvePct}%</b><span>improvement</span></div>
+        <div className="md-lgstat"><b>{prof.dqs.length}</b><span>DQs</span></div>
+      </div>
+      <div className="md-lgsection">
+        <div className="md-lgsectitle">📈 Most improved</div>
+        {prof.improvements.length ? prof.improvements.slice(0, 4).map((im, i) => <div key={i} className="md-statrow"><span className="md-statname">{im.ev}</span><span className="md-statval green">−{im.drop.toFixed(2)}</span></div>) : <div className="md-prevempty">No improvements on record yet.</div>}
+      </div>
+      <div className="md-lgsection">
+        <div className="md-lgsectitle">📝 Notes</div>
+        {prof.notes.length ? prof.notes.slice(0, 4).map((n, i) => <div key={i} className="md-profnote"><b>{n.ev}</b><p>{n.note}</p></div>) : <div className="md-prevempty">No notes yet.</div>}
+      </div>
+      <div className="md-lgsection">
+        <div className="md-lgsectitle">🚩 DQs</div>
+        {prof.dqs.length ? prof.dqs.slice(0, 4).map((q, i) => <div key={i} className="md-statrow"><span className="md-statname">{q.ev}</span><span className="md-statval red">{q.code}</span></div>) : <div className="md-prevempty">No DQs on record.</div>}
       </div>
     </div>
   );
@@ -2800,15 +2888,22 @@ html, body, #root { height: 100%; }
 .md-pov { position:fixed; z-index:61; width:320px; max-height:74vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:12px; }
 .md-povhead { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:10px; }
 .md-povname { font-weight:800; font-size:16px; display:flex; align-items:center; gap:7px; }
+.md-povnamelink { cursor:pointer; text-decoration:underline; text-decoration-color:transparent; transition:text-decoration-color .12s; } .md-povnamelink:hover { text-decoration-color:currentColor; }
 .md-agechip { background:#eef4fb; color:#33608a; font-size:11px; font-weight:800; padding:2px 7px; border-radius:16px; cursor:pointer; }
 .md-agechip:hover { background:#dbeafe; }
 .md-povmeta { font-size:12px; color:#64748b; margin-top:1px; }
-.md-agepov { position:fixed; z-index:61; width:260px; max-height:60vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:10px; }
+.md-agepov { position:fixed; z-index:61; width:270px; max-height:60vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:10px; }
 .md-agepovhead { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; font-weight:800; font-size:13.5px; }
+.md-agepovhead em { font-style:normal; font-size:11px; font-weight:800; margin-left:4px; }
 .md-agepovlist { display:flex; flex-direction:column; gap:2px; }
-.md-agepovrow { display:flex; align-items:center; gap:8px; padding:6px 7px; border-radius:8px; border:none; background:none; text-align:left; font-size:13px; font-weight:700; cursor:pointer; color:var(--sink); }
+.md-agepovrow { display:flex; align-items:center; gap:8px; padding:6px 7px; border-radius:8px; border:none; background:none; text-align:left; font-size:13px; font-weight:700; cursor:pointer; color:var(--sink); width:100%; }
 .md-agepovrow:hover { background:#f1f5f9; }
+.md-agepovrank { width:16px; flex:none; font-size:11px; font-weight:800; color:#94a3b8; }
 .md-agepovteam { font-size:10.5px; font-weight:800; padding:1px 6px; border-radius:10px; color:#fff; }
+.md-agepovpower { margin-left:auto; font-size:11.5px; font-weight:800; color:var(--cyan); }
+.md-profilepov { position:fixed; z-index:61; width:300px; max-height:70vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:12px; }
+.md-profilestats { display:flex; gap:8px; margin-bottom:10px; }
+.md-profilestats .md-lgstat { flex:1; background:#f8fafc; border-radius:9px; padding:8px; text-align:center; }
 .md-finalizepanel { position:fixed; z-index:55; top:64px; right:14px; width:290px; max-height:70vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:10px; }
 .md-finalizepanel .md-agepovrow { flex-direction:column; align-items:flex-start; gap:1px; }
 .md-finalizemeta { font-size:10.5px; font-weight:600; color:#94a3b8; }
@@ -2969,27 +3064,34 @@ html, body, #root { height: 100%; }
 .md-rbprobfill { height:100%; background:#10b981; }
 .md-rbprobval { font-size:11px; font-weight:800; color:#166534; width:34px; text-align:right; }
 
-.md-cmpwrap { display:flex; align-items:flex-start; gap:14px; padding:14px 18px; }
-.md-cmpcol { flex:1; min-width:0; }
-.md-cmpvs { flex:none; align-self:center; font-weight:900; font-size:13px; color:#94a3b8; padding-top:14px; }
-.md-cmppicks { display:flex; flex-direction:column; gap:6px; }
-.md-cmpsel { width:100%; padding:9px 10px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:13.5px; color:var(--sink); }
+.md-cmpmodal { max-width:900px; }
 .md-cmpcheckgrp { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:2px 0; }
 .md-cmpchecklabel { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#94a3b8; }
 .md-cmpcheck { display:inline-flex; align-items:center; gap:4px; font-size:12px; font-weight:700; color:var(--sink); cursor:pointer; }
 .md-cmpcheck input { margin:0; }
-.md-cmpprob { padding:0 18px 10px; }
-.md-cmpprobbar { height:10px; border-radius:6px; background:#fee2e2; overflow:hidden; }
-.md-cmpprobfill { height:100%; background:#10b981; }
-.md-cmpprobrow { display:flex; justify-content:space-between; font-size:12px; font-weight:800; margin-top:5px; color:#334155; }
+.md-cmpboard { display:flex; gap:16px; padding:0 18px 12px; align-items:flex-start; }
+.md-cmpslots { flex:1 1 55%; min-width:0; display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.md-cmpslot { min-height:60px; border:2px dashed var(--sline); border-radius:10px; padding:8px; display:flex; flex-direction:column; align-items:flex-start; justify-content:center; gap:4px; transition:border-color .1s; }
+.md-cmpslot.over { border-color:#0e7490; background:#ecfeff; }
+.md-cmpslot.selectable { border-color:#94a3b8; }
+.md-cmpslotempty { font-size:12px; color:#94a3b8; font-weight:700; margin:0 auto; }
+.md-cmpslotremove { border:none; background:none; color:#94a3b8; font-size:10.5px; font-weight:800; cursor:pointer; padding:0; }
+.md-cmpslotremove:hover { color:#b42318; }
+.md-cmpbank { flex:1 1 45%; min-width:0; border-left:1px solid var(--sline); padding-left:16px; }
+.md-cmpbankfilters { display:flex; flex-direction:column; gap:4px; margin-bottom:6px; }
+.md-cmpbanklist { max-height:220px; overflow-y:auto; }
+.md-cmpchipteam { margin-left:auto; font-size:10px; font-weight:800; }
+.md-cmpspreadwrap { padding:0 18px 10px; display:flex; flex-direction:column; gap:12px; }
+.md-cmpspreadrow { border-top:1px solid var(--sline); padding-top:10px; }
+.md-cmpspreadname { font-weight:800; font-size:13px; color:var(--sink); display:flex; align-items:center; gap:8px; }
+.md-cmpspreadname em { font-style:normal; font-size:10.5px; font-weight:800; opacity:.75; }
+.md-cmpprobpct { margin-left:auto; font-size:11px; font-weight:800; color:#0e7490; }
 .md-cmpspread { padding:4px 2px 0; }
 .md-cmptrack { position:relative; height:10px; border-radius:6px; background:#eef2f7; margin:10px 2px 6px; }
 .md-cmpband { position:absolute; top:0; bottom:0; border-radius:6px; background:#bae6fd; }
 .md-cmppin { position:absolute; top:-4px; width:3px; height:18px; background:#0e7490; border-radius:2px; transform:translateX(-1.5px); }
 .md-cmpspreadlabels { display:flex; justify-content:space-between; font-size:12.5px; font-weight:800; color:#0f2036; font-variant-numeric:tabular-nums; }
 .md-cmpspreadlabels .mid { color:#0e7490; }
-.md-cmpspreadcap { display:flex; justify-content:space-between; font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:#94a3b8; margin-top:1px; }
-.md-cmpspreadcap .mid { color:#0e7490; }
 .md-cmprate { font-size:11px; color:#64748b; margin-top:6px; }
 .md-cmpwin { margin:0 18px 12px; padding:10px 12px; background:#f0fdfa; border:1px solid #99f6e4; border-radius:10px; font-size:13px; font-weight:700; color:#0f2036; }
 
