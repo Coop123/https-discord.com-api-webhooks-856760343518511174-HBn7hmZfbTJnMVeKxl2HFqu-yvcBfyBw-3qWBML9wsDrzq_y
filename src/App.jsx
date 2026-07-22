@@ -2159,6 +2159,17 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   const [scratchTarget, setScratchTarget] = useState(null);
   const [relayReplaceTarget, setRelayReplaceTarget] = useState(null);
   const [modal, setModal] = useState(null);
+  const myRole = findAccount(accounts || [], session?.username)?.role;
+  const canViewUpdateLog = isAdmin || myRole === "test";
+  // Show the "what's new" popup once per version bump — silently records
+  // the current version on first-ever load (nothing to announce yet) and
+  // only pops up when a returning device's last-seen version is older.
+  useEffect(() => { if (!STORE) return; let live = true; (async () => {
+    let last = null; try { const r = await STORE.get(UPDATE_SEEN_KEY); last = r && r.value; } catch (e) {}
+    if (!live) return;
+    if (last && last !== APP_VERSION) setModal("whatsnew");
+    if (last !== APP_VERSION) STORE.set(UPDATE_SEEN_KEY, APP_VERSION).catch(() => {});
+  })(); return () => { live = false; }; }, []);
   const [menuOpen, setMenuOpen] = useState(false);
   const [pop, setPop] = useState(null);
   const [ageStack, setAgeStack] = useState([]); // age-chip drill-down, stacked on top of `pop`
@@ -2656,8 +2667,10 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       {modal === "season" && <SeasonModal onClose={() => setModal(null)} homeTeam={homeTeam} meets={rankMeets} />}
       {modal === "meetsetup" && <MeetSetupModal onClose={() => setModal(null)} meetName={meetName} setMeetName={setMeetName} meetDate={meetDate} setMeetDate={setMeetDate} mode={mode} setMode={setMode} dualLanes={dualLanes} setDualLanes={setDualLanes} hostTeam={hostTeam} setHostTeam={setHostTeam} awayTeam={awayTeam} setAwayTeam={setAwayTeam} teams={teamsPresent} onImport={() => setModal("import")} />}
       {modal === "settings" && <SettingsModal onClose={() => setModal(null)} homeTeam={homeTeam} setHomeTeam={setHomeTeam} teams={teamsPresent} onMeetSetup={() => setModal("meetsetup")} onResults={() => setModal("results")} onSave={() => saveToSeason()} onExport={() => setModal("export")} onClear={clearData} meets={seasonMeets} onLoad={loadMeet} onDelete={deleteMeet}
-        session={session} isAdmin={isAdmin} onLogout={onLogout} onManageAccounts={() => setModal("accounts")} />}
+        session={session} isAdmin={isAdmin} role={myRole} onLogout={onLogout} onManageAccounts={() => setModal("accounts")} canViewUpdateLog={canViewUpdateLog} onUpdateLog={() => setModal("updatelog")} />}
       {modal === "accounts" && isAdmin && <AccountsModal onClose={() => setModal(null)} accounts={accounts} onSave={onSaveAccounts} currentUsername={session?.username} />}
+      {modal === "whatsnew" && <WhatsNewModal entry={CHANGELOG[0]} onClose={() => setModal(null)} />}
+      {modal === "updatelog" && canViewUpdateLog && <UpdateLogModal onClose={() => setModal(null)} />}
       {modal === "compare" && <SwimmerCompareModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} mode={cmpMode} onModeChange={setCmpMode} onOpenLeague={openLeagueProfile} />}
       {scratchTarget && <div className="md-scrim" onClick={() => setScratchTarget(null)}>
         <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
@@ -2688,9 +2701,39 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   );
 }
 
+// Version history for the "what's new" popup and the Update log (test/admin
+// only). Naming standard, starting with 1.0.0: MAJOR.MINOR.PATCH — bump
+// PATCH for small fixes, MINOR for new features/screens, MAJOR for a big
+// redesign or workflow change. Add every new release as a fresh entry at
+// the TOP of this array (newest first); APP_VERSION always reflects [0].
+const CHANGELOG = [
+  {
+    version: "1.0.0",
+    date: "2026-07-22",
+    title: "MeetDeck 1.0 — versioned releases begin",
+    notes: [
+      "Introduced version numbers, this update log, and a “what's new” popup that appears once after each update.",
+      "Live meet sheet with race timer, tap-to-lap splits, and auto-advancing heats.",
+      "Relay builder: season-wide fastest lineups, medley optimizer, manual drag-and-drop editing, and scratch/replacement tools with time & place projections (now DQ-risk aware).",
+      "League stats, Team stats, and Meet stats — standings, power rankings, Top Kid leaderboard, and full swimmer profiles.",
+      "Swimmer comparison tool with head-to-head projections and win probability.",
+      "DQ workflow (quick-tap or full reason picker), no-shows, notes, and tags per swimmer, plus relay splits recorded per leg.",
+      "Results-sheet import/merge, roster import, and Google Sheets export.",
+      "Accounts with coach/admin roles and persistent local storage so nothing is lost on refresh.",
+    ],
+  },
+];
+const APP_VERSION = CHANGELOG[0].version;
+const UPDATE_SEEN_KEY = "meetdeck:updateseen:v1";
+
 const ACCOUNTS_KEY = "meetdeck:accounts:v1";
 const SESSION_KEY = "meetdeck:session:v1";
-const DEFAULT_ACCOUNTS = [{ username: "Coach-Cooper", password: "123456", role: "admin" }];
+const DEFAULT_ACCOUNTS = [
+  { username: "Coach-Cooper", password: "123456", role: "admin" },
+  // Dedicated test login — role "test" unlocks the full Update log (every
+  // version, not just the latest) from Settings without needing admin.
+  { username: "Test-Account", password: "test123", role: "test" },
+];
 const findAccount = (accounts, username) => accounts.find((a) => a.username.toLowerCase() === (username || "").trim().toLowerCase());
 
 // Top-level: gates the board behind a login screen and owns the account list,
@@ -2775,9 +2818,47 @@ function AccountsModal({ onClose, accounts, onSave, currentUsername }) {
           <div className="md-mdiv" />
           <label className="md-mrow">New username<input value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" /></label>
           <label className="md-mrow">Password<input value={password} onChange={(e) => setPassword(e.target.value)} /></label>
-          <label className="md-mrow">Role<select value={role} onChange={(e) => setRole(e.target.value)}><option value="coach">Coach</option><option value="admin">Admin</option></select></label>
+          <label className="md-mrow">Role<select value={role} onChange={(e) => setRole(e.target.value)}><option value="coach">Coach</option><option value="admin">Admin</option><option value="test">Test (update log access)</option></select></label>
           {err && <div className="md-loginerr">{err}</div>}
           <button className="md-mbtn primary" onClick={add}>Add account</button>
+        </div>
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+// One-time popup after an update: just the newest CHANGELOG entry, shown
+// once per version bump (App-level check compares APP_VERSION against the
+// last-seen version in storage) — not the whole history, that's the Update log.
+function WhatsNewModal({ entry, onClose }) {
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">🎉 What's new — v{entry.version}</div><div className="md-msub">{entry.title} · {entry.date}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-setbody">
+          <ul className="md-whatsnewlist">{entry.notes.map((n, i) => <li key={i}>{n}</li>)}</ul>
+        </div>
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Got it</button></div>
+      </div>
+    </div>
+  );
+}
+// Full version history — every CHANGELOG entry, newest first. Gated to
+// "test" and "admin" accounts so a coach's day-to-day login doesn't clutter
+// Settings with it, while still being easy to check what shipped when.
+function UpdateLogModal({ onClose }) {
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">📋 Update log</div><div className="md-msub">Every version, newest first.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-setbody">
+          {CHANGELOG.map((entry) => (
+            <div key={entry.version} className="md-lgsection">
+              <div className="md-lgsectitle">v{entry.version} — {entry.title} <em className="md-updatedate">{entry.date}</em></div>
+              <ul className="md-whatsnewlist">{entry.notes.map((n, i) => <li key={i}>{n}</li>)}</ul>
+            </div>
+          ))}
         </div>
         <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
       </div>
@@ -2951,15 +3032,16 @@ function MeetSetupModal({ onClose, meetName, setMeetName, meetDate, setMeetDate,
   );
 }
 
-function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete, session, isAdmin, onLogout, onManageAccounts }) {
+function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete, session, isAdmin, role, onLogout, onManageAccounts, canViewUpdateLog, onUpdateLog }) {
   const [pendingDelete, setPendingDelete] = useState(null);
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">⚙ Settings</div><div className="md-msub">Setup, team, saved meets &amp; data</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">⚙ Settings</div><div className="md-msub">Setup, team, saved meets &amp; data · v{APP_VERSION}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
-          {session && <div className="md-acctrow"><span>Signed in as <b>{session.username}</b>{isAdmin ? " · admin" : ""}</span><button className="md-mbtn sm" onClick={onLogout}>Log out</button></div>}
+          {session && <div className="md-acctrow"><span>Signed in as <b>{session.username}</b>{isAdmin ? " · admin" : role === "test" ? " · test" : ""}</span><button className="md-mbtn sm" onClick={onLogout}>Log out</button></div>}
           {isAdmin && <button className="md-mbtn" onClick={onManageAccounts}>👤 Manage accounts</button>}
+          {canViewUpdateLog && <button className="md-mbtn" onClick={onUpdateLog}>📋 Update log</button>}
           <div className="md-mdiv" />
           <button className="md-mbtn" onClick={onMeetSetup}>Meet set up</button>
           <button className="md-mbtn" onClick={onResults}>Results</button>
@@ -3382,6 +3464,9 @@ html, body, #root { height: 100%; }
 .md-reldeltaline { display:flex; align-items:center; gap:6px; margin-top:4px; flex-wrap:wrap; }
 .md-reldeltalabel { font-size:11px; font-weight:700; color:var(--muted); }
 .md-acctrow { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:12.5px; color:#64748b; }
+.md-whatsnewlist { margin:0; padding-left:20px; display:flex; flex-direction:column; gap:9px; font-size:13.5px; line-height:1.5; color:var(--sink); }
+.md-whatsnewlist li::marker { color:var(--cyan); }
+.md-updatedate { font-weight:600; color:#94a3b8; font-size:12px; margin-left:8px; }
 .md-strip { display:flex; align-items:center; gap:8px; flex-wrap:wrap; overflow-x:auto; }
 .md-strip.dual { gap:14px; }
 .md-tscore { display:inline-flex; align-items:center; gap:6px; background:#0c1c33; border:1px solid var(--line); border-radius:10px; padding:5px 10px; font:inherit; color:inherit; cursor:pointer; }
