@@ -1162,6 +1162,59 @@ function RelayDeltaLine({ label, d }) {
     </div>
   );
 }
+// The scratched relay's own 4 legs, laid out as a mini board — the vacated
+// leg renders as an open drop target, the other 3 as plain read-only chips
+// for context. Candidates below are draggable (Pointer Events, same
+// tap-vs-drag convention as RelayLegDragBoard) onto the open leg; a plain
+// tap still swaps instantly too, since there's only ever one place to put
+// them here — no need to force select-then-place when a drag doesn't add
+// anything a tap couldn't already do faster.
+function RelayCandidateBoard({ legs, targetLeg, relayType, candidates, onSwap }) {
+  const dragRef = useRef(null);
+  const [draggingName, setDraggingName] = useState(null);
+  const [overSlot, setOverSlot] = useState(false);
+  const TAP_SLOP = 6;
+  const isOverSlot = (x, y) => { const el = document.elementFromPoint(x, y); return !!(el && el.closest && el.closest("[data-relay-slot]")); };
+  const onDown = (e, c) => { dragRef.current = { c, x0: e.clientX, y0: e.clientY, moved: false }; setDraggingName(c.name); e.currentTarget.setPointerCapture(e.pointerId); e.preventDefault(); };
+  const onMove = (e) => { if (!dragRef.current) return; if (Math.hypot(e.clientX - dragRef.current.x0, e.clientY - dragRef.current.y0) > TAP_SLOP) dragRef.current.moved = true; setOverSlot(isOverSlot(e.clientX, e.clientY)); };
+  const onUp = (e) => {
+    if (!dragRef.current) return;
+    const cur = dragRef.current; dragRef.current = null; setDraggingName(null); setOverSlot(false);
+    if (cur.moved) { if (isOverSlot(e.clientX, e.clientY)) onSwap(cur.c); return; }
+    onSwap(cur.c);
+  };
+  return (
+    <div className="md-relayreplaceboard">
+      <div className="md-rbdraglegs">
+        {legs.map((name, i) => i === targetLeg ? (
+          <div key={i} data-relay-slot className={"md-rbdragleg empty" + (overSlot ? " over" : "")}>
+            {relayType === "Medley" && <span className="md-rbeditstroke">{MEDLEY_LEGS[i] || "Free"}</span>}
+            <span className="md-cmpslotempty">Drop swimmer here</span>
+          </div>
+        ) : (
+          <div key={i} className="md-rbdragleg filled">
+            {relayType === "Medley" && <span className="md-rbeditstroke">{MEDLEY_LEGS[i] || "Free"}</span>}
+            <span className="md-rbchip readonly">{name}</span>
+          </div>
+        ))}
+      </div>
+      <div className="md-rbbenchlabel">Drag a name onto the open leg — or just tap one to swap them in</div>
+      <div className="md-relaycandlist">
+        {candidates.map((c) => (
+          <button key={c.name} type="button" className={"md-mbtn" + (draggingName === c.name ? " dragging" : "")} style={{ touchAction: "none" }}
+            onPointerDown={(e) => onDown(e, c)} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
+            <b>{c.name}</b>{c.age ? ` (${c.age})` : ""} — {c.best != null ? fmtT(c.best) : "no time on record"}
+            {c.moveFrom && <em style={{ marginLeft: 6, color: "#7c3aed", fontStyle: "normal" }}>currently on {shortEvent(c.moveFrom.eventName)} — moving them leaves a gap there</em>}
+            {!c.verified && <em style={{ marginLeft: 6, color: "#a8842a", fontStyle: "normal" }}>unverified age/gender</em>}
+            {c.dqCount > 0 && <em style={{ marginLeft: 6, color: "#b42318", fontStyle: "normal" }}>⚠ {c.dqCount} DQ{c.dqCount > 1 ? "s" : ""} this meet</em>}
+            <RelayDeltaLine label="This relay:" d={c.thisDelta} />
+            {c.donorDelta && <RelayDeltaLine label={"Their relay (backfilled by " + c.donorDelta.backfillName + "):"} d={c.donorDelta} />}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 function RelayReplaceModal({ target, candidates, plan, planDelta, originalLegs, onClose, onSwap, onApplyPlan }) {
   return (
     <div className="md-scrim" onClick={onClose}>
@@ -1186,16 +1239,9 @@ function RelayReplaceModal({ target, candidates, plan, planDelta, originalLegs, 
             </div>
             {planDelta && <RelayDeltaLine label="This relay, projected:" d={planDelta} />}
             <button className="md-mbtn primary" onClick={onApplyPlan}>Apply this lineup</button>
-          </>) : candidates.length ? candidates.map((c) => (
-            <button key={c.name} className="md-mbtn" onClick={() => onSwap(c)}>
-              <b>{c.name}</b>{c.age ? ` (${c.age})` : ""} — {c.best != null ? fmtT(c.best) : "no time on record"}
-              {c.moveFrom && <em style={{ marginLeft: 6, color: "#7c3aed", fontStyle: "normal" }}>currently on {shortEvent(c.moveFrom.eventName)} — moving them leaves a gap there</em>}
-              {!c.verified && <em style={{ marginLeft: 6, color: "#a8842a", fontStyle: "normal" }}>unverified age/gender</em>}
-              {c.dqCount > 0 && <em style={{ marginLeft: 6, color: "#b42318", fontStyle: "normal" }}>⚠ {c.dqCount} DQ{c.dqCount > 1 ? "s" : ""} this meet</em>}
-              <RelayDeltaLine label="This relay:" d={c.thisDelta} />
-              {c.donorDelta && <RelayDeltaLine label={"Their relay (backfilled by " + c.donorDelta.backfillName + "):"} d={c.donorDelta} />}
-            </button>
-          )) : <div className="md-prevempty">No eligible teammate found on the roster for this age group.</div>}
+          </>) : candidates.length ? (
+            <RelayCandidateBoard legs={originalLegs} targetLeg={target.leg ?? originalLegs.indexOf(target.name)} relayType={/medley/i.test(target.eventName) ? "Medley" : "Free"} candidates={candidates} onSwap={onSwap} />
+          ) : <div className="md-prevempty">No eligible teammate found on the roster for this age group.</div>}
           <button className="md-cancel" onClick={onClose}>Leave relay short (keep scratch)</button>
         </div>
       </div>
@@ -1925,7 +1971,7 @@ function simulateRelayField(projected, iters = 3000) {
 // elementFromPoint since captured pointers don't fire hover/enter events on
 // other elements. A tap that barely moves is treated as select-then-move
 // instead of a drag, for coaches who find two taps easier than a drag.
-function RelayLegDragBoard({ legs, bench, relayType, mixed, doubleANames, doubleASeverity, onAssign }) {
+function RelayLegDragBoard({ legs, bench, relayType, mixed, doubleAInfo, onAssign }) {
   const dragRef = useRef(null);
   const [overLeg, setOverLeg] = useState(null);
   const [draggingName, setDraggingName] = useState(null);
@@ -1949,7 +1995,7 @@ function RelayLegDragBoard({ legs, bench, relayType, mixed, doubleANames, double
     if (tapped.legIdx != null) { onAssign(selected, tapped.legIdx); setSelected(null); return; }
     setSelected(tapped);
   };
-  const doubleACls = (name) => doubleANames && doubleANames.includes(name) ? " doubleA-" + doubleASeverity : "";
+  const doubleACls = (name) => doubleAInfo && doubleAInfo[name] ? " doubleA-" + doubleAInfo[name] : "";
   const chip = (name, age, gender, source, legIdx, cls) => (
     <button key={name} type="button" className={"md-rbchip" + (cls ? " " + cls : "") + (draggingName === name ? " dragging" : "") + (isSame(selected, { name, source, legIdx }) ? " selected" : "") + doubleACls(name)} style={{ touchAction: "none" }}
       onPointerDown={(e) => onDown(e, name, source, legIdx)} onPointerMove={onMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
@@ -2127,12 +2173,30 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const teamCard = (r, rankIdx, extraClass) => {
     const key = keyFor(r.team); const isLocked = !!locked[key]; const hasOverride = overrides[key] && overrides[key].some(Boolean); const roster = editing === r.team ? rosterFor(r.team) : [];
     const excluded = excludeByTeam(r.team); // this team's other-type A relay, locked in — those 4 aren't eligible here
-    const otherLocked = locked[keyFor(r.team, otherType)];
-    const doubleANames = otherLocked ? r.legs.filter((l) => otherLocked.swimmers.some((s) => s.name === l.name)).map((l) => l.name) : [];
-    const doubleASeverity = hasRelayDepth(r.team) ? "red" : "yellow";
+    // A swimmer already claimed by ANY other locked relay for this team (same
+    // type different letter — e.g. Free-A vs Free-B — or the cross-type
+    // Free-vs-Medley check the depth rule is built around) gets flagged here.
+    // Automatic depth-relaxed doubling (the roster's too shallow under 8 to
+    // keep every A relay distinct) is yellow — an accepted exception; a
+    // manual edit that creates the same conflict is always red, since the
+    // coach deliberately double-booked someone the builder wouldn't have on
+    // its own.
+    const doubleAInfo = {};
+    r.legs.forEach((l, legIdx) => {
+      const conflict = Object.entries(locked).find(([k, rel]) => k !== key && rel.team === r.team && rel.swimmers.some((s) => s.name === l.name));
+      if (!conflict) return;
+      const manual = !!(overrides[key] && overrides[key][legIdx]);
+      doubleAInfo[l.name] = manual ? "red" : (hasRelayDepth(r.team) ? "red" : "yellow");
+    });
+    // A mixed relay that couldn't hold the usual 2-girl/2-boy split (roster
+    // came up short of one gender) gets a small badge — an accepted
+    // exception as long as the roster genuinely didn't have the numbers.
+    const boysCount = mixed ? r.legs.filter((l) => l.gender === "Boys").length : 0;
+    const girlsCount = mixed ? r.legs.filter((l) => l.gender === "Girls").length : 0;
+    const genderImbalanced = mixed && (boysCount === 3 || girlsCount === 3);
     return (
-      <div key={r.team} className={"md-rbteam" + (extraClass ? " " + extraClass : "") + (isLocked ? " locked" : "")}>
-        <div className="md-rbhead"><span className="md-rbrank">{rankIdx + 1}</span><span className="md-rbteamname" style={{ color: teamColor(r.team) }}>{r.team}</span>
+      <div key={r.team} className={"md-rbteam" + (extraClass ? " " + extraClass : "") + (isLocked ? " locked" : "") + (genderImbalanced ? " genderflag" : "")}>
+        <div className="md-rbhead"><span className="md-rbrank">{rankIdx + 1}</span><span className="md-rbteamname" style={{ color: teamColor(r.team) }}>{r.team}{genderImbalanced && <em className="md-rbimbalance" title="Roster couldn't fill the usual 2 girls / 2 boys split">⚠ {boysCount}B/{girlsCount}G</em>}</span>
           <span className="md-rbtotal">{fmtT(r.projTotal)}<span className="md-rbproj">seed {fmtT(r.total)}</span></span>
           {rankIdx > 0 && <span className="md-rbgap">+{fmtT(r.projTotal - projected[0].projTotal)}</span>}
           <button className={"md-rblock" + (isLocked ? " on" : "")} onClick={() => toggleLock(r)}>{isLocked ? "🔒 Locked" : "🔓 Lock in"}</button>
@@ -2146,14 +2210,13 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
               bench={roster.filter((c) => !r.legs.some((l) => l.name === c.name) && (!excluded || !excluded.has(c.name))).map((c) => ({ ...c, gender: genderMap[c.name + "|" + r.team] }))}
               relayType={relayType}
               mixed={mixed}
-              doubleANames={doubleANames}
-              doubleASeverity={doubleASeverity}
+              doubleAInfo={doubleAInfo}
               onAssign={(drag, targetIdx) => onAssign(r, drag, targetIdx)}
             />
             {hasOverride && <button className="md-rbreset" onClick={() => setOverrides((o) => ({ ...o, [key]: null }))}>↺ Reset to auto-picked</button>}
           </div>
         ) : (
-          <div className="md-rbswimmers">{r.legs.map((l, j) => <span key={j} className={"md-rbswim" + (doubleANames.includes(l.name) ? " doubleA-" + doubleASeverity : "")}>{l.gender ? <em className={"md-gtick " + l.gender.toLowerCase()}>{l.gender[0]}</em> : null}{relayType === "Medley" && <b className="md-rbstroke">{l.stroke} </b>}{l.name} <em>{fmtT(l.likely)}</em></span>)}</div>
+          <div className="md-rbswimmers">{r.legs.map((l, j) => <span key={j} className={"md-rbswim" + (doubleAInfo[l.name] ? " doubleA-" + doubleAInfo[l.name] : "")}>{l.gender ? <em className={"md-gtick " + l.gender.toLowerCase()}>{l.gender[0]}</em> : null}{relayType === "Medley" && <b className="md-rbstroke">{l.stroke} </b>}{l.name} <em>{fmtT(l.likely)}</em></span>)}</div>
         )}
         <div className="md-rbprob"><div className="md-rbprobbar"><div className="md-rbprobfill" style={{ width: ((winProb[r.team] || 0) * 100).toFixed(0) + "%" }} /></div><span className="md-rbprobval">{((winProb[r.team] || 0) * 100).toFixed(0)}%</span></div>
       </div>
@@ -3064,6 +3127,16 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // redesign or workflow change. Add every new release as a fresh entry at
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
+  {
+    version: "2.3.0",
+    date: "2026-07-23",
+    title: "Relay builder conflict flags, drag-drop replacement screen",
+    notes: [
+      "Relay builder now flags a doubled-up swimmer yellow when it's an accepted exception (roster too shallow for 8 in that age group) and red when it's a manual edit that double-books someone already locked into another relay.",
+      "Mixed relays that came up 3-boys/1-girl or 1-boy/3-girls instead of the usual 2/2 split now get a small warning badge on the team card.",
+      "Replacing a scratched relay swimmer is now a drag-drop board — drag a candidate onto the open leg, or just tap one to swap them in instantly.",
+    ],
+  },
   {
     version: "2.2.1",
     date: "2026-07-23",
@@ -4585,6 +4658,8 @@ html, body, #root { height: 100%; }
 .md-rbhometeamlabel { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:#94a3b8; margin-bottom:4px; }
 .md-rbteam.top { margin-bottom:0; }
 .md-rbteam.locked { border-color:#0e7490; box-shadow:0 0 0 1px #0e7490 inset; }
+.md-rbteam.genderflag { border-color:#f59e0b; }
+.md-rbimbalance { font-style:normal; font-size:10.5px; font-weight:800; color:#92600a; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:1px 6px; margin-left:8px; vertical-align:middle; }
 .md-rblock { padding:4px 9px; border-radius:7px; border:1px solid var(--sline); background:#fff; color:#475569; font-weight:800; font-size:11px; cursor:pointer; }
 .md-rblock.on { border-color:#0e7490; color:#0e7490; background:#ecfeff; }
 .md-rbrevert { padding:4px 9px; border-radius:7px; border:1px dashed #7c3aed; background:#fff; color:#7c3aed; font-weight:800; font-size:11px; cursor:pointer; }
@@ -4612,6 +4687,12 @@ html, body, #root { height: 100%; }
 .md-rbdraglegs { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; margin-bottom:10px; }
 .md-rbdragleg { border:2px dashed transparent; border-radius:9px; padding:2px; transition:border-color .1s; }
 .md-rbdragleg.over { border-color:#0e7490; background:#ecfeff; }
+.md-rbdragleg.empty { border-color:var(--sline); min-height:44px; display:flex; align-items:center; justify-content:center; }
+.md-rbdragleg.filled { padding:4px; }
+.md-rbchip.readonly { cursor:default; touch-action:auto; }
+.md-relayreplaceboard { display:flex; flex-direction:column; }
+.md-relaycandlist { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+.md-mbtn.dragging { opacity:.4; }
 .md-rbdragleg.selectable { border-color:#cbd5e1; }
 .md-rbchip { width:100%; display:flex; align-items:center; gap:5px; padding:8px 10px; border-radius:8px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:12.5px; color:var(--sink); cursor:grab; user-select:none; }
 .md-rbchip:active, .md-rbchip.dragging { cursor:grabbing; opacity:.45; box-shadow:0 4px 10px rgba(0,0,0,.15); }
