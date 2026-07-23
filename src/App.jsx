@@ -663,31 +663,65 @@ function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
   );
 }
 
-// Team stats: high points + most improved, grouped by age.
-function StatsModal({ onClose, events, data, mode, filter, homeTeam }) {
-  const pts = useMemo(() => computeSwimmerPoints(events, data, mode, filter), [events, data, mode, filter]);
-  const imp = useMemo(() => computeImprovements(events, data, homeTeam), [events, data, homeTeam]);
-  const ptByGrp = {}; Object.values(pts).filter((x) => x.team === homeTeam && x.pts > 0).sort((a, b) => b.pts - a.pts).forEach((x) => { const g = ageGroupOf(x.age) || "Open"; (ptByGrp[g] || (ptByGrp[g] = [])).push(x); });
+// One team's High points + Most improved columns — the whole body of the
+// single-team view, reused a second time side by side in compare mode so
+// the two teams read as identical, directly comparable blocks.
+function TeamStatCols({ team, events, data, pts, mode }) {
+  const imp = useMemo(() => computeImprovements(events, data, team), [events, data, team]);
+  const ptByGrp = {}; Object.values(pts).filter((x) => x.team === team && x.pts > 0).sort((a, b) => b.pts - a.pts).forEach((x) => { const g = ageGroupOf(x.age) || "Open"; (ptByGrp[g] || (ptByGrp[g] = [])).push(x); });
   const impByGrp = {}; Object.values(imp).sort((a, b) => b.drop - a.drop).forEach((x) => { const g = ageGroupOf(x.age) || "Open"; (impByGrp[g] || (impByGrp[g] = [])).push(x); });
   const groups = AGE_GROUPS.filter((g) => ptByGrp[g] || impByGrp[g]);
   return (
+    <div className="md-statwrap">
+      <div className="md-statcol">
+        <div className="md-stath">🏆 High points by age</div>
+        {groups.some((g) => ptByGrp[g]) ? groups.map((g) => ptByGrp[g] && (<div key={g} className="md-agegrp"><div className="md-agehdr">{g}</div>
+          {ptByGrp[g].map((x, i) => <div key={x.name} className="md-statrow"><span className="md-statrank">{i + 1}</span><span className="md-statname statid"><span className={"md-gpill sm " + (x.gender || "mixed").toLowerCase()}>{(x.gender || "?")[0]}</span>{x.name}{x.age ? <em className="md-statage">{x.age}</em> : null}</span><span className="md-statsub">{x.count} swim{x.count > 1 ? "s" : ""}</span><span className="md-statval gold">{x.pts}</span></div>)}
+        </div>)) : <div className="md-prevempty">No points yet{mode === "timetrial" ? " (time trials don't score)" : ""}.</div>}
+      </div>
+      <div className="md-statcol">
+        <div className="md-stath">📉 Most improved by age</div>
+        {groups.some((g) => impByGrp[g]) ? groups.map((g) => impByGrp[g] && (<div key={g} className="md-agegrp"><div className="md-agehdr">{g}</div>
+          {impByGrp[g].slice(0, 6).map((x) => <div key={x.name} className="md-statrow"><span className={"md-gpill " + x.gender.toLowerCase()}>{x.gender[0]}</span><span className="md-statname">{x.name}</span><span className="md-statsub">{x.ev}</span><span className="md-statval green">−{x.drop.toFixed(2)}</span></div>)}
+        </div>)) : <div className="md-prevempty">No improvements yet — enter final times.</div>}
+      </div>
+    </div>
+  );
+}
+
+// Team stats: high points + most improved, grouped by age — with an
+// optional side-by-side compare mode against any other team in the meet,
+// defaulting to the dual-meet opponent when there is one.
+function StatsModal({ onClose, events, data, mode, filter, homeTeam, teams, awayTeam }) {
+  const pts = useMemo(() => computeSwimmerPoints(events, data, mode, filter), [events, data, mode, filter]);
+  const [compareOn, setCompareOn] = useState(false);
+  const otherTeams = useMemo(() => (teams || []).filter((t) => t !== homeTeam), [teams, homeTeam]);
+  const [teamB, setTeamB] = useState(null);
+  useEffect(() => { if (compareOn && !teamB) setTeamB((awayTeam && awayTeam !== homeTeam ? awayTeam : otherTeams[0]) || null); }, [compareOn, teamB, awayTeam, homeTeam, otherTeams]);
+  return (
     <div className="md-scrim" onClick={onClose}>
-      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Meet stats — {homeTeam}</div><div className="md-msub">{mode === "timetrial" ? "Time trials" : mode === "champs" ? "Champs" : "Dual"} · by age group · live</div></div><button className="md-x" onClick={onClose}>✕</button></div>
-        <div className="md-statwrap">
-          <div className="md-statcol">
-            <div className="md-stath">🏆 High points by age</div>
-            {groups.some((g) => ptByGrp[g]) ? groups.map((g) => ptByGrp[g] && (<div key={g} className="md-agegrp"><div className="md-agehdr">{g}</div>
-              {ptByGrp[g].map((x, i) => <div key={x.name} className="md-statrow"><span className="md-statrank">{i + 1}</span><span className="md-statname statid"><span className={"md-gpill sm " + (x.gender || "mixed").toLowerCase()}>{(x.gender || "?")[0]}</span>{x.name}{x.age ? <em className="md-statage">{x.age}</em> : null}</span><span className="md-statsub">{x.count} swim{x.count > 1 ? "s" : ""}</span><span className="md-statval gold">{x.pts}</span></div>)}
-            </div>)) : <div className="md-prevempty">No points yet{mode === "timetrial" ? " (time trials don't score)" : ""}.</div>}
+      <div className={"md-modal md-imp" + (compareOn && teamB ? " md-statscompare" : "")} onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Meet stats — {homeTeam}{compareOn && teamB ? ` vs ${teamB}` : ""}</div><div className="md-msub">{mode === "timetrial" ? "Time trials" : mode === "champs" ? "Champs" : "Dual"} · by age group · live</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        {otherTeams.length > 0 && (
+          <div className="md-statscomparebar">
+            <button className={"md-statsfilterbtn" + (compareOn ? " on" : "")} onClick={() => setCompareOn((o) => !o)}>⇄ Compare teams{compareOn ? " •" : ""}</button>
+            {compareOn && <label className="md-ctl">vs<select value={teamB || ""} onChange={(e) => setTeamB(e.target.value)}>
+              {otherTeams.map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}
+            </select></label>}
           </div>
-          <div className="md-statcol">
-            <div className="md-stath">📉 Most improved by age</div>
-            {groups.some((g) => impByGrp[g]) ? groups.map((g) => impByGrp[g] && (<div key={g} className="md-agegrp"><div className="md-agehdr">{g}</div>
-              {impByGrp[g].slice(0, 6).map((x) => <div key={x.name} className="md-statrow"><span className={"md-gpill " + x.gender.toLowerCase()}>{x.gender[0]}</span><span className="md-statname">{x.name}</span><span className="md-statsub">{x.ev}</span><span className="md-statval green">−{x.drop.toFixed(2)}</span></div>)}
-            </div>)) : <div className="md-prevempty">No improvements yet — enter final times.</div>}
+        )}
+        {compareOn && teamB ? (
+          <div className="md-teamscols">
+            <div className="md-teamstatblock">
+              <div className="md-teamstatname" style={{ color: teamColor(homeTeam) }}>{TEAM_NAME[homeTeam] || homeTeam}</div>
+              <TeamStatCols team={homeTeam} events={events} data={data} pts={pts} mode={mode} />
+            </div>
+            <div className="md-teamstatblock">
+              <div className="md-teamstatname" style={{ color: teamColor(teamB) }}>{TEAM_NAME[teamB] || teamB}</div>
+              <TeamStatCols team={teamB} events={events} data={data} pts={pts} mode={mode} />
+            </div>
           </div>
-        </div>
+        ) : <TeamStatCols team={homeTeam} events={events} data={data} pts={pts} mode={mode} />}
         <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
       </div>
     </div>
@@ -2868,7 +2902,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           if (STORE) { (async () => { try { await STORE.set(id, JSON.stringify(snap)); let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {} idx = idx.filter((x) => x.meetName !== name || x.date !== saveDate); idx.push({ id, meetName: name, mode: mtype, date: saveDate }); await STORE.set(INDEX_KEY, JSON.stringify(idx)); } catch (e) {} })(); }
           flash("Saved new meet: " + name);
         }} />}
-      {modal === "stats" && <StatsModal onClose={() => { setModal(null); setStatsTeam(null); }} events={events} data={data} mode={mode} filter={filter} homeTeam={statsTeam || homeTeam} />}
+      {modal === "stats" && <StatsModal onClose={() => { setModal(null); setStatsTeam(null); }} events={events} data={data} mode={mode} filter={filter} homeTeam={statsTeam || homeTeam} teams={teamsPresent} awayTeam={awayTeam} />}
       {modal === "participants" && <ParticipantsModal onClose={() => setModal(null)} events={events} data={data} homeTeam={homeTeam}
         onOne={(entry, val) => { update(entry.id, { scratched: val });
           if (val && entry.relay) { pushRelayUndo("Scratched " + entry.name, () => { update(entry.id, { scratched: false }); flash("Undone"); }); setRelayReplaceTarget({ evIdx: entry.evIdx, htIdx: entry.htIdx, lane: entry.relayLane, leg: entry.leg, name: entry.name, team: entry.team, eventName: events[entry.evIdx]?.name || entry.ev }); } }}
@@ -2919,6 +2953,14 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // redesign or workflow change. Add every new release as a fresh entry at
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
+  {
+    version: "1.3.0",
+    date: "2026-07-23",
+    title: "Meet stats: dual-team comparison mode",
+    notes: [
+      "Meet stats now has a Compare teams toggle — pick any other team in the meet (defaults to your dual-meet opponent) to see both teams' High points and Most improved side by side, stacked per team so names never get clipped.",
+    ],
+  },
   {
     version: "1.2.1",
     date: "2026-07-23",
@@ -4231,6 +4273,21 @@ html, body, #root { height: 100%; }
 .md-statwrap { display:grid; grid-template-columns:1fr 1fr; gap:0; overflow:hidden; flex:1; min-height:0; }
 @media (max-width:720px){ .md-statwrap { grid-template-columns:1fr; overflow-y:auto; } }
 .md-tsmodal { max-width:900px; }
+.md-statscompare { max-width:1040px; }
+.md-statscomparebar { display:flex; align-items:center; gap:10px; padding:8px 16px; border-bottom:1px solid var(--sline); }
+.md-statscomparebar .md-statsfilterbtn { border:1px solid var(--sline); background:#fff; color:#475569; }
+.md-statscomparebar .md-statsfilterbtn.on { background:#0f2036; border-color:#0f2036; color:#fff; }
+.md-statscomparebar .md-statsfilterbtn:hover { background:#f1f5f9; }
+.md-statscomparebar .md-statsfilterbtn.on:hover { background:#16304f; }
+.md-teamscols { display:flex; flex:1; min-height:0; overflow:hidden; }
+.md-teamstatblock { flex:1; min-width:0; display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--sline); }
+.md-teamstatblock:last-child { border-right:none; }
+/* Each team block gets one column's worth of width, not a quarter of the
+   modal — stack High points and Improved vertically (same variant already
+   used on narrow screens) instead of squeezing both into half a column,
+   which was clipping names down to a few letters. */
+.md-teamstatblock .md-statwrap { grid-template-columns:1fr; overflow-y:auto; }
+.md-teamstatname { font-weight:900; font-size:14px; padding:10px 16px 2px; }
 .md-tsbanner { padding:18px 20px; color:#fff; display:flex; flex-direction:column; gap:12px; }
 .md-tsbannertop { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .md-tsbannerteam { font-size:22px; font-weight:900; }
