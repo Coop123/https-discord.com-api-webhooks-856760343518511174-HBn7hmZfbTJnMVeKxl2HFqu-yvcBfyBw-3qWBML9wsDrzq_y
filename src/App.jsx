@@ -2295,6 +2295,11 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   const [meetGateDismissed, setMeetGateDismissed] = useState(false);
   const [showFinalizeDqs, setShowFinalizeDqs] = useState(false);
   const autoFinalizeShown = useRef(false);
+  // A finalized meet is locked (notes/DQ editing disabled except any DQ left
+  // deferred at finalize time) and its left column swaps to a review layout.
+  // Loading any saved meet counts as finalized too — a meet pulled back up
+  // from Settings is by definition a past one, not one still being run.
+  const [meetFinalized, setMeetFinalized] = useState(false);
   const lanesPerHeat = dualLanes;
   const sheetRef = useRef(null);
   const evRefs = useRef({});
@@ -2377,7 +2382,16 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   }, [curKey, curHeatComplete, flatHeats.length]);
   const pendingDqs = useMemo(() => pendingDqList(events, data), [events, data]);
   const meetOver = flatHeats.length > 0 && ptr === flatHeats.length - 1 && curHeatComplete;
-  useEffect(() => { if (meetOver && pendingDqs.length && !autoFinalizeShown.current) { autoFinalizeShown.current = true; setShowFinalizeDqs(true); } }, [meetOver, pendingDqs.length]);
+  // Review layout data (finalized meets only): the next 3 events after
+  // wherever the coach is currently scrolled, for quick jumping, and a
+  // top-10 scorer board standing in for "final results" — a finalized meet
+  // has no more live heat to show, so On Deck/In The Water get repurposed.
+  const nextEvents = useMemo(() => { if (!current) return []; const out = []; for (let i = current.evIdx + 1; i < events.length && out.length < 3; i++) out.push({ ev: events[i], evIdx: i }); return out; }, [events, current]);
+  const topScorers = useMemo(() => meetFinalized ? Object.values(computeSwimmerPoints(events, data, mode)).sort((a, b) => b.pts - a.pts).slice(0, 10) : [], [meetFinalized, events, data, mode]);
+  // Offers finalization once the meet is over regardless of whether any DQs
+  // are still pending — a clean meet still needs the "finalize or keep
+  // editing" choice, not just one with open DQs.
+  useEffect(() => { if (meetOver && !meetFinalized && !autoFinalizeShown.current) { autoFinalizeShown.current = true; setShowFinalizeDqs(true); } }, [meetOver, meetFinalized]);
   const prevList = useMemo(() => previous ? [...previous.lanes].map((l) => { const id = entryId(previous.evIdx, previous.htIdx, l.lane); return { id, l, time: (data[id] || {}).time, place: prevHeatPlaces[id] }; }).sort((a, b) => (a.place || 99) - (b.place || 99) || a.l.lane - b.l.lane) : [], [previous, data, prevHeatPlaces]);
   const [toast, setToast] = useState("");
   const [relayUndo, setRelayUndo] = useState(null); // { label, fn }
@@ -2464,12 +2478,12 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {}
       idx = idx.filter((x) => x.meetName !== meetName || x.date !== date); idx.push({ id, meetName, mode, date });
       await STORE.set(INDEX_KEY, JSON.stringify(idx)); flash("Saved to season ✓"); } catch (e) { flash("Saved (storage limit — kept for this session)"); } };
-  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
+  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = true; setMeetFinalized(true); setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
   const deleteMeet = async (id) => { if (STORE) { try { await STORE.delete(id); } catch (e) {} try { const r = await STORE.get(INDEX_KEY); if (r && r.value) await STORE.set(INDEX_KEY, JSON.stringify(JSON.parse(r.value).filter((x) => x.id !== id))); } catch (e) {} } setSeasonMeets((a) => a.filter((m) => m.id !== id)); flash("Meet removed"); };
   const clearData = async () => { if (typeof window !== "undefined" && window.confirm && !window.confirm("Clear all saved meets and reset the board? This can't be undone.")) return;
     if (STORE) { try { const r = await STORE.get(INDEX_KEY); if (r && r.value) for (const it of JSON.parse(r.value)) { try { await STORE.delete(it.id); } catch (e) {} } } catch (e) {}
       try { await STORE.delete(INDEX_KEY); } catch (e) {} try { await STORE.delete(CUR_KEY); } catch (e) {} }
-    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); setHeatPtr(4); setModal(null); flash("Data cleared"); };
+    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false); setHeatPtr(4); setModal(null); flash("Data cleared"); };
   const toggleTag = (id, key) => { const tags = { ...get(id).tags }; tags[key] ? delete tags[key] : (tags[key] = true); update(id, { tags }); };
   const toggleDqCode = (id, group, code, reason, swimmer) => { let dqs = [...(get(id).dqs || [])]; const i = dqs.findIndex((q) => q.code === code); if (i >= 0) dqs.splice(i, 1); else { dqs = dqs.filter((q) => q.code !== PEND_DQ_CODE); dqs.push({ code, reason, group, ...(swimmer ? { swimmer } : {}) }); } update(id, { dqs }); };
   // Quick tap: flag a DQ instantly with the reason left pending (toggles off
@@ -2585,9 +2599,13 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   };
   // Swipe-right on any row jumps straight to the DQ/NS picker, skipping the
   // popover entirely — same target resolution as the popover's own DQ button
-  // below, so a leg swimmer inside a relay still DQs just that one leg.
+  // below, so a leg swimmer inside a relay still DQs just that one leg. A
+  // finalized meet blocks this too, except for a DQ still left pending —
+  // same exception the popover's own DQ button honors.
   const openDqDirect = (id, el) => {
     const info = swimmerAt(id); if (!info) return;
+    const d = get(info.relayBase || id);
+    if (meetFinalized && !isPendingDq(d)) return;
     setDqTarget(info.relayBase || id); setDqSwimmer(info.leg !== undefined ? info.sw.name : null); setDqNsTarget(id); setDqAnchorRect(el.getBoundingClientRect()); setPop(null); setAgeStack([]);
   };
   // Double-tap on your own team's row opens the usual popover pre-focused on
@@ -2601,7 +2619,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     const info = swimmerAt(id); if (!info) return null;
     const d = get(id);
     return (
-      <ActionPopover key={key} info={info} d={d} mine={info.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(info.eventName)} hideSplits={info.leg !== undefined || !!info.sw.swimmers} relaySwimmer={info.leg !== undefined} relaySplit={info.leg !== undefined ? (get(info.relayBase).splits || [])[info.leg] : null} progMeets={progMeets} rect={rect} depth={depth} onClose={onCloseThis} autoFocusNotes={!!focusNotes}
+      <ActionPopover key={key} info={info} d={d} mine={info.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(info.eventName)} hideSplits={info.leg !== undefined || !!info.sw.swimmers} relaySwimmer={info.leg !== undefined} relaySplit={info.leg !== undefined ? (get(info.relayBase).splits || [])[info.leg] : null} progMeets={progMeets} rect={rect} depth={depth} onClose={onCloseThis} autoFocusNotes={!!focusNotes} locked={meetFinalized && !isPendingDq(d)}
         onDq={() => { setDqTarget(info.relayBase || id); setDqSwimmer(info.leg !== undefined ? info.sw.name : null); setDqNsTarget(id); setDqAnchorRect(rect); setPop(null); setAgeStack([]); }}
         onDqQuick={() => toggleQuickDq(info.relayBase || id, info.leg !== undefined ? info.sw.name : null)}
         onToggle={(k) => toggleTag(id, k)} onSplits={(a) => update(id, { splits: a })} onNotes={(v) => update(id, { notes: v })} onNoShow={() => update(id, { noshow: !isNoShow(get(id)) })}
@@ -2618,7 +2636,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     // press Start — without this, a stale startedHeats/autoEnded entry left
     // over from whatever heat happened to share the same evIdx:htIdx key in
     // the previous meet would make the new first heat look already running.
-    setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false);
+    setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false);
     setRelaySwapHistory({}); setModal("meetsetup"); };
   const scrollToEvent = (evId) => { const el = evRefs.current[evId]; if (el && sheetRef.current) sheetRef.current.scrollTo({ top: el.offsetTop - 8, behavior: "smooth" }); };
   const jumpToCurrent = () => scrollToEvent(current?.evId);
@@ -2669,7 +2687,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
               <button className="md-mbtn" onClick={() => { setModal("season"); setMenuOpen(false); }}>Team stats</button>
               <div className="md-menutitle">Meet day</div>
               <button className="md-mbtn" onClick={() => { setModal("participants"); setMenuOpen(false); }}>Scratches</button>
-              <button className="md-mbtn" onClick={() => { setShowFinalizeDqs(true); setMenuOpen(false); }}>🚩 Finalize DQs{pendingDqs.length ? ` (${pendingDqs.length})` : ""}</button>
+              <button className="md-mbtn" onClick={() => { setShowFinalizeDqs(true); setMenuOpen(false); }}>🚩 {meetFinalized ? "DQs still pending" : "Finalize meet"}{pendingDqs.length ? ` (${pendingDqs.length})` : ""}</button>
               <div className="md-menutitle">Meet day analytics</div>
               <button className="md-mbtn" onClick={() => { setModal("relay"); setMenuOpen(false); }}>Relay builder</button>
               <button className="md-mbtn" onClick={() => { setModal("compare"); setMenuOpen(false); }}>Swimmer comparison</button>
@@ -2684,6 +2702,31 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       <div className="md-grid">
         {/* -------- LEFT: fixed stack -------- */}
         <section className={"md-left" + (showStartGate ? " gated" : "")}>
+          {meetFinalized ? (<>
+          <div className="md-panel od final">
+            <div className="md-phead"><span className="md-eyebrow">Next up</span></div>
+            <div className="md-finalnext">
+              {nextEvents.length ? nextEvents.map(({ ev, evIdx }) => (
+                <button key={ev.id} className="md-finalnextrow" onClick={() => goToEventIdx(evIdx)}>
+                  <span className="md-evnum">#{ev.num}</span> {shortEvent(ev.name)}
+                </button>
+              )) : <div className="md-prevempty">End of the meet program.</div>}
+            </div>
+          </div>
+          <div ref={waterPanelRef} className="md-panel water grow final">
+            <div className="md-phead"><span className="md-eyebrow">Final results — top scorers</span></div>
+            <div className="md-finalresults">
+              {topScorers.length ? topScorers.map((s, i) => (
+                <div key={s.name + "|" + s.team} className={"md-finalresultrow" + (s.team === homeTeam ? " mine" : "")}>
+                  <span className="md-place">{i + 1}</span>
+                  <span className="md-resname">{s.name}</span>
+                  <span className="md-resteam" style={{ color: teamColor(s.team) }}>{s.team}{s.age ? " · " + s.age : ""}</span>
+                  <span className="md-respts">{s.pts} pts</span>
+                </div>
+              )) : <div className="md-prevempty">No scored swims yet.</div>}
+            </div>
+          </div>
+          </>) : (<>
           <div className="md-panel od">
             <div className="md-phead"><span className="md-eyebrow">On deck</span>
               <span className="md-pmeta">{onDeck ? `#${events[onDeck.evIdx].num} ${shortEvent(onDeck.eventName)} · H${onDeck.num}` : "—"}</span></div>
@@ -2743,6 +2786,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
                       onSwipeDq={(el) => openDqDirect(id, el)} onNotesTap={(el) => openPopNotes(id, el)} />)}
                 </div>)}
           </div>
+          </>)}
         </section>
 
         {/* -------- RIGHT: results ticker + meet sheet (scrolls) -------- */}
@@ -2797,8 +2841,9 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           ? <AgeGroupPopover key={"age" + i} ageGroup={item.ageGroup} roster={ageGroupPowerRoster(rankMeets, item.ageGroup)} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} onPick={(name, team, el) => setAgeStack((s) => [...s.slice(0, i + 1), { kind: "profile", name, team, rect: el.getBoundingClientRect() }])} />
           : <SwimmerProfilePopover key={"pf" + i} name={item.name} team={item.team} seasonMeets={rankMeets} liveMeet={{ meetName, mode, events, data }} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} onOpenLeague={openLeagueProfile} />)}
       </>)}
-      {showFinalizeDqs && <FinalizeDqsPanel list={pendingDqs} onClose={() => setShowFinalizeDqs(false)}
-        onPick={(row, el) => { setDqTarget(row.id); setDqSwimmer(row.swimmer || null); setDqNsTarget(row.id); setDqAnchorRect(el ? el.getBoundingClientRect() : null); }} />}
+      {showFinalizeDqs && <FinalizeDqsPanel list={pendingDqs} meetFinalized={meetFinalized} onClose={() => setShowFinalizeDqs(false)}
+        onPick={(row, el) => { setDqTarget(row.id); setDqSwimmer(row.swimmer || null); setDqNsTarget(row.id); setDqAnchorRect(el ? el.getBoundingClientRect() : null); }}
+        onFinalize={() => { saveToSeason(); setMeetFinalized(true); setShowFinalizeDqs(false); }} />}
       {dqInfo && <DQModal info={dqInfo} dqs={get(dqTarget).dqs || []} swimmer={dqSwimmer} ns={isNoShow(get(dqNsTarget || dqTarget))} rect={dqAnchorRect} onClose={() => { setDqTarget(null); setDqSwimmer(null); setDqNsTarget(null); setDqAnchorRect(null); }}
         onClear={() => update(dqTarget, { dqs: [] })}
         onNoShow={() => { const id = dqNsTarget || dqTarget; update(id, { noshow: !isNoShow(get(id)) }); }}
@@ -2832,7 +2877,8 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       {modal === "meetsetup" && <MeetSetupModal onClose={() => setModal(null)} meetName={meetName} setMeetName={setMeetName} meetDate={meetDate} setMeetDate={setMeetDate} mode={mode} setMode={setMode} dualLanes={dualLanes} setDualLanes={setDualLanes} hostTeam={hostTeam} setHostTeam={setHostTeam} awayTeam={awayTeam} setAwayTeam={setAwayTeam} teams={teamsPresent} onImport={() => setModal("import")} />}
       {modal === "settings" && <SettingsModal onClose={() => setModal(null)} homeTeam={homeTeam} setHomeTeam={setHomeTeam} teams={teamsPresent} onMeetSetup={() => setModal("meetsetup")} onResults={() => setModal("results")} onSave={() => saveToSeason()} onExport={() => setModal("export")} onClear={clearData} meets={seasonMeets} onLoad={loadMeet} onDelete={deleteMeet}
         session={session} isAdmin={isAdmin} role={myRole} onLogout={onLogout} onManageAccounts={() => setModal("accounts")} canViewUpdateLog={canViewUpdateLog} onUpdateLog={() => setModal("updatelog")}
-        seasonRange={seasonRange} onSaveSeasonRange={saveSeasonRange} />}
+        seasonRange={seasonRange} onSaveSeasonRange={saveSeasonRange}
+        meetFinalized={meetFinalized} onReviewFinalize={() => { setModal(null); setShowFinalizeDqs(true); }} onReopenMeet={() => { setMeetFinalized(false); setModal(null); flash("Meet reopened for editing"); }} />}
       {modal === "accounts" && isAdmin && <AccountsModal onClose={() => setModal(null)} accounts={accounts} onSave={onSaveAccounts} currentUsername={session?.username} />}
       {modal === "whatsnew" && <WhatsNewModal entry={CHANGELOG[0]} onClose={() => setModal(null)} />}
       {modal === "updatelog" && canViewUpdateLog && <UpdateLogModal onClose={() => setModal(null)} />}
@@ -2872,6 +2918,17 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // redesign or workflow change. Add every new release as a fresh entry at
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
+  {
+    version: "1.2.0",
+    date: "2026-07-23",
+    title: "Meet finalization: DQ review gate, lock, and review layout",
+    notes: [
+      "New finalize flow: once the meet is over (or any time from Settings), review any DQs still waiting on a reason, then either finalize the meet or save it for later and keep going.",
+      "Finalizing locks notes and DQ editing for the rest of the meet — except any DQ you deliberately left pending, which stays open to resolve later. Reopen a finalized meet from Settings any time.",
+      "A finalized meet's left column switches to a review layout: On Deck becomes a Next-3-events jump list, In The Water becomes a scrollable top-scorers board, and the Previous panel goes away — there's no more live heat to show.",
+      "Loading any saved meet from Settings now opens straight into this review layout, since a saved meet is a past one by definition.",
+    ],
+  },
   {
     version: "1.1.1",
     date: "2026-07-23",
@@ -3300,7 +3357,7 @@ function MeetSetupModal({ onClose, meetName, setMeetName, meetDate, setMeetDate,
   );
 }
 
-function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete, session, isAdmin, role, onLogout, onManageAccounts, canViewUpdateLog, onUpdateLog, seasonRange, onSaveSeasonRange }) {
+function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete, session, isAdmin, role, onLogout, onManageAccounts, canViewUpdateLog, onUpdateLog, seasonRange, onSaveSeasonRange, meetFinalized, onReviewFinalize, onReopenMeet }) {
   const [pendingDelete, setPendingDelete] = useState(null);
   const [yearFilter, setYearFilter] = useState("all");
   // Buckets by the admin-defined season range, not raw calendar year, so a
@@ -3331,6 +3388,9 @@ function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onR
           <label className="md-mrow">Main team (yours)<select value={homeTeam} onChange={(e) => setHomeTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}</select></label>
           <button className="md-mbtn" onClick={onSave}>💾 Save this meet to season</button>
           <button className="md-mbtn primary" onClick={onExport}>Export to Google Sheets</button>
+          {meetFinalized
+            ? <button className="md-mbtn" onClick={onReopenMeet}>🔓 Reopen meet for editing</button>
+            : <button className="md-mbtn" onClick={onReviewFinalize}>🚩 Review &amp; finalize meet</button>}
           <div className="md-mdiv" />
           {isAdmin && (
             <>
@@ -3520,20 +3580,23 @@ function popoverPos(rect, depth) {
   if (left + W > vw - m) left = Math.max(POV_SAFE_X, vw - W - m);
   return { top, left };
 }
-function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, relaySplit, progMeets, rect, depth, onClose, onDq, onDqQuick, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenAgeGroup, onOpenProfile, autoFocusNotes }) {
+function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, relaySplit, progMeets, rect, depth, onClose, onDq, onDqQuick, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenAgeGroup, onOpenProfile, autoFocusNotes, locked }) {
   const ref = useRef(null);
   const notesRef = useRef(null);
   const lastDqClick = useRef(0);
   const dq = hasDq(d), pend = isPendingDq(d);
   // A double-tap on the row (home team only) opens straight to notes instead
   // of making the coach scroll past DQ/scratch/work-on tags to find it.
-  useEffect(() => { if (autoFocusNotes && notesRef.current) notesRef.current.focus(); }, [autoFocusNotes]);
+  useEffect(() => { if (autoFocusNotes && notesRef.current && !locked) notesRef.current.focus(); }, [autoFocusNotes, locked]);
   // Double-click/double-tap opens the full code picker (own timing instead of
   // the native dblclick event, since iOS Safari's double-tap-to-zoom can
   // swallow it); a single tap does the obviously-right thing instead: mark a
   // quick pending DQ, clear one, or — if a real code is already set — show
   // what it is by opening the picker (view mode; reasons are visible there).
+  // A finalized meet blocks this too, unless the DQ was deliberately left
+  // pending at finalize time — the caller only sets `locked` in that case.
   const dqClick = () => {
+    if (locked) return;
     const now = Date.now(), wasDouble = now - lastDqClick.current < 350;
     lastDqClick.current = wasDouble ? 0 : now;
     if (wasDouble) { onDq(); return; }
@@ -3560,8 +3623,9 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, relay
   return (
     <div ref={ref} className="md-pov" style={{ top: pos.top, left: pos.left }} role="dialog">
       <div className="md-povhead"><div><div className="md-povname"><button type="button" className="md-povnamelink" onClick={(e) => onOpenProfile && onOpenProfile(e.currentTarget)}>{info.sw.name}</button> {info.sw.age > 0 && <button type="button" className="md-agechip" onClick={(e) => onOpenAgeGroup && onOpenAgeGroup(e.currentTarget)}>{info.sw.age}</button>}<span className="md-povteam" style={{ color: teamColor(info.sw.team) }}>{info.sw.team}</span></div><div className="md-povmeta">{shortEvent(info.eventName)} · H{info.heatNum} · Lane {info.ln}{info.sw.seed ? ` · seed ${info.sw.seed}` : ""}</div></div><button className="md-x sm" onClick={onClose}>✕</button></div>
+      {locked && <div className="md-lockednote">🔒 Meet finalized — notes and DQ are locked</div>}
       <div className="md-povtop">
-        <button className={"md-dq" + (dq ? " on" : "") + (pend ? " pend" : "")} onClick={dqClick}>
+        <button className={"md-dq" + (dq ? " on" : "") + (pend ? " pend" : "")} onClick={dqClick} disabled={locked}>
           {pend ? "DQ — reason pending" : dq ? `DQ ${dqLabel(d)} — tap to see why` : "Tap: DQ · Double-tap: pick reason"}
         </button>
       </div>
@@ -3584,7 +3648,7 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, relay
           </div>
         )}
         {relaySwimmer && relaySplit && <div className="md-relaysplitread">⏱ Relay split: <b>{relaySplit}</b></div>}
-        <textarea ref={notesRef} className="md-notearea" placeholder={`Notes on ${info.sw.name.split(",")[0]}…`} value={d.notes || ""} onChange={(e) => onNotes(e.target.value)} />
+        <textarea ref={notesRef} className="md-notearea" readOnly={locked} placeholder={locked ? "Notes locked — meet finalized" : `Notes on ${info.sw.name.split(",")[0]}…`} value={d.notes || ""} onChange={(e) => !locked && onNotes(e.target.value)} />
       </>) : (
         <div className="md-otherteam">Other team — DQ and no-show only.</div>
       )}
@@ -3725,10 +3789,15 @@ function DQModal({ info, dqs, swimmer, ns, rect, onClose, onClear, onToggle, onN
 // Floating, non-blocking review list of every DQ still marked "reason
 // pending" — deliberately NOT a full-screen modal so On Deck / In The Water /
 // Previous stay visible and usable while going through the paper DQ slips.
-function FinalizeDqsPanel({ list, onClose, onPick }) {
+// The DQ review gate: lists any DQ still waiting on a reason, then asks the
+// coach to either finalize the meet now (locking notes/DQ editing except
+// whatever's still pending here) or leave it open and come back later.
+// Already-finalized meets (loaded from Settings) skip the action buttons —
+// there's nothing left to decide, this is just a read of what's still open.
+function FinalizeDqsPanel({ list, meetFinalized, onClose, onPick, onFinalize }) {
   return (
     <div className="md-finalizepanel" role="dialog">
-      <div className="md-agepovhead"><span>🚩 Finalize DQs {list.length ? `(${list.length})` : ""}</span><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-agepovhead"><span>🚩 {meetFinalized ? "DQs still pending" : "Finalize meet"} {list.length ? `(${list.length})` : ""}</span><button className="md-x sm" onClick={onClose}>✕</button></div>
       <div className="md-agepovlist">
         {list.length ? list.map((row) => (
           <button key={row.id + (row.swimmer || "")} className="md-agepovrow" onClick={(e) => onPick(row, e.currentTarget)}>
@@ -3738,6 +3807,12 @@ function FinalizeDqsPanel({ list, onClose, onPick }) {
           </button>
         )) : <div className="md-prevempty">No DQs waiting on a reason.</div>}
       </div>
+      {!meetFinalized && (
+        <div className="md-finalizebtns">
+          <button className="md-mbtn sm" onClick={onClose}>Save for later</button>
+          <button className="md-apply sm" onClick={onFinalize}>✓ Finalize meet{list.length ? " (leaves these DQs open)" : ""}</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -3848,6 +3923,19 @@ html, body, #root { height: 100%; }
 .md-panel.water .md-lanes { overflow:visible; }
 .md-panel.prev { flex:1 1 auto; min-height:76px; }
 .md-panel.prev .md-lanes { flex:1 1 auto; min-height:0; }
+.md-panel.od.final { max-height:170px; }
+.md-finalnext { padding:8px; display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
+.md-finalnextrow { display:flex; align-items:center; gap:6px; padding:8px 10px; border-radius:8px; border:none; background:#0c1c33; color:var(--text); text-align:left; cursor:pointer; font-size:12.5px; font-weight:700; }
+.md-finalnextrow:hover { background:#112741; }
+.md-finalnextrow .md-evnum { color:var(--cyan); font-weight:800; }
+.md-panel.water.final { flex:1 1 auto; }
+.md-finalresults { flex:1 1 auto; min-height:0; overflow-y:auto; padding:6px 4px; }
+.md-finalresultrow { display:flex; align-items:center; gap:8px; padding:7px 10px; border-bottom:1px solid rgba(255,255,255,.06); color:var(--text); font-size:12.5px; }
+.md-finalresultrow.mine { background:rgba(250,204,21,.08); }
+.md-finalresultrow .md-place { width:20px; flex:none; color:var(--muted); font-weight:800; font-variant-numeric:tabular-nums; }
+.md-finalresultrow .md-resname { flex:1; min-width:0; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-finalresultrow .md-resteam { flex:none; font-size:10.5px; font-weight:800; }
+.md-finalresultrow .md-respts { flex:none; font-weight:800; color:var(--cyan); font-variant-numeric:tabular-nums; }
 .md-panel.results { flex:none; max-height:30vh; border-color:#6b5b13; box-shadow:0 0 0 1px rgba(224,180,0,.2) inset; }
 .md-phead { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 11px; background:linear-gradient(180deg,#122b4d,#0d2038); border-bottom:1px solid var(--line); flex:none; }
 .water-e { color:var(--cyan); } .md-pmeta { color:var(--muted); font-size:11.5px; font-weight:700; text-align:right; }
@@ -4026,10 +4114,15 @@ html, body, #root { height: 100%; }
 .md-finalizepanel { position:fixed; z-index:55; top:64px; right:14px; width:290px; max-height:70vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:10px; }
 .md-finalizepanel .md-agepovrow { flex-direction:column; align-items:flex-start; gap:1px; }
 .md-finalizemeta { font-size:10.5px; font-weight:600; color:#94a3b8; }
+.md-finalizebtns { display:flex; gap:8px; margin-top:10px; padding-top:10px; border-top:1px solid var(--sline); }
+.md-finalizebtns .md-mbtn, .md-finalizebtns .md-apply { flex:1; text-align:center; }
 .md-x { width:34px; height:34px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-size:15px; cursor:pointer; flex:none; } .md-x.sm { width:28px; height:28px; font-size:13px; } .md-x:hover { background:#f1f5f9; }
 .md-dq { width:100%; padding:12px; border-radius:11px; border:2px solid var(--dq); background:#fff; color:var(--dq); font-weight:800; font-size:14px; cursor:pointer; margin-bottom:10px; text-align:left; line-height:1.3; }
 .md-dq:hover { background:#fef2f2; } .md-dq.on { background:var(--dq); color:#fff; }
 .md-dq.pend { border-color:var(--amber); color:#92600a; background:#fff7e6; }
+.md-dq:disabled { cursor:default; opacity:.5; }
+.md-lockednote { background:#f1f5f9; color:#475569; font-weight:700; font-size:12px; border-radius:8px; padding:8px 10px; margin-bottom:8px; }
+.md-notearea:read-only { background:#f8fafc; color:#94a3b8; cursor:default; }
 .md-povtags { display:flex; flex-direction:column; gap:6px; }
 .md-catbtn { width:100%; display:flex; align-items:center; gap:9px; padding:10px 11px; border-radius:10px; border:1.5px solid var(--sline); background:#fff; font-weight:700; font-size:13.5px; color:#334155; cursor:pointer; }
 .md-catbtn:hover { border-color:#94a3b8; } .md-catbtn.has { background:#fbfdff; }
