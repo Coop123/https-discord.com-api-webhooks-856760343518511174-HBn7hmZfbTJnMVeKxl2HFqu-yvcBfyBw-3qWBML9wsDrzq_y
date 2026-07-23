@@ -1328,7 +1328,8 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet, initialProfile }) {
   // filter bar, sliding left (6u) to right (15-18).
   const [topKidAgeIdx, setTopKidAgeIdx] = useState(2);
   const topKidAge = AGE_GROUPS[topKidAgeIdx];
-  const topKidPower = useMemo(() => computePower(meets, { ageGroup: topKidAge }), [meets, topKidAge]);
+  const [topKidGender, setTopKidGender] = useState("All");
+  const topKidPower = useMemo(() => computePower(meets, { ageGroup: topKidAge, gender: topKidGender }), [meets, topKidAge, topKidGender]);
   const topKids = useMemo(() => {
     const arr = Object.values(topKidPower).filter((s) => s.pts > 0 || s.improveN > 0);
     const maxPts = Math.max(1, ...arr.map((s) => s.pts));
@@ -1483,6 +1484,7 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet, initialProfile }) {
             <AgeSlider idx={topKidAgeIdx} onChange={setTopKidAgeIdx} />
             <span className="md-topkidend">15-18</span>
           </div>
+          <div className="md-cmpradiogrp"><span className="md-cmpchecklabel">Gender</span>{["All", "Girls", "Boys"].map((g) => <label key={g} className="md-cmpradio"><input type="checkbox" checked={topKidGender === g} onChange={() => setTopKidGender(g)} />{g}</label>)}</div>
           {topKids.length ? (
             <table className="md-lgtable roster">
               <thead><tr><th>#</th><th>Swimmer</th><th>Team</th><th>Avg improvement</th><th>Points</th><th>Score</th></tr></thead>
@@ -1501,6 +1503,7 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet, initialProfile }) {
             </table>
           ) : <div className="md-prevempty">No swims recorded for {topKidAge} yet.</div>}
         </div>
+        {filterBar}
         <table className="md-lgtable standings">
           <thead><tr>
             <th>#</th><th>Team</th>
@@ -1523,7 +1526,6 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet, initialProfile }) {
           </tbody>
         </table>
         {!rows.length && <div className="md-prevempty">No teams yet — import a meet or results, then save it to the season.</div>}
-        {filterBar}
       </div>
     </div>
   );
@@ -3853,13 +3855,14 @@ html, body, #root { height: 100%; }
 .md-statsfilterpanel { display:flex; flex-direction:column; gap:8px; padding:12px 20px; border-bottom:1px solid var(--sline); background:#f8fafc; }
 .md-statcol { overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:12px 16px; border-right:1px solid var(--sline); }
 .md-statcol:last-child { border-right:none; }
-.md-stath { font-weight:800; font-size:13px; margin-bottom:8px; color:var(--sink); position:sticky; top:0; background:#fff; padding-bottom:4px; }
-.md-statrow { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #f1f5f9; }
+.md-stath { font-weight:800; font-size:13px; margin:0 0 8px; color:var(--sink); position:sticky; top:0; z-index:2; background:#fff; padding:12px 0 4px; margin-top:-12px; }
+.md-statrow { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #f1f5f9; background:#fff; }
 .md-statrank { width:20px; text-align:center; font-weight:800; color:#94a3b8; font-size:12px; }
 .md-statname { font-weight:700; font-size:13px; color:var(--sink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .md-statsub { font-size:11px; color:#94a3b8; }
 .md-statval { font-weight:900; font-size:14px; } .md-statval.gold { color:#a8842a; } .md-statval.green { color:#166534; } .md-statval.red { color:#b42318; }
-.md-agegrp { margin-bottom:10px; } .md-agehdr { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#0e7490; margin:6px 0 2px; }
+.md-agegrp { margin-bottom:10px; }
+.md-agehdr { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#0e7490; margin:0; padding:6px 0 2px; position:sticky; top:29px; z-index:1; background:#fff; }
 .md-gpill { width:18px; height:18px; display:grid; place-items:center; border-radius:50%; font-size:10px; font-weight:900; color:#fff; }
 .md-gpill.girls { background:#ec4899; } .md-gpill.boys { background:#3b82f6; } .md-gpill.mixed { background:#8b5cf6; }
 .md-gpill.sm { width:15px; height:15px; font-size:8.5px; flex:none; }
