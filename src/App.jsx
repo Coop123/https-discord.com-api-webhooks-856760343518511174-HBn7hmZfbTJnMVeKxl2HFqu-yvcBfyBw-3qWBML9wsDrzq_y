@@ -2414,12 +2414,62 @@ const INITIAL_DATA = {
   "0:1:7": { time: "24.30", dqs: [], tags: {}, notes: "" },
 };
 
-function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts }) {
-  const [meetName, setMeetName] = useState("2026 VCSL Championship");
+// A Test-role account gets this instead of SEED_EVENTS — same shape, same
+// size, but every swimmer name is obviously made up, so a coach exploring
+// or training on a Test login can never mistake it for a real roster (and
+// it's stored under its own scoped key, so nothing here can touch real data).
+const DEMO_EVENTS = [
+  { id: "d0", num: "19", name: "Girls 9-10 25 Yard Butterfly", record: "13.90", heats: [
+    { num: 1, lanes: [L(3,"Testerson, Ava","LPAC",10,"31.69"),L(4,"Placeholder, Mia","MTVD",9,"28.75"),L(5,"Sample, Zoe","AGCC",9,"28.58"),L(6,"Exampleton, Kai","LPAC",9,"28.58"),L(7,"Mockford, Ruby","BDST",9,"31.06"),L(8,"Fixture, Nora","SCVCC",9,"32.92")] },
+    { num: 2, lanes: [L(2,"Dummy, Elise","OAK",10,"27.22"),L(3,"Sandbox, Heidi","LPAC",9,"25.60"),L(4,"Prototype, Gigi","AGCC",9,"24.50"),L(5,"Demo, Kaya","LPAC",10,"24.29"),L(6,"Trial, Audrey","OAK",9,"24.35"),L(7,"Stub, Emerson","AGCC",9,"24.67")] },
+  ]},
+  { id: "d1", num: "23", name: "Girls 6 & Under 25 Yard Butterfly", record: "19.04", heats: [
+    { num: 1, lanes: [L(3,"Faux, Paisley","AGCC",4,"1:03.75"),L(4,"Testcase, Harper","LPAC",5,"57.50"),L(5,"Mockup, Alayna","SCVCC",6,"52.31"),L(6,"Filler, Brooke","AGCC",6,"53.35"),L(7,"Draft, Cameron","BDST",5,"39.52")] },
+  ]},
+  { id: "d2", num: "21", name: "Girls 7-8 25 Yard Butterfly", record: "16.01", heats: [
+    { num: 1, lanes: [L(3,"Sample, Celine","BDST",8,"33.72"),L(4,"Testerson, Lauren","MTVD",7,"30.22"),L(5,"Placeholder, Emma","MTVD",8,"30.11"),L(6,"Demo, Juliette","LPAC",7,"30.11"),L(7,"Fixture, Brynlee","AGCC",8,"30.87")] },
+  ]},
+  { id: "d3", num: "63", name: "Girls 11-12 50 Yard Freestyle", record: "26.14", heats: [
+    { num: 7, lanes: [L(1,"Mockford, Caitlyn","AGCC",11,"34.86"),L(2,"Sandbox, Tessa","BDST",11,"34.68"),L(3,"Prototype, Marion","BDST",12,"34.61"),L(4,"Dummy, Mary","OAK",12,"34.22"),L(5,"Sample, Madelyn","BDST",11,"32.96"),L(6,"Testcase, Ava","BDST",12,"33.57")] },
+    { num: 8, lanes: [L(1,"Filler, Quinn","OAK",12,"32.85"),L(2,"Draft, Emma","OAK",11,"31.31"),L(3,"Faux, Eva","LPAC",12,"30.79"),L(4,"Trial, Kensie","LPAC",11,"30.61"),L(5,"Stub, Gigi","AGCC",11,"30.22"),L(6,"Exampleton, Lexie","LPAC",11,"30.59")] },
+  ]},
+  { id: "d4", num: "75", name: "Girls 11-12 200 Yard Freestyle Relay", record: "1:54.89", heats: [
+    { num: 1, lanes: [
+      L(3,"SCVCC A","SCVCC",0,"2:35.46","A",[{name:"Testerson, Aarika",age:11},{name:"Placeholder, Aylie",age:11},{name:"Sample, Alea",age:12},{name:"Demo, Ava",age:12}]),
+      L(4,"LPAC A","LPAC",0,"2:21.70","A",[{name:"Mockup, Taylor",age:11},{name:"Filler, Amelia",age:11},{name:"Draft, Hazel",age:12},{name:"Faux, Aurora",age:12}]),
+      L(5,"BDST A","BDST",0,"2:05.72","A",[{name:"Testcase, Madelyn",age:11},{name:"Sandbox, Emme",age:11},{name:"Prototype, Geva",age:11},{name:"Dummy, Eleanor",age:12}]),
+      L(6,"OAK A","OAK",0,"2:08.50","A",[{name:"Stub, Emma",age:11},{name:"Fixture, Quinn",age:12},{name:"Exampleton, Kaitlyn",age:12},{name:"Trial, Cat",age:12}]),
+      L(7,"AGCC A","AGCC",0,"2:23.86","A",[{name:"Sample, Hana",age:11},{name:"Testerson, Cara",age:12},{name:"Placeholder, Sophia",age:12},{name:"Demo, Addison",age:12}]),
+      L(8,"MTVD A","MTVD",0,"2:40.84","A",[{name:"Mockup, Zoey",age:12},{name:"Filler, Shelby",age:11},{name:"Draft, Kaashvi",age:12},{name:"Faux, Savannah",age:12}]),
+    ] },
+  ]},
+];
+const DEMO_RECORDS = Object.fromEntries(DEMO_EVENTS.filter((e) => e.record).map((e) => [e.id, e.record]));
+const DEMO_DATA = {
+  "0:0:3": { time: "30.92", dqs: [], tags: {}, notes: "" },
+  "0:0:4": { time: "28.20", dqs: [], tags: {}, notes: "" },
+  "0:0:5": { time: "28.71", dqs: [], tags: {}, notes: "" },
+  "0:0:6": { time: "27.95", dqs: [], tags: {}, notes: "" },
+  "0:0:7": { time: "29.88", dqs: [], tags: { "Turns: Open turn": true }, notes: "" },
+  "0:0:8": { time: "33.10", dqs: [], tags: {}, notes: "" },
+  "0:1:2": { time: "27.40", dqs: [], tags: {}, notes: "" },
+  "0:1:3": { time: "25.11", dqs: [], tags: {}, notes: "" },
+  "0:1:4": { time: "24.62", dqs: [], tags: {}, notes: "" },
+  "0:1:5": { time: "23.90", dqs: [], tags: {}, notes: "" },
+  "0:1:6": { time: "24.99", dqs: [{ code: "1C", reason: "Scissors kick", group: "Butterfly" }], tags: {}, notes: "" },
+  "0:1:7": { time: "24.30", dqs: [], tags: {}, notes: "" },
+};
+
+function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest, onLogout, accounts, onSaveAccounts }) {
+  // Every persisted key is namespaced under its own prefix when signed in as
+  // Test, so a Test login can never read or overwrite real team data (and
+  // vice versa) — same storage, fully separate rows.
+  const K = (base) => isTest ? base.replace(/^meetdeck:/, "meetdeck:test:") : base;
+  const [meetName, setMeetName] = useState(isTest ? "Demo Meet — Sandbox Data" : "2026 VCSL Championship");
   const [meetDate, setMeetDate] = useState(new Date().toISOString().slice(0, 10));
-  const [events, setEvents] = useState(SEED_EVENTS);
-  const [records, setRecords] = useState(INITIAL_RECORDS);
-  const [data, setData] = useState(INITIAL_DATA);
+  const [events, setEvents] = useState(isTest ? DEMO_EVENTS : SEED_EVENTS);
+  const [records, setRecords] = useState(isTest ? DEMO_RECORDS : INITIAL_RECORDS);
+  const [data, setData] = useState(isTest ? DEMO_DATA : INITIAL_DATA);
   const [heatPtr, setHeatPtr] = useState(4);
   const [homeTeam, setHomeTeam] = useState("BDST");
   const [hostTeam, setHostTeam] = useState("BDST");
@@ -2446,10 +2496,18 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   })(); return () => { live = false; }; }, []);
   const [seasonRange, setSeasonRange] = useState(DEFAULT_SEASON_RANGE);
   useEffect(() => { if (!STORE) return; let live = true; (async () => {
-    let r = null; try { const res = await STORE.get(SEASON_RANGE_KEY); if (res && res.value) r = JSON.parse(res.value); } catch (e) {}
+    let r = null; try { const res = await STORE.get(K(SEASON_RANGE_KEY)); if (res && res.value) r = JSON.parse(res.value); } catch (e) {}
     if (live && r) setSeasonRange(r);
   })(); return () => { live = false; }; }, []);
-  const saveSeasonRange = (next) => { setSeasonRange(next); if (STORE) STORE.set(SEASON_RANGE_KEY, JSON.stringify(next)).catch(() => {}); };
+  const saveSeasonRange = (next) => { setSeasonRange(next); if (STORE) STORE.set(K(SEASON_RANGE_KEY), JSON.stringify(next)).catch(() => {}); };
+  // Standalone team roster — a swimmer directory (name/age/gender/team) kept
+  // independent of any single meet's events, so a season's full roster only
+  // has to be entered once rather than re-pasted every meet setup.
+  const [roster, setRoster] = useState([]);
+  useEffect(() => { if (!STORE) return; let live = true; (async () => {
+    try { const r = await STORE.get(K(ROSTER_KEY)); if (live && r && r.value) setRoster(JSON.parse(r.value)); } catch (e) {}
+  })(); return () => { live = false; }; }, []);
+  const saveRoster = (next) => { setRoster(next); if (STORE) STORE.set(K(ROSTER_KEY), JSON.stringify(next)).catch(() => {}); };
   const [menuOpen, setMenuOpen] = useState(false);
   const [pop, setPop] = useState(null);
   const [ageStack, setAgeStack] = useState([]); // age-chip drill-down, stacked on top of `pop`
@@ -2608,7 +2666,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   // Offers finalization once the meet is over regardless of whether any DQs
   // are still pending — a clean meet still needs the "finalize or keep
   // editing" choice, not just one with open DQs.
-  useEffect(() => { if (meetOver && !meetFinalized && !autoFinalizeShown.current) { autoFinalizeShown.current = true; setShowFinalizeDqs(true); } }, [meetOver, meetFinalized]);
+  useEffect(() => { if (isLeadTier && meetOver && !meetFinalized && !autoFinalizeShown.current) { autoFinalizeShown.current = true; setShowFinalizeDqs(true); } }, [isLeadTier, meetOver, meetFinalized]);
   const prevList = useMemo(() => previous ? [...previous.lanes].map((l) => { const id = entryId(previous.evIdx, previous.htIdx, l.lane); return { id, l, time: (data[id] || {}).time, place: prevHeatPlaces[id] }; }).sort((a, b) => (a.place || 99) - (b.place || 99) || a.l.lane - b.l.lane) : [], [previous, data, prevHeatPlaces]);
   const [toast, setToast] = useState("");
   const [relayUndo, setRelayUndo] = useState(null); // { label, fn }
@@ -2719,8 +2777,8 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   }, [relayReplaceTarget, relaySiblingLanes, relayTargetLane, events, data]);
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2200); };
   // Restore last session, then autosave.
-  useEffect(() => { if (!STORE) return; let live = true; (async () => { try { const r = await STORE.get(CUR_KEY); if (live && r && r.value) { const s = JSON.parse(r.value); if (s.events) { setEvents(s.events); setRecords(s.records || {}); setData(s.data || {}); if (s.meetName) setMeetName(s.meetName); if (s.meetDate) setMeetDate(s.meetDate); if (s.mode) setMode(s.mode); if (s.homeTeam) setHomeTeam(s.homeTeam); if (s.hostTeam) setHostTeam(s.hostTeam); if (s.awayTeam) setAwayTeam(s.awayTeam); if (s.dualLanes) setDualLanes(s.dualLanes); } } } catch (e) {}
-    try { const r = await STORE.get(INDEX_KEY); if (live && r && r.value) { const arr = []; for (const it of JSON.parse(r.value)) { try { const mr = await STORE.get(it.id); if (mr && mr.value) arr.push(JSON.parse(mr.value)); } catch (e) {} } setSeasonMeets(arr); } } catch (e) {} })(); return () => { live = false; }; }, []);
+  useEffect(() => { if (!STORE) return; let live = true; (async () => { try { const r = await STORE.get(K(CUR_KEY)); if (live && r && r.value) { const s = JSON.parse(r.value); if (s.events) { setEvents(s.events); setRecords(s.records || {}); setData(s.data || {}); if (s.meetName) setMeetName(s.meetName); if (s.meetDate) setMeetDate(s.meetDate); if (s.mode) setMode(s.mode); if (s.homeTeam) setHomeTeam(s.homeTeam); if (s.hostTeam) setHostTeam(s.hostTeam); if (s.awayTeam) setAwayTeam(s.awayTeam); if (s.dualLanes) setDualLanes(s.dualLanes); } } } catch (e) {}
+    try { const r = await STORE.get(K(INDEX_KEY)); if (live && r && r.value) { const arr = []; for (const it of JSON.parse(r.value)) { try { const mr = await STORE.get(it.id); if (mr && mr.value) arr.push(JSON.parse(mr.value)); } catch (e) {} } setSeasonMeets(arr); } } catch (e) {} })(); return () => { live = false; }; }, []);
   // Autosave the current draft (for session restore) once the whole current
   // EVENT finishes — not after every heat/keystroke — so saves land at
   // natural pause points. A slow idle fallback still covers the case where a
@@ -2730,24 +2788,24 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   }, [current, events, data]);
   const savedEvtRef = useRef(-1);
   useEffect(() => { if (!STORE || !evComplete || !current || savedEvtRef.current === current.evIdx) return; savedEvtRef.current = current.evIdx;
-    STORE.set(CUR_KEY, JSON.stringify({ events, records, data, meetName, meetDate, mode, homeTeam, hostTeam, awayTeam, dualLanes })).catch(() => {});
+    STORE.set(K(CUR_KEY), JSON.stringify({ events, records, data, meetName, meetDate, mode, homeTeam, hostTeam, awayTeam, dualLanes })).catch(() => {});
   }, [evComplete, current, events, records, data, meetName, meetDate, mode, homeTeam, awayTeam, dualLanes]);
-  useEffect(() => { if (!STORE) return; const t = setTimeout(() => { STORE.set(CUR_KEY, JSON.stringify({ events, records, data, meetName, meetDate, mode, homeTeam, hostTeam, awayTeam, dualLanes })).catch(() => {}); }, 8000); return () => clearTimeout(t); }, [events, records, data, meetName, meetDate, mode, homeTeam, awayTeam, dualLanes]);
+  useEffect(() => { if (!STORE) return; const t = setTimeout(() => { STORE.set(K(CUR_KEY), JSON.stringify({ events, records, data, meetName, meetDate, mode, homeTeam, hostTeam, awayTeam, dualLanes })).catch(() => {}); }, 8000); return () => clearTimeout(t); }, [events, records, data, meetName, meetDate, mode, homeTeam, awayTeam, dualLanes]);
   // Uses the meet-date field (settable in Meet setup) instead of "today" so
   // importing results from a past meet saves under its actual date.
-  const saveToSeason = async () => { const date = meetDate || new Date().toISOString().slice(0, 10); const id = "meetdeck:meet:" + Date.now(); const snap = { id, meetName, mode, date, events, data, records, homeTeam, hostTeam, awayTeam, dualLanes, hasMeetSheet };
+  const saveToSeason = async () => { const date = meetDate || new Date().toISOString().slice(0, 10); const id = K("meetdeck:meet:") + Date.now(); const snap = { id, meetName, mode, date, events, data, records, homeTeam, hostTeam, awayTeam, dualLanes, hasMeetSheet };
     setSeasonMeets((a) => [...a.filter((m) => !(m.meetName === meetName && m.date === date)), snap]);
     if (!STORE) { flash("Saved to season (this session)"); return; }
     try { await STORE.set(id, JSON.stringify(snap));
-      let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {}
+      let idx = []; try { const r = await STORE.get(K(INDEX_KEY)); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {}
       idx = idx.filter((x) => x.meetName !== meetName || x.date !== date); idx.push({ id, meetName, mode, date });
-      await STORE.set(INDEX_KEY, JSON.stringify(idx)); flash("Saved to season ✓"); } catch (e) { flash("Saved (storage limit — kept for this session)"); } };
+      await STORE.set(K(INDEX_KEY), JSON.stringify(idx)); flash("Saved to season ✓"); } catch (e) { flash("Saved (storage limit — kept for this session)"); } };
   const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; lastRacePrompted.current = false; setShowEndRacePrompt(false); setMeetGateDismissed(false); autoFinalizeShown.current = true; setMeetFinalized(true); setHasMeetSheet(snap.hasMeetSheet !== false); setViewMode("result"); setResultsUploaded(true); setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
-  const deleteMeet = async (id) => { if (STORE) { try { await STORE.delete(id); } catch (e) {} try { const r = await STORE.get(INDEX_KEY); if (r && r.value) await STORE.set(INDEX_KEY, JSON.stringify(JSON.parse(r.value).filter((x) => x.id !== id))); } catch (e) {} } setSeasonMeets((a) => a.filter((m) => m.id !== id)); flash("Meet removed"); };
+  const deleteMeet = async (id) => { if (STORE) { try { await STORE.delete(id); } catch (e) {} try { const r = await STORE.get(K(INDEX_KEY)); if (r && r.value) await STORE.set(K(INDEX_KEY), JSON.stringify(JSON.parse(r.value).filter((x) => x.id !== id))); } catch (e) {} } setSeasonMeets((a) => a.filter((m) => m.id !== id)); flash("Meet removed"); };
   const clearData = async () => { if (typeof window !== "undefined" && window.confirm && !window.confirm("Clear all saved meets and reset the board? This can't be undone.")) return;
-    if (STORE) { try { const r = await STORE.get(INDEX_KEY); if (r && r.value) for (const it of JSON.parse(r.value)) { try { await STORE.delete(it.id); } catch (e) {} } } catch (e) {}
-      try { await STORE.delete(INDEX_KEY); } catch (e) {} try { await STORE.delete(CUR_KEY); } catch (e) {} }
-    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; lastRacePrompted.current = false; setShowEndRacePrompt(false); setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false); setViewMode("meet"); setResultsUploaded(false); setHasMeetSheet(true); setHeatPtr(4); setModal(null); flash("Data cleared"); };
+    if (STORE) { try { const r = await STORE.get(K(INDEX_KEY)); if (r && r.value) for (const it of JSON.parse(r.value)) { try { await STORE.delete(it.id); } catch (e) {} } } catch (e) {}
+      try { await STORE.delete(K(INDEX_KEY)); } catch (e) {} try { await STORE.delete(K(CUR_KEY)); } catch (e) {} }
+    setSeasonMeets([]); setEvents(isTest ? DEMO_EVENTS : SEED_EVENTS); setRecords(isTest ? DEMO_RECORDS : INITIAL_RECORDS); setData(isTest ? DEMO_DATA : INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; lastRacePrompted.current = false; setShowEndRacePrompt(false); setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false); setViewMode("meet"); setResultsUploaded(false); setHasMeetSheet(true); setHeatPtr(4); setModal(null); flash("Data cleared"); };
   const toggleTag = (id, key) => { const tags = { ...get(id).tags }; tags[key] ? delete tags[key] : (tags[key] = true); update(id, { tags }); };
   const toggleDqCode = (id, group, code, reason, swimmer) => { let dqs = [...(get(id).dqs || [])]; const i = dqs.findIndex((q) => q.code === code); if (i >= 0) dqs.splice(i, 1); else { dqs = dqs.filter((q) => q.code !== PEND_DQ_CODE); dqs.push({ code, reason, group, ...(swimmer ? { swimmer } : {}) }); } update(id, { dqs }); };
   // Quick tap: flag a DQ instantly with the reason left pending (toggles off
@@ -2962,9 +3020,9 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
               <button className="md-mbtn" onClick={() => { setModal("season"); setMenuOpen(false); }}>Team stats</button>
               <div className="md-menutitle">Meet day</div>
               <button className="md-mbtn" onClick={() => { setModal("participants"); setMenuOpen(false); }}>Scratches</button>
-              <button className="md-mbtn" onClick={() => { setShowFinalizeDqs(true); setMenuOpen(false); }}>🚩 {meetFinalized ? "DQs still pending" : "Finalize meet"}{pendingDqs.length ? ` (${pendingDqs.length})` : ""}</button>
+              {isLeadTier && <button className="md-mbtn" onClick={() => { setShowFinalizeDqs(true); setMenuOpen(false); }}>🚩 {meetFinalized ? "DQs still pending" : "Finalize meet"}{pendingDqs.length ? ` (${pendingDqs.length})` : ""}</button>}
               <div className="md-menutitle">Meet day analytics</div>
-              <button className="md-mbtn" onClick={() => { setModal("relay"); setMenuOpen(false); }}>Relay builder</button>
+              {isLeadTier && <button className="md-mbtn" onClick={() => { setModal("relay"); setMenuOpen(false); }}>Relay builder</button>}
               <button className="md-mbtn" onClick={() => { setModal("compare"); setMenuOpen(false); }}>Swimmer comparison</button>
               <div className="md-mdiv" />
               <button className="md-mbtn" onClick={() => { setModal("settings"); setMenuOpen(false); }}>⚙ Settings</button>
@@ -3150,10 +3208,10 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           const saveDate = date || new Date().toISOString().slice(0, 10);
           setEvents(meet.events); setData(meet.data); setRecords({}); setStartedHeats({}); setHeatPtr(0);
           setMeetName(name); setMeetDate(saveDate); setMode(mtype); if (host) setHostTeam(host); if (away) setAwayTeam(away); if (newLanes) setDualLanes(newLanes); setModal(null); setResultsUploaded(true); setViewMode("result"); setHasMeetSheet(false);
-          const id = "meetdeck:meet:" + Date.now();
+          const id = K("meetdeck:meet:") + Date.now();
           const snap = { id, meetName: name, mode: mtype, date: saveDate, events: meet.events, data: meet.data, records: {}, homeTeam, hostTeam: host, awayTeam: away, dualLanes: newLanes || dualLanes, hasMeetSheet: false };
           setSeasonMeets((a) => [...a.filter((m) => !(m.meetName === name && m.date === saveDate)), snap]);
-          if (STORE) { (async () => { try { await STORE.set(id, JSON.stringify(snap)); let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {} idx = idx.filter((x) => x.meetName !== name || x.date !== saveDate); idx.push({ id, meetName: name, mode: mtype, date: saveDate }); await STORE.set(INDEX_KEY, JSON.stringify(idx)); } catch (e) {} })(); }
+          if (STORE) { (async () => { try { await STORE.set(id, JSON.stringify(snap)); let idx = []; try { const r = await STORE.get(K(INDEX_KEY)); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {} idx = idx.filter((x) => x.meetName !== name || x.date !== saveDate); idx.push({ id, meetName: name, mode: mtype, date: saveDate }); await STORE.set(K(INDEX_KEY), JSON.stringify(idx)); } catch (e) {} })(); }
           flash("Saved new meet: " + name);
         }} />}
       {modal === "stats" && <StatsModal onClose={() => { setModal(null); setStatsTeam(null); }} events={events} data={data} mode={mode} filter={filter} homeTeam={statsTeam || homeTeam} teams={teamsPresent} awayTeam={awayTeam} />}
@@ -3165,10 +3223,12 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       {modal === "season" && <SeasonModal onClose={() => setModal(null)} homeTeam={homeTeam} meets={rankMeets} />}
       {modal === "meetsetup" && <MeetSetupModal onClose={() => setModal(null)} meetName={meetName} setMeetName={setMeetName} meetDate={meetDate} setMeetDate={setMeetDate} mode={mode} setMode={setMode} dualLanes={dualLanes} setDualLanes={setDualLanes} hostTeam={hostTeam} setHostTeam={setHostTeam} awayTeam={awayTeam} setAwayTeam={setAwayTeam} teams={teamsPresent} onImport={() => setModal("import")} />}
       {modal === "settings" && <SettingsModal onClose={() => setModal(null)} homeTeam={homeTeam} setHomeTeam={setHomeTeam} teams={teamsPresent} onMeetSetup={() => setModal("meetsetup")} onResults={() => setModal("results")} onSave={() => saveToSeason()} onExport={() => setModal("export")} onClear={clearData} meets={seasonMeets} onLoad={loadMeet} onDelete={deleteMeet}
-        session={session} isAdmin={isAdmin} role={myRole} onLogout={onLogout} onManageAccounts={() => setModal("accounts")} canViewUpdateLog={canViewUpdateLog} onUpdateLog={() => setModal("updatelog")}
-        seasonRange={seasonRange} onSaveSeasonRange={saveSeasonRange}
+        session={session} isAdmin={isAdmin} isOwner={isOwner} isLeadTier={isLeadTier} isTest={isTest} role={myRole} onLogout={onLogout} onManageAccounts={() => setModal("accounts")} canViewUpdateLog={canViewUpdateLog} onUpdateLog={() => setModal("updatelog")}
+        seasonRange={seasonRange} onSaveSeasonRange={saveSeasonRange} accounts={accounts} onSaveAccounts={onSaveAccounts}
+        onManageRoster={() => setModal("roster")}
         meetFinalized={meetFinalized} onReviewFinalize={() => { setModal(null); setShowFinalizeDqs(true); }} onReopenMeet={() => { setMeetFinalized(false); setModal(null); flash("Meet reopened for editing"); }} />}
-      {modal === "accounts" && isAdmin && <AccountsModal onClose={() => setModal(null)} accounts={accounts} onSave={onSaveAccounts} currentUsername={session?.username} />}
+      {modal === "accounts" && (isAdmin || isOwner) && <AccountsModal onClose={() => setModal(null)} accounts={accounts} onSave={onSaveAccounts} currentUsername={session?.username} isAdmin={isAdmin} isOwner={isOwner} />}
+      {modal === "roster" && isLeadTier && <RosterModal onClose={() => setModal(null)} roster={roster} onSave={saveRoster} teams={teamsPresent} defaultTeam={homeTeam} />}
       {modal === "whatsnew" && <WhatsNewModal entry={CHANGELOG[0]} onClose={() => setModal(null)} />}
       {modal === "updatelog" && canViewUpdateLog && <UpdateLogModal onClose={() => setModal(null)} />}
       {modal === "compare" && <SwimmerCompareModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} mode={cmpMode} onModeChange={setCmpMode} onOpenLeague={openLeagueProfile} />}
@@ -3208,6 +3268,17 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // redesign or workflow change. Add every new release as a fresh entry at
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
+  {
+    version: "2.4.0",
+    date: "2026-07-23",
+    title: "Five account roles, Owner permissions, standalone roster",
+    notes: [
+      "Manage accounts now has five roles: Admin (full access, can reset any password without needing the old one), Test (its own sandboxed demo meet with made-up names, totally separate from real team data), Assistant Coach (view the meet, add notes/DQs/scratches), and Head Coach / Team Manager (everything Assistant Coach can do, plus meet setup, results, finalize, roster, and the season date range).",
+      "New Owner flag: up to 2 Head Coach/Team Manager accounts can hold it, giving them their own scoped Manage accounts screen to reassign people between Owner, Assistant Coach, and Head Coach — without touching Admin or Test accounts.",
+      "Everyone can change their own password from Settings (current password required) — separate from Admin's password-reset power over other accounts.",
+      "New standalone \"Manage roster\" screen: paste or add the season's full swimmer list (name/age/gender/team) once, independent of any single meet.",
+    ],
+  },
   {
     version: "2.3.1",
     date: "2026-07-23",
@@ -3355,6 +3426,23 @@ const ACCOUNTS_KEY = "meetdeck:accounts:v1";
 const SESSION_KEY = "meetdeck:session:v1";
 
 const SEASON_RANGE_KEY = "meetdeck:seasonrange:v1";
+const ROSTER_KEY = "meetdeck:roster:v1";
+// Loose "Last, First  age  TEAM  gender" paste parser for the standalone
+// roster — much simpler than the full heat-sheet importer since a roster
+// listing has no events/heats/seeds to worry about, just one swimmer per
+// line in whatever order/spacing a program export happens to use.
+function parseRosterPaste(text) {
+  const out = [];
+  (text || "").split("\n").forEach((raw) => {
+    const line = raw.trim(); if (!line) return;
+    const m = line.match(/^([A-Za-z'\-. ]+,\s*[A-Za-z'\-. ]+?)\s*[,\s]+(\d{1,2})?\s*[,\s]*([A-Za-z]{2,6})?\s*[,\s]*(Girls|Boys|Male|Female|M|F)?\s*$/i);
+    if (!m) return;
+    const gRaw = (m[4] || "").toLowerCase();
+    const gender = gRaw.startsWith("g") || gRaw === "f" || gRaw === "female" ? "Girls" : gRaw.startsWith("b") || gRaw === "m" || gRaw === "male" ? "Boys" : "";
+    out.push({ name: m[1].trim(), age: m[2] ? +m[2] : 0, team: (m[3] || "").toUpperCase(), gender });
+  });
+  return out;
+}
 // MM-DD, inclusive. Full calendar year by default, so a team that never
 // touches this setting sees exactly the old year-based grouping.
 const DEFAULT_SEASON_RANGE = { startMD: "01-01", endMD: "12-31" };
@@ -3375,13 +3463,26 @@ function seasonYearOf(dateStr, range) {
   if (startMD > endMD && monthDayOf(dateStr) <= endMD) return y - 1;
   return y;
 }
+// Five roles: admin (full access, incl. resetting anyone's password without
+// needing the old one), test (sandboxed demo data — see DEMO_EVENTS), and
+// three coaching tiers — assistCoach (view + notes/DQs/scratches only),
+// headCoach and teamManager (equal footing: meet setup, finalize, roster,
+// season range, everything assistCoach can do). `owner` is a flag layered on
+// top of a headCoach/teamManager account (never assistCoach/admin/test) that
+// grants the power to reassign people between Owner/Assistant Coach/Head
+// Coach — capped at 2 owners across the whole account list.
+const ROLE_LABEL = { admin: "Admin", test: "Test", assistCoach: "Assistant Coach", headCoach: "Head Coach", teamManager: "Team Manager" };
+const OWNER_ELIGIBLE_ROLES = ["headCoach", "teamManager"];
+const OWNER_CAP = 2;
 const DEFAULT_ACCOUNTS = [
   { username: "Coach-Cooper", password: "123456", role: "admin" },
   // Dedicated test login — role "test" unlocks the full Update log (every
-  // version, not just the latest) from Settings without needing admin.
+  // version, not just the latest) from Settings without needing admin, and
+  // gets its own sandboxed demo meet instead of the real team's data.
   { username: "Test-Account", password: "test123", role: "test" },
 ];
 const findAccount = (accounts, username) => accounts.find((a) => a.username.toLowerCase() === (username || "").trim().toLowerCase());
+const ownerCount = (accounts) => (accounts || []).filter((a) => a.owner).length;
 
 // Top-level: gates the board behind a login screen and owns the account list,
 // both kept in persistent storage so a page refresh on the iPad doesn't log
@@ -3410,13 +3511,21 @@ export default function App() {
     setSession(sess); setLoginError(""); if (STORE) STORE.set(SESSION_KEY, JSON.stringify(sess)).catch(() => {});
   };
   const logout = () => { setSession(null); if (STORE) STORE.delete(SESSION_KEY).catch(() => {}); };
-  const isAdmin = session && findAccount(accounts || [], session.username)?.role === "admin";
+  const myAccount = session ? findAccount(accounts || [], session.username) : null;
+  const isAdmin = myAccount?.role === "admin";
+  const isTest = myAccount?.role === "test";
+  const isOwner = !!myAccount?.owner;
+  const isAssist = myAccount?.role === "assistCoach";
+  // Head coach tier: full meet-management powers, whether or not they also
+  // hold the owner flag — admin and test (sandboxed) get the same tier too,
+  // so nothing meet-related is ever gated away from either of them.
+  const isLeadTier = isAdmin || isTest || myAccount?.role === "headCoach" || myAccount?.role === "teamManager";
 
   return (<>
     <style>{CSS}</style>
     {accounts === null ? null // brief flash while persisted state loads
       : !session ? <LoginScreen onLogin={login} error={loginError} />
-      : <MeetDeckBoard session={session} isAdmin={isAdmin} onLogout={logout} accounts={accounts} onSaveAccounts={saveAccounts} />}
+      : <MeetDeckBoard session={session} isAdmin={isAdmin} isOwner={isOwner} isLeadTier={isLeadTier} isAssist={isAssist} isTest={isTest} onLogout={logout} accounts={accounts} onSaveAccounts={saveAccounts} />}
   </>);
 }
 
@@ -3441,33 +3550,142 @@ function LoginScreen({ onLogin, error }) {
 // `accounts`/`onSave` come straight from the top-level App's own state (the
 // same state `login()` reads), not an independent copy loaded from storage —
 // otherwise a newly added account couldn't log in until a page refresh.
-function AccountsModal({ onClose, accounts, onSave, currentUsername }) {
-  const [username, setUsername] = useState(""); const [password, setPassword] = useState(""); const [role, setRole] = useState("coach");
+// Admin sees and can fully edit every account, including resetting anyone's
+// password without knowing the old one. An Owner (a headCoach/teamManager
+// account with the owner flag) sees a scoped-down version of the same
+// screen — only Assistant Coach and Head Coach accounts, with the power to
+// reassign role and the Owner flag between them (capped at 2 owners total),
+// but no visibility into Admin/Test/Team Manager accounts and no password
+// reset power.
+function AccountsModal({ onClose, accounts, onSave, currentUsername, isAdmin, isOwner }) {
+  const editableRoles = isAdmin ? Object.keys(ROLE_LABEL) : ["assistCoach", "headCoach"];
+  const visibleAccounts = isAdmin ? accounts : accounts.filter((a) => editableRoles.includes(a.role));
+  const canOwnerFlag = (r) => OWNER_ELIGIBLE_ROLES.includes(r);
+  const [username, setUsername] = useState(""); const [password, setPassword] = useState("");
+  const [role, setRole] = useState(editableRoles[0]);
+  const [ownerFlag, setOwnerFlag] = useState(false);
   const [err, setErr] = useState("");
+  const [resetPw, setResetPw] = useState({}); // username -> draft password text, admin-only reset field
+  const ownersNow = ownerCount(accounts);
+
   const add = () => {
     if (!username.trim() || !password) { setErr("Username and password required."); return; }
     if (findAccount(accounts, username)) { setErr("That username already exists."); return; }
-    onSave([...accounts, { username: username.trim(), password, role }]);
-    setUsername(""); setPassword(""); setRole("coach"); setErr("");
+    if (!editableRoles.includes(role)) { setErr("You can't create that role."); return; }
+    const wantsOwner = ownerFlag && canOwnerFlag(role);
+    if (wantsOwner && ownersNow >= OWNER_CAP) { setErr("There are already 2 owners — remove Owner from one before adding another."); return; }
+    onSave([...accounts, { username: username.trim(), password, role, ...(wantsOwner ? { owner: true } : {}) }]);
+    setUsername(""); setPassword(""); setRole(editableRoles[0]); setOwnerFlag(false); setErr("");
   };
-  const remove = (u) => { if (u.toLowerCase() === (currentUsername || "").toLowerCase()) { setErr("Can't remove the account you're signed in with."); return; } onSave(accounts.filter((a) => a.username !== u)); };
+  const remove = (u) => {
+    if (u.toLowerCase() === (currentUsername || "").toLowerCase()) { setErr("Can't remove the account you're signed in with."); return; }
+    const target = findAccount(accounts, u);
+    if (!isAdmin && (!target || !editableRoles.includes(target.role))) { setErr("You can't manage that account."); return; }
+    onSave(accounts.filter((a) => a.username !== u));
+  };
+  const updateAccount = (u, patch) => { setErr(""); onSave(accounts.map((a) => a.username === u ? { ...a, ...patch } : a)); };
+  const setRoleFor = (a, newRole) => { if (!editableRoles.includes(newRole)) return; updateAccount(a.username, { role: newRole, ...(canOwnerFlag(newRole) ? {} : { owner: false }) }); };
+  const toggleOwner = (a) => {
+    if (!canOwnerFlag(a.role)) return;
+    if (!a.owner && ownerCount(accounts) >= OWNER_CAP) { setErr("There are already 2 owners — remove Owner from one before adding another."); return; }
+    updateAccount(a.username, { owner: !a.owner });
+  };
+  const setPasswordFor = (a) => { const pw = resetPw[a.username]; if (!pw) return; updateAccount(a.username, { password: pw }); setResetPw((m) => ({ ...m, [a.username]: "" })); };
+
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">👤 Manage accounts</div><div className="md-msub">Admin only — add or remove coach logins.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">👤 Manage accounts</div><div className="md-msub">{isAdmin ? "Admin — full access to every account, including password resets." : "Owner — reassign Owner / Assistant Coach / Head Coach."}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
-          {accounts.map((a) => (
-            <div key={a.username} className="md-meetrow">
-              <div className="md-meetinfo"><div className="md-meetname">{a.username}</div><div className="md-meetmeta">{a.role}</div></div>
-              <button className="md-meetdel" onClick={() => remove(a.username)} aria-label="Remove">🗑</button>
-            </div>
-          ))}
+          {visibleAccounts.map((a) => {
+            const editableHere = isAdmin || editableRoles.includes(a.role);
+            return (
+              <div key={a.username} className="md-acctmgrow">
+                <div className="md-meetinfo">
+                  <div className="md-meetname">{a.username}{a.owner && <em className="md-ownertag">Owner</em>}</div>
+                  <div className="md-meetmeta md-acctmgmeta">
+                    {editableHere ? (
+                      <select value={a.role} onChange={(e) => setRoleFor(a, e.target.value)}>{editableRoles.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}</select>
+                    ) : (ROLE_LABEL[a.role] || a.role)}
+                    {canOwnerFlag(a.role) && editableHere && (
+                      <label className="md-ownercheck"><input type="checkbox" checked={!!a.owner} onChange={() => toggleOwner(a)} /> Owner</label>
+                    )}
+                  </div>
+                </div>
+                {isAdmin && (
+                  <div className="md-pwreset">
+                    <input placeholder="New password" value={resetPw[a.username] || ""} onChange={(e) => setResetPw((m) => ({ ...m, [a.username]: e.target.value }))} />
+                    <button className="md-mbtn sm" onClick={() => setPasswordFor(a)}>Set</button>
+                  </div>
+                )}
+                {editableHere && <button className="md-meetdel" onClick={() => remove(a.username)} aria-label="Remove">🗑</button>}
+              </div>
+            );
+          })}
           <div className="md-mdiv" />
           <label className="md-mrow">New username<input value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" /></label>
           <label className="md-mrow">Password<input value={password} onChange={(e) => setPassword(e.target.value)} /></label>
-          <label className="md-mrow">Role<select value={role} onChange={(e) => setRole(e.target.value)}><option value="coach">Coach</option><option value="admin">Admin</option><option value="test">Test (update log access)</option></select></label>
+          <label className="md-mrow">Role<select value={role} onChange={(e) => setRole(e.target.value)}>{editableRoles.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}</select></label>
+          {canOwnerFlag(role) && <label className="md-ownercheck"><input type="checkbox" checked={ownerFlag} onChange={(e) => setOwnerFlag(e.target.checked)} /> Make this account an Owner ({ownersNow}/{OWNER_CAP} used)</label>}
           {err && <div className="md-loginerr">{err}</div>}
           <button className="md-mbtn primary" onClick={add}>Add account</button>
+        </div>
+        <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
+      </div>
+    </div>
+  );
+}
+
+// Standalone season roster — independent of any single meet's events, so
+// the full team only has to be entered once. Paste a program/roster export
+// (Last, First / age / team / gender, loosely space-or-comma separated) or
+// add swimmers one at a time; every row stays editable after import.
+function RosterModal({ onClose, roster, onSave, teams, defaultTeam }) {
+  const [text, setText] = useState("");
+  const parsed = useMemo(() => parseRosterPaste(text), [text]);
+  const [name, setName] = useState(""); const [age, setAge] = useState(""); const [gender, setGender] = useState(""); const [team, setTeam] = useState(defaultTeam || "");
+  const [search, setSearch] = useState("");
+  const filtered = useMemo(() => roster.filter((s) => !search.trim() || s.name.toLowerCase().includes(search.trim().toLowerCase())), [roster, search]);
+  const dedupeAdd = (rows) => {
+    const next = [...roster];
+    rows.forEach((r) => { const i = next.findIndex((s) => s.name.toLowerCase() === r.name.toLowerCase() && s.team === r.team); if (i >= 0) next[i] = { ...next[i], ...r }; else next.push(r); });
+    onSave(next);
+  };
+  const applyPaste = () => { if (!parsed.length) return; dedupeAdd(parsed); setText(""); };
+  const addOne = () => { if (!name.trim()) return; dedupeAdd([{ name: name.trim(), age: age ? +age : 0, gender, team }]); setName(""); setAge(""); };
+  const update = (i, patch) => onSave(roster.map((s, j) => j === i ? { ...s, ...patch } : s));
+  const remove = (i) => onSave(roster.filter((_, j) => j !== i));
+  return (
+    <div className="md-scrim" onClick={onClose}>
+      <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">🏊 Manage roster</div><div className="md-msub">The season's full swimmer list — paste a roster export or add names one at a time. Independent of any single meet.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-impgrid">
+          <div>
+            <textarea className="md-imparea" placeholder={"Paste here — one swimmer per line…\n\nWong, Madelyn  11  BDST  Girls\nErtell, Ava E  12  BDST  Girls"} value={text} onChange={(e) => setText(e.target.value)} />
+            <div className="md-rosteraddrow">
+              <input placeholder="Last, First" value={name} onChange={(e) => setName(e.target.value)} />
+              <input placeholder="Age" inputMode="numeric" style={{ width: 56 }} value={age} onChange={(e) => setAge(e.target.value.replace(/\D/g, ""))} />
+              <select value={gender} onChange={(e) => setGender(e.target.value)}><option value="">Gender</option><option value="Girls">Girls</option><option value="Boys">Boys</option></select>
+              <select value={team} onChange={(e) => setTeam(e.target.value)}>{(teams.length ? teams : [team]).map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}</select>
+              <button className="md-mbtn sm" onClick={addOne}>+ Add</button>
+            </div>
+          </div>
+          <div className="md-preview">
+            <div className="md-prevtop"><span>{roster.length} swimmer{roster.length === 1 ? "" : "s"} saved{parsed.length ? ` · ${parsed.length} ready to import` : ""}</span>{parsed.length > 0 && <button className="md-ghost2 sm" onClick={applyPaste}>Import {parsed.length}</button>}</div>
+            <input className="md-rostersearch" placeholder="Search roster…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <div className="md-prevbody">
+              {filtered.length === 0 ? <div className="md-prevempty">{roster.length ? "No match." : "No swimmers saved yet — paste a roster or add one above."}</div>
+              : filtered.map((s) => { const i = roster.indexOf(s); return (
+                <div key={s.name + "|" + s.team + i} className="md-rosterrow">
+                  <span className="md-rostername">{s.name}</span>
+                  <input className="md-rosterage" inputMode="numeric" value={s.age || ""} onChange={(e) => update(i, { age: +e.target.value.replace(/\D/g, "") || 0 })} />
+                  <select value={s.gender || ""} onChange={(e) => update(i, { gender: e.target.value })}><option value="">—</option><option value="Girls">Girls</option><option value="Boys">Boys</option></select>
+                  <select value={s.team || ""} onChange={(e) => update(i, { team: e.target.value })}>{(teams.length ? teams : [s.team]).map((t) => <option key={t} value={t}>{t}</option>)}</select>
+                  <button className="md-meetdel sm" onClick={() => remove(i)} aria-label="Remove">🗑</button>
+                </div>
+              ); })}
+            </div>
+          </div>
         </div>
         <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
       </div>
@@ -3756,12 +3974,12 @@ function MeetSetupModal({ onClose, meetName, setMeetName, meetDate, setMeetDate,
   );
 }
 
-function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete, session, isAdmin, role, onLogout, onManageAccounts, canViewUpdateLog, onUpdateLog, seasonRange, onSaveSeasonRange, meetFinalized, onReviewFinalize, onReopenMeet }) {
+function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete, session, isAdmin, isOwner, isLeadTier, isTest, role, onLogout, onManageAccounts, canViewUpdateLog, onUpdateLog, seasonRange, onSaveSeasonRange, accounts, onSaveAccounts, onManageRoster, meetFinalized, onReviewFinalize, onReopenMeet }) {
   const [pendingDelete, setPendingDelete] = useState(null);
   const [yearFilter, setYearFilter] = useState("all");
-  // Buckets by the admin-defined season range, not raw calendar year, so a
-  // custom range (e.g. Nov-Feb) groups a meet with the season it belongs to
-  // rather than splitting one season's meets across two year buckets.
+  // Buckets by the season range, not raw calendar year, so a custom range
+  // (e.g. Nov-Feb) groups a meet with the season it belongs to rather than
+  // splitting one season's meets across two year buckets.
   const years = useMemo(() => [...new Set((meets || []).map((m) => seasonYearOf(m.date, seasonRange)).filter(Boolean))].sort((a, b) => b - a), [meets, seasonRange]);
   const filteredMeets = useMemo(() => (meets || []).filter((m) => yearFilter === "all" || seasonYearOf(m.date, seasonRange) === +yearFilter), [meets, yearFilter, seasonRange]);
   const range = seasonRange || DEFAULT_SEASON_RANGE;
@@ -3772,28 +3990,51 @@ function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onR
     if (!/^\d{2}-\d{2}$/.test(rangeStart) || !/^\d{2}-\d{2}$/.test(rangeEnd)) { setRangeErr("Use MM-DD, e.g. 05-01."); return; }
     setRangeErr(""); onSaveSeasonRange({ startMD: rangeStart, endMD: rangeEnd });
   };
+  // Self-service password change — every role can do this for their OWN
+  // account, but it requires the current password (unlike admin's reset
+  // power over other accounts in Manage accounts, which doesn't).
+  const [curPw, setCurPw] = useState(""); const [newPw, setNewPw] = useState(""); const [newPw2, setNewPw2] = useState(""); const [pwMsg, setPwMsg] = useState({ text: "", ok: false });
+  const changeMyPassword = () => {
+    const mine = findAccount(accounts || [], session?.username);
+    if (!mine || mine.password !== curPw) { setPwMsg({ text: "Current password is incorrect.", ok: false }); return; }
+    if (!newPw || newPw !== newPw2) { setPwMsg({ text: "New passwords don't match.", ok: false }); return; }
+    onSaveAccounts(accounts.map((a) => a.username === mine.username ? { ...a, password: newPw } : a));
+    setCurPw(""); setNewPw(""); setNewPw2(""); setPwMsg({ text: "Password changed ✓", ok: true });
+  };
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
         <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">⚙ Settings</div><div className="md-msub">Setup, team, saved meets &amp; data · v{APP_VERSION}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
-          {session && <div className="md-acctrow"><span>Signed in as <b>{session.username}</b>{isAdmin ? " · admin" : role === "test" ? " · test" : ""}</span><button className="md-mbtn sm" onClick={onLogout}>Log out</button></div>}
-          {isAdmin && <button className="md-mbtn" onClick={onManageAccounts}>👤 Manage accounts</button>}
+          {session && <div className="md-acctrow"><span>Signed in as <b>{session.username}</b> · {ROLE_LABEL[role] || role}{isOwner ? " · Owner" : ""}</span><button className="md-mbtn sm" onClick={onLogout}>Log out</button></div>}
+          {(isAdmin || isOwner) && <button className="md-mbtn" onClick={onManageAccounts}>👤 Manage accounts</button>}
           {canViewUpdateLog && <button className="md-mbtn" onClick={onUpdateLog}>📋 Update log</button>}
           <div className="md-mdiv" />
-          <button className="md-mbtn" onClick={onMeetSetup}>Meet set up</button>
-          <button className="md-mbtn" onClick={onResults}>Results</button>
+          <div className="md-menutitle">Change my password</div>
+          <label className="md-mrow">Current password<input type="password" value={curPw} onChange={(e) => setCurPw(e.target.value)} /></label>
+          <label className="md-mrow">New password<input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} /></label>
+          <label className="md-mrow">Confirm new password<input type="password" value={newPw2} onChange={(e) => setNewPw2(e.target.value)} /></label>
+          {pwMsg.text && <div className={pwMsg.ok ? "md-pwok" : "md-loginerr"}>{pwMsg.text}</div>}
+          <button className="md-mbtn sm" onClick={changeMyPassword}>Change password</button>
           <div className="md-mdiv" />
+          {isLeadTier ? (<>
+            <button className="md-mbtn" onClick={onMeetSetup}>Meet set up</button>
+            <button className="md-mbtn" onClick={onResults}>Results</button>
+            {onManageRoster && <button className="md-mbtn" onClick={onManageRoster}>🏊 Manage roster</button>}
+            <div className="md-mdiv" />
+          </>) : <div className="md-msub" style={{ marginBottom: 10 }}>Meet setup, results import, and the roster are managed by a Head Coach, Team Manager, Owner, or Admin.</div>}
           <label className="md-mrow">Main team (yours)<select value={homeTeam} onChange={(e) => setHomeTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}</select></label>
-          <button className="md-mbtn" onClick={onSave}>💾 Save this meet to season</button>
-          <button className="md-mbtn primary" onClick={onExport}>Export to Google Sheets</button>
-          {meetFinalized
-            ? <button className="md-mbtn" onClick={onReopenMeet}>🔓 Reopen meet for editing</button>
-            : <button className="md-mbtn" onClick={onReviewFinalize}>🚩 Review &amp; finalize meet</button>}
+          {isLeadTier && <>
+            <button className="md-mbtn" onClick={onSave}>💾 Save this meet to season</button>
+            <button className="md-mbtn primary" onClick={onExport}>Export to Google Sheets</button>
+            {meetFinalized
+              ? <button className="md-mbtn" onClick={onReopenMeet}>🔓 Reopen meet for editing</button>
+              : <button className="md-mbtn" onClick={onReviewFinalize}>🚩 Review &amp; finalize meet</button>}
+          </>}
           <div className="md-mdiv" />
-          {isAdmin && (
+          {isLeadTier && (
             <>
-              <div className="md-menutitle">Season date range (admin)</div>
+              <div className="md-menutitle">Season date range</div>
               <div className="md-msub" style={{ marginBottom: 6 }}>Defines what counts as one season for year filtering and League/Team stats below — e.g. 05-01 to 07-31 for a summer league. Repeats every year; the default (01-01 to 12-31) is the full calendar year.</div>
               <div className="md-rangerow">
                 <label className="md-mrow">Start (MM-DD)<input value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} placeholder="05-01" /></label>
@@ -3816,12 +4057,12 @@ function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onR
               <div key={m.id} className="md-meetrow">
                 <div className="md-meetinfo"><div className="md-meetname">{m.meetName}</div><div className="md-meetmeta">{m.date} · {m.mode === "timetrial" ? "Time trials" : m.mode === "champs" ? "Champs" : "Dual"}</div></div>
                 <button className="md-meetload" onClick={() => onLoad(m)}>Load</button>
-                <button className="md-meetdel" onClick={() => setPendingDelete(m)} aria-label="Delete">🗑</button>
+                {isLeadTier && <button className="md-meetdel" onClick={() => setPendingDelete(m)} aria-label="Delete">🗑</button>}
               </div>
             )) : <div className="md-prevempty">{yearFilter === "all" ? "No saved meets yet." : "No saved meets for that year."}</div>}
           </div>
           <div className="md-mdiv" />
-          {isAdmin && <button className="md-mbtn danger" onClick={onClear}>🗑 Clear all data &amp; reset</button>}
+          {(isAdmin || isTest) && <button className="md-mbtn danger" onClick={onClear}>🗑 Clear all data &amp; reset</button>}
         </div>
         {pendingDelete && <div className="md-confirm" onClick={() => setPendingDelete(null)}>
           <div className="md-confirmbox" onClick={(e) => e.stopPropagation()}>
@@ -4640,6 +4881,16 @@ html, body, #root { height: 100%; }
 @media (max-width:720px){ .md-impgrid{ grid-template-columns:1fr; } }
 .md-imparea { border:none; border-top:1px solid var(--sline); border-right:1px solid var(--sline); padding:14px 16px; font-size:13px; font-family:ui-monospace,Menlo,monospace; resize:none; min-height:280px; line-height:1.5; }
 .md-imparea:focus { outline:none; background:#fbfdff; }
+.md-ghost2.sm { padding:6px 10px; font-size:11.5px; }
+.md-rosteraddrow { display:flex; gap:6px; padding:10px 16px; border-top:1px solid var(--sline); flex-wrap:wrap; }
+.md-rosteraddrow input, .md-rosteraddrow select { padding:7px 8px; border-radius:8px; border:1px solid var(--sline); font-size:12.5px; }
+.md-rosteraddrow input[placeholder="Last, First"] { flex:1; min-width:120px; }
+.md-rostersearch { margin:0 14px 8px; padding:8px 10px; border-radius:8px; border:1px solid var(--sline); font-size:12.5px; width:calc(100% - 28px); }
+.md-rosterrow { display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--sline); border-radius:9px; background:#fff; margin-bottom:6px; }
+.md-rostername { flex:1; min-width:0; font-weight:700; font-size:13px; color:var(--sink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-rosterage { width:44px; padding:6px 7px; border-radius:7px; border:1px solid var(--sline); font-size:12px; text-align:center; }
+.md-rosterrow select { padding:6px 7px; border-radius:7px; border:1px solid var(--sline); font-size:11.5px; }
+.md-meetdel.sm { width:28px; height:28px; font-size:12px; }
 .md-preview { display:flex; flex-direction:column; min-height:0; background:#f8fafc; border-top:1px solid var(--sline); }
 .md-prevtop { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--sline); font-size:12px; font-weight:700; color:#475569; }
 .md-impdqnote { color:#b42318; }
@@ -5002,6 +5253,14 @@ html, body, #root { height: 100%; }
 .md-meetload:hover { background:#5fe3f5; }
 .md-meetdel { flex:none; width:34px; height:34px; border-radius:8px; border:1px solid #fecaca; background:#fff; color:#b42318; font-size:14px; cursor:pointer; }
 .md-meetdel:hover { background:#fef2f2; }
+.md-pwok { font-size:12.5px; font-weight:700; color:#166534; }
+.md-acctmgrow { display:flex; align-items:center; gap:10px; padding:11px 12px; border:1px solid var(--sline); border-radius:11px; background:#fff; flex-wrap:wrap; }
+.md-acctmgmeta { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.md-acctmgmeta select { font-size:11.5px; padding:3px 6px; border-radius:6px; border:1px solid var(--sline); }
+.md-ownertag { font-style:normal; font-size:10px; font-weight:800; color:#7c3aed; background:#f3ebff; border:1px solid #ddd0fb; border-radius:6px; padding:1px 6px; margin-left:8px; vertical-align:middle; }
+.md-ownercheck { display:flex; align-items:center; gap:5px; font-size:11.5px; color:#64748b; font-weight:700; cursor:pointer; }
+.md-pwreset { display:flex; align-items:center; gap:6px; flex:none; }
+.md-pwreset input { width:110px; padding:7px 8px; border-radius:8px; border:1px solid var(--sline); font-size:12px; }
 .md-rangerow { display:flex; align-items:flex-end; gap:10px; }
 .md-rangerow .md-mrow { flex:1; }
 .md-rangerow .md-mbtn { flex:none; }
