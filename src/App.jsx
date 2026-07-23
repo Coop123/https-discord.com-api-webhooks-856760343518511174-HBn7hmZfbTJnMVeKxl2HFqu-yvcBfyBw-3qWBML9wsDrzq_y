@@ -622,42 +622,67 @@ function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
   const { patch, matched } = useMemo(() => mergeResults(parsed, events, null, homeTeam), [parsed, events, homeTeam]);
   const dqCount = useMemo(() => Object.values(patch).filter((p) => p.dqs).length, [patch]);
   const count = parsed.reduce((n, ev) => n + ev.heats[0].lanes.length, 0);
-  const foundTeams = useMemo(() => { const s = new Set(); parsed.forEach((ev) => ev.heats[0].lanes.forEach((l) => s.add(l.team))); return [...s]; }, [parsed]);
+  // "Save as new meet": setup (name/date/type/lanes/teams) FIRST, same fields
+  // and order as Meet setup, THEN paste one or more results sheets — every
+  // "+ Add multiple" folds the current paste into addedEvents and clears the
+  // box for the next one, so several sheets can build up before "Save meet".
   const [form, setForm] = useState(false);
+  const [setupDone, setSetupDone] = useState(false);
   const [name, setName] = useState(""); const [mtype, setMtype] = useState("champs");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [lanes, setLanes] = useState(6);
   const [host, setHost] = useState(""); const [away, setAway] = useState("");
-  useEffect(() => { if (foundTeams.length && !host) setHost(foundTeams[0]); if (foundTeams.length > 1 && !away) setAway(foundTeams[1]); }, [foundTeams]);
+  const [addedEvents, setAddedEvents] = useState([]);
+  const allNewParsed = useMemo(() => [...addedEvents, ...parsed], [addedEvents, parsed]);
+  const newCount = allNewParsed.reduce((n, ev) => n + ev.heats[0].lanes.length, 0);
+  const newDqCount = allNewParsed.reduce((n, ev) => n + ev.heats[0].lanes.filter((l) => l.dq).length, 0);
   const onFile = async (e) => { const f = e.target.files?.[0]; if (!f) return;
     if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") { setBusy("Reading PDF…"); try { setText(await pdfToText(f)); setBusy(""); } catch { setBusy("Couldn't read the PDF — paste text."); } }
     else { const r = new FileReader(); r.onload = () => setText(String(r.result || "")); r.readAsText(f); } };
   const teamOpt = (t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>;
+  const startNewMeet = () => { setForm(true); setSetupDone(false); };
+  const saveNewMeet = () => onSaveNew({ meet: resultsToMeet(allNewParsed), name: name.trim(), date, mode: mtype, host, away, dualLanes: lanes });
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Import results sheet</div><div className="md-msub">Merge finals onto a loaded program, or save a whole new meet from results alone.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
-        <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy}</span></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">{form ? (setupDone ? "New meet — paste results" : "New meet set up") : "Import results sheet"}</div><div className="md-msub">{form ? (setupDone ? "Paste each heat sheet / results page — add as many as you need, then save." : "Name, date, type, teams & lanes — same as Meet setup.") : "Merge finals onto a loaded program, or save a whole new meet from results alone."}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        {(!form || setupDone) && <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy}</span></div>}
         {form ? (
-          <div className="md-newmeetform">
-            <label className="md-mrow">Meet name<input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Belwood vs Oaktree — Jun 20" /></label>
-            <label className="md-mrow">Meet date<input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
-            <label className="md-mrow">Meet type<select value={mtype} onChange={(e) => setMtype(e.target.value)}><option value="dual">Dual meet</option><option value="champs">Champs</option><option value="timetrial">Time trials</option></select></label>
-            {mtype === "dual" && <label className="md-mrow">Home team (1st)<select value={host} onChange={(e) => setHost(e.target.value)}>{foundTeams.map(teamOpt)}</select></label>}
-            {mtype === "dual" && <label className="md-mrow">Away team (2nd)<select value={away} onChange={(e) => setAway(e.target.value)}>{foundTeams.map(teamOpt)}</select></label>}
-            <div className="md-newmeetnote">{count} results across {new Set(parsed.map((e) => e.num)).size} events will become this meet.</div>
-          </div>
+          !setupDone ? (
+            <div className="md-setbody">
+              <label className="md-mrow">Meet name<input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Belwood vs Oaktree — Jun 20" /></label>
+              <label className="md-mrow">Meet date<input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
+              <label className="md-mrow">Meet type<select value={mtype} onChange={(e) => setMtype(e.target.value)}><option value="dual">Dual meet</option><option value="champs">Champs</option><option value="timetrial">Time trials</option></select></label>
+              <div className="md-mrow">Lanes per heat<div className="md-stepper"><button onClick={() => setLanes((n) => Math.max(4, n - 1))}>−</button><span>{lanes}</span><button onClick={() => setLanes((n) => Math.min(12, n + 1))}>＋</button></div></div>
+              {mtype === "dual" && <label className="md-mrow">Home team (1st)<select value={host} onChange={(e) => setHost(e.target.value)}><option value="">Choose…</option>{TEAMS.map((t) => teamOpt(t.code))}</select></label>}
+              {mtype === "dual" && <label className="md-mrow">Away team (2nd)<select value={away} onChange={(e) => setAway(e.target.value)}><option value="">Choose…</option>{TEAMS.map((t) => teamOpt(t.code))}</select></label>}
+            </div>
+          ) : (
+            <div className="md-impgrid">
+              <textarea className="md-imparea" placeholder={"Paste results text…"} value={text} onChange={(e) => setText(e.target.value)} />
+              <div className="md-preview"><div className="md-prevtop"><span>{newCount} result{newCount === 1 ? "" : "s"} across {new Set(allNewParsed.map((e) => e.num)).size} event{new Set(allNewParsed.map((e) => e.num)).size === 1 ? "" : "s"} so far{newDqCount ? <> · <b className="md-impdqnote">{newDqCount} DQ{newDqCount > 1 ? "s" : ""} found</b></> : null}</span></div>
+                <div className="md-prevbody">{justAdded > 0 && <div className="md-impjustadded">✓ Added {justAdded} result{justAdded > 1 ? "s" : ""} — paste or upload the next sheet, or Save meet once everything's in.</div>}<div className="md-prevempty">Paste each heat sheet or results page and tap “+ Add multiple” after each one — they all build into this one meet. Any row marked DQ gets flagged; pick the reason from the usual DQ button once the meet's loaded.</div></div>
+              </div>
+            </div>
+          )
         ) : (
           <div className="md-impgrid">
             <textarea className="md-imparea" placeholder={"Paste results text…"} value={text} onChange={(e) => setText(e.target.value)} />
             <div className="md-preview"><div className="md-prevtop"><span>{parsed.length} events · {count} results · <b>{matched}</b> merge onto loaded meet{dqCount ? <> · <b className="md-impdqnote">{dqCount} DQ{dqCount > 1 ? "s" : ""}</b> found for {homeTeam}</> : null}</span></div>
-              <div className="md-prevbody">{justAdded > 0 && <div className="md-impjustadded">✓ Added {justAdded} result{justAdded > 1 ? "s" : ""} — paste or upload the next sheet.</div>}<div className="md-prevempty">“Add one”/“Add multiple” fill finals onto the loaded program by event # + name. Any {homeTeam} row marked DQ on the sheet gets flagged as a pending DQ — pick the reason from the usual DQ button after merging — and keeps the time too if the sheet has one. “Save as new meet” builds and saves a fresh meet from just this results sheet.</div></div></div>
+              <div className="md-prevbody">{justAdded > 0 && <div className="md-impjustadded">✓ Added {justAdded} result{justAdded > 1 ? "s" : ""} — paste or upload the next sheet.</div>}<div className="md-prevempty">“Add one”/“Add multiple” fill finals onto the loaded program by event # + name. Any {homeTeam} row marked DQ on the sheet gets flagged as a pending DQ — pick the reason from the usual DQ button after merging — and keeps the time too if the sheet has one. “Save as new meet” sets up a fresh meet and builds it from results sheets alone.</div></div></div>
           </div>
         )}
-        <div className="md-mfoot"><button className="md-cancel" onClick={form ? () => setForm(false) : onClose}>{form ? "Back" : "Cancel"}</button>
+        <div className="md-mfoot">
+          <button className="md-cancel" onClick={form ? (setupDone ? () => setSetupDone(false) : () => setForm(false)) : onClose}>{form ? "Back" : "Cancel"}</button>
           {form
-            ? <button className="md-apply" disabled={!count || !name.trim()} onClick={() => onSaveNew({ meet: resultsToMeet(parsed), name: name.trim(), date, mode: mtype, host, away })}>Save meet</button>
+            ? (setupDone
+              ? <>
+                  <button className="md-ghost2" disabled={!count} onClick={() => { setAddedEvents((a) => [...a, ...parsed]); setJustAdded(count); setText(""); }}>+ Add multiple</button>
+                  <button className="md-apply" disabled={!newCount || !name.trim()} onClick={saveNewMeet}>Save meet</button>
+                </>
+              : <button className="md-apply" disabled={!name.trim() || (mtype === "dual" && (!host || !away || host === away))} onClick={() => setSetupDone(true)}>Next</button>)
             : <>
-              <button className="md-ghost2" disabled={!count} onClick={() => setForm(true)}>Save as new meet</button>
+              <button className="md-ghost2" onClick={startNewMeet}>Save as new meet</button>
               <button className="md-ghost2" disabled={matched === 0} onClick={() => { onApply(patch); setJustAdded(matched); setText(""); }}>+ Add multiple</button>
               <button className="md-apply" disabled={matched === 0} onClick={() => { onApply(patch); onClose(); }}>Add one — {matched} result{matched === 1 ? "" : "s"}</button>
             </>}
@@ -2202,7 +2227,16 @@ function resultsToMeet(parsed) {
   const events = [], data = {};
   order.forEach((num, i) => { const g = byNum[num]; const lanes = g.lanes.map((l, j) => ({ lane: j + 1, name: l.name, age: l.age || 0, team: l.team, seed: l.seed || "NT", ...(l.relay ? { relay: l.relay, swimmers: [] } : {}) }));
     events.push({ id: "ev" + i, num: g.num, name: g.name, flat: true, heats: [{ num: 1, lanes }] });
-    g.lanes.forEach((l, j) => { if (l.finalTime) data[entryId(i, 0, j + 1)] = { time: l.finalTime, dqs: [], tags: {}, notes: "" }; });
+    // A DQ row on the sheet gets flagged even with no time to attach it to —
+    // the reason still needs to be picked later via the usual DQ button, same
+    // as a DQ merged onto an already-loaded program (mergeResults). Unlike
+    // that merge path (home team only), a brand-new meet built purely from a
+    // results sheet has no established home team yet, so every team's DQ
+    // rows get flagged here — it's just a scoring flag until picked up.
+    g.lanes.forEach((l, j) => { const id = entryId(i, 0, j + 1);
+      if (l.finalTime) data[id] = { time: l.finalTime, dqs: [], tags: {}, notes: "" };
+      if (l.dq) data[id] = { ...(data[id] || { time: "", tags: {}, notes: "" }), dqs: [{ code: PEND_DQ_CODE, reason: "Reason pending — awaiting DQ slip", group: "Pending" }] };
+    });
   });
   return { events: events.filter((e) => e.heats[0].lanes.length), data };
 }
@@ -2361,6 +2395,11 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   // results sheet has been uploaded — even mid-meet.
   const [viewMode, setViewMode] = useState("meet");
   const [resultsUploaded, setResultsUploaded] = useState(false);
+  // Whether the loaded meet actually has a real heat sheet/program (built via
+  // Meet setup's roster import) as opposed to being assembled purely from a
+  // pasted results sheet (Results -> Save as new meet). Meet Mode's live
+  // board only makes sense with an actual heat sheet, so it's gated on this.
+  const [hasMeetSheet, setHasMeetSheet] = useState(true);
   const lanesPerHeat = dualLanes;
   const sheetRef = useRef(null);
   const evRefs = useRef({});
@@ -2447,6 +2486,9 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   // Result Mode is available once there's something to show results for.
   const canResultMode = meetOver || meetFinalized || resultsUploaded;
   useEffect(() => { if (viewMode === "result" && !canResultMode) setViewMode("meet"); }, [viewMode, canResultMode]);
+  // A meet built purely from a pasted results sheet (no real heat sheet) has
+  // no live board worth showing — Meet Mode stays off-limits for it.
+  useEffect(() => { if (viewMode === "meet" && !hasMeetSheet) setViewMode("result"); }, [viewMode, hasMeetSheet]);
   // Result Mode's two panels are scoped to whichever event the meet-sheet
   // jump arrows currently point at (`current`) — "Up next" previews the
   // following event's top 3 (DQs included), "In the water" shows the full,
@@ -2536,19 +2578,19 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   useEffect(() => { if (!STORE) return; const t = setTimeout(() => { STORE.set(CUR_KEY, JSON.stringify({ events, records, data, meetName, meetDate, mode, homeTeam, hostTeam, awayTeam, dualLanes })).catch(() => {}); }, 8000); return () => clearTimeout(t); }, [events, records, data, meetName, meetDate, mode, homeTeam, awayTeam, dualLanes]);
   // Uses the meet-date field (settable in Meet setup) instead of "today" so
   // importing results from a past meet saves under its actual date.
-  const saveToSeason = async () => { const date = meetDate || new Date().toISOString().slice(0, 10); const id = "meetdeck:meet:" + Date.now(); const snap = { id, meetName, mode, date, events, data, records, homeTeam, hostTeam, awayTeam, dualLanes };
+  const saveToSeason = async () => { const date = meetDate || new Date().toISOString().slice(0, 10); const id = "meetdeck:meet:" + Date.now(); const snap = { id, meetName, mode, date, events, data, records, homeTeam, hostTeam, awayTeam, dualLanes, hasMeetSheet };
     setSeasonMeets((a) => [...a.filter((m) => !(m.meetName === meetName && m.date === date)), snap]);
     if (!STORE) { flash("Saved to season (this session)"); return; }
     try { await STORE.set(id, JSON.stringify(snap));
       let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {}
       idx = idx.filter((x) => x.meetName !== meetName || x.date !== date); idx.push({ id, meetName, mode, date });
       await STORE.set(INDEX_KEY, JSON.stringify(idx)); flash("Saved to season ✓"); } catch (e) { flash("Saved (storage limit — kept for this session)"); } };
-  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = true; setMeetFinalized(true); setViewMode("result"); setResultsUploaded(true); setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
+  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = true; setMeetFinalized(true); setHasMeetSheet(snap.hasMeetSheet !== false); setViewMode("result"); setResultsUploaded(true); setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
   const deleteMeet = async (id) => { if (STORE) { try { await STORE.delete(id); } catch (e) {} try { const r = await STORE.get(INDEX_KEY); if (r && r.value) await STORE.set(INDEX_KEY, JSON.stringify(JSON.parse(r.value).filter((x) => x.id !== id))); } catch (e) {} } setSeasonMeets((a) => a.filter((m) => m.id !== id)); flash("Meet removed"); };
   const clearData = async () => { if (typeof window !== "undefined" && window.confirm && !window.confirm("Clear all saved meets and reset the board? This can't be undone.")) return;
     if (STORE) { try { const r = await STORE.get(INDEX_KEY); if (r && r.value) for (const it of JSON.parse(r.value)) { try { await STORE.delete(it.id); } catch (e) {} } } catch (e) {}
       try { await STORE.delete(INDEX_KEY); } catch (e) {} try { await STORE.delete(CUR_KEY); } catch (e) {} }
-    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false); setViewMode("meet"); setResultsUploaded(false); setHeatPtr(4); setModal(null); flash("Data cleared"); };
+    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false); setViewMode("meet"); setResultsUploaded(false); setHasMeetSheet(true); setHeatPtr(4); setModal(null); flash("Data cleared"); };
   const toggleTag = (id, key) => { const tags = { ...get(id).tags }; tags[key] ? delete tags[key] : (tags[key] = true); update(id, { tags }); };
   const toggleDqCode = (id, group, code, reason, swimmer) => { let dqs = [...(get(id).dqs || [])]; const i = dqs.findIndex((q) => q.code === code); if (i >= 0) dqs.splice(i, 1); else { dqs = dqs.filter((q) => q.code !== PEND_DQ_CODE); dqs.push({ code, reason, group, ...(swimmer ? { swimmer } : {}) }); } update(id, { dqs }); };
   // Quick tap: flag a DQ instantly with the reason left pending (toggles off
@@ -2701,7 +2743,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     // press Start — without this, a stale startedHeats/autoEnded entry left
     // over from whatever heat happened to share the same evIdx:htIdx key in
     // the previous meet would make the new first heat look already running.
-    setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false); setViewMode("meet"); setResultsUploaded(false);
+    setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false); setViewMode("meet"); setResultsUploaded(false); setHasMeetSheet(true);
     setRelaySwapHistory({}); setModal("meetsetup"); };
   const scrollToEvent = (evId) => { const el = evRefs.current[evId]; if (el && sheetRef.current) sheetRef.current.scrollTo({ top: el.offsetTop - 8, behavior: "smooth" }); };
   const jumpToCurrent = () => scrollToEvent(current?.evId);
@@ -2768,7 +2810,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           </>)}
         </div>
         <div className="md-viewmodebar">
-          <button className={"md-vmbtn" + (viewMode === "meet" ? " active" : "")} onClick={() => setViewMode("meet")}>Meet</button>
+          <button className={"md-vmbtn" + (viewMode === "meet" ? " active" : "")} disabled={!hasMeetSheet} onClick={() => setViewMode("meet")} title={hasMeetSheet ? "" : "This meet has no heat sheet — set one up under Meet setup to unlock Meet Mode"}>Meet</button>
           <button className={"md-vmbtn" + (viewMode === "result" ? " active" : "")} disabled={!canResultMode} onClick={() => setViewMode("result")} title={canResultMode ? "" : "Available once the meet is finished or results are uploaded"}>Results</button>
         </div>
         <ScoreStrip scores={scores} mode={mode} home={hostTeam} away={awayTeam} teams={teamsPresent} onTeamClick={(t) => { setStatsTeam(t); setModal("stats"); }} />
@@ -2783,12 +2825,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
               <span className="md-pmeta">{nextEventResult ? `#${nextEventResult.ev.num} ${shortEvent(nextEventResult.ev.name)}` : "—"}</span></div>
             <div className="md-finalnext">
               {nextEventResult ? (nextEventResult.list.length ? nextEventResult.list.map((e, i) => (
-                <div key={e.id} className={"md-finalresultrow" + (e.l.team === homeTeam ? " mine" : "")}>
-                  <span className="md-place">{(e.dq || e.scr || e.ns) ? "—" : ORD(i + 1)}</span>
-                  <span className="md-resname">{e.l.name}</span>
-                  <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
-                  {e.dq ? <span className="md-dqbadge sm">DQ {dqLabel(get(e.id))}</span> : e.ns ? <span className="md-scrbadge">NS</span> : e.scr ? <span className="md-scrbadge">SCR</span> : <span className="md-restime">{e.time || "––.––"}</span>}
-                </div>
+                <ResultRow key={e.id} e={e} i={i} mine={e.l.team === homeTeam} get={get} onPick={openPop} onSwipeDq={openDqDirect} onNotesTap={openPopNotes} />
               )) : <div className="md-prevempty">No results yet for this event.</div>) : <div className="md-prevempty">End of the meet program.</div>}
             </div>
           </div>
@@ -2797,12 +2834,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
               <span className="md-pmeta">{current ? `#${events[current.evIdx].num} ${shortEvent(current.eventName)}` : "—"}</span></div>
             <div className="md-finalresults">
               {resultEventList.length ? resultEventList.map((e, i) => (
-                <div key={e.id} className={"md-finalresultrow" + (e.l.team === homeTeam ? " mine" : "")}>
-                  <span className="md-place">{(e.dq || e.scr || e.ns) ? "—" : ORD(i + 1)}</span>
-                  <span className="md-resname">{e.l.name}</span>
-                  <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
-                  {e.dq ? <span className="md-dqbadge sm">DQ {dqLabel(get(e.id))}</span> : e.ns ? <span className="md-scrbadge">NS</span> : e.scr ? <span className="md-scrbadge">SCR</span> : <span className="md-restime">{e.time || "––.––"}</span>}
-                </div>
+                <ResultRow key={e.id} e={e} i={i} mine={e.l.team === homeTeam} get={get} onPick={openPop} onSwipeDq={openDqDirect} onNotesTap={openPopNotes} />
               )) : <div className="md-prevempty">No results yet for this event.</div>}
             </div>
           </div>
@@ -2945,12 +2977,12 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           const dqs = p.dqs ? (cur.dqs && cur.dqs.length ? cur.dqs : p.dqs) : cur.dqs;
           nd[id] = { ...cur, ...p, ...(p.dqs ? { dqs } : {}) };
         }); return nd; }); setResultsUploaded(true); }}
-        onSaveNew={({ meet, name, date, mode: mtype, host, away }) => {
+        onSaveNew={({ meet, name, date, mode: mtype, host, away, dualLanes: newLanes }) => {
           const saveDate = date || new Date().toISOString().slice(0, 10);
           setEvents(meet.events); setData(meet.data); setRecords({}); setStartedHeats({}); setHeatPtr(0);
-          setMeetName(name); setMeetDate(saveDate); setMode(mtype); if (host) setHostTeam(host); if (away) setAwayTeam(away); setModal(null); setResultsUploaded(true); setViewMode("result");
+          setMeetName(name); setMeetDate(saveDate); setMode(mtype); if (host) setHostTeam(host); if (away) setAwayTeam(away); if (newLanes) setDualLanes(newLanes); setModal(null); setResultsUploaded(true); setViewMode("result"); setHasMeetSheet(false);
           const id = "meetdeck:meet:" + Date.now();
-          const snap = { id, meetName: name, mode: mtype, date: saveDate, events: meet.events, data: meet.data, records: {}, homeTeam, hostTeam: host, awayTeam: away, dualLanes };
+          const snap = { id, meetName: name, mode: mtype, date: saveDate, events: meet.events, data: meet.data, records: {}, homeTeam, hostTeam: host, awayTeam: away, dualLanes: newLanes || dualLanes, hasMeetSheet: false };
           setSeasonMeets((a) => [...a.filter((m) => !(m.meetName === name && m.date === saveDate)), snap]);
           if (STORE) { (async () => { try { await STORE.set(id, JSON.stringify(snap)); let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {} idx = idx.filter((x) => x.meetName !== name || x.date !== saveDate); idx.push({ id, meetName: name, mode: mtype, date: saveDate }); await STORE.set(INDEX_KEY, JSON.stringify(idx)); } catch (e) {} })(); }
           flash("Saved new meet: " + name);
@@ -3006,6 +3038,18 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // redesign or workflow change. Add every new release as a fresh entry at
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
+  {
+    version: "2.1.0",
+    date: "2026-07-23",
+    title: "New-meet-from-results wizard, DQ-aware parsing, Meet Mode gating",
+    notes: [
+      "Results → Save as new meet now sets up the meet first — name, date, type, lanes, home/away teams, same fields and order as Meet setup — before you paste anything.",
+      "Paste as many heat sheets / results pages as you need with \"+ Add multiple\" — they all build into one meet, saved together at the end.",
+      "A DQ row on a results sheet gets flagged now even with no time attached to it — previously it was silently dropped when building a brand-new meet from results alone.",
+      "Meet Mode is off-limits for a meet built purely from a results sheet — there's no real heat sheet to show a live board for. It unlocks again once a meet is set up the normal way, through Meet setup's roster import.",
+      "Swipe gestures (half-swipe for DQ/NS, full swipe for notes) now work on Result Mode's \"In the water\" and \"Up next\" rows, same as everywhere else on the board.",
+    ],
+  },
   {
     version: "2.0.1",
     date: "2026-07-23",
@@ -3410,6 +3454,24 @@ function TickRow({ e, i, mine, pts, best, br, onPick, onSwipeDq, onNotesTap }) {
       <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
       <span className="md-restime">{e.time}{best && <em className="md-best sm">B</em>}{br && <em className="md-br">BR</em>}</span>
       <span className="md-respts">+{pts}</span>
+    </button>
+  );
+}
+// Result Mode's per-event rows ("Up next" top 3, "In the water" full results)
+// — same two-tier swipe gesture as everywhere else: tap opens the popover,
+// half-swipe the DQ/NS quick picker, full-swipe notes.
+function ResultRow({ e, i, mine, get, onPick, onSwipeDq, onNotesTap }) {
+  const gesture = useRowGesture({
+    onTap: (el) => onPick(e.id, el),
+    onSwipeHalf: onSwipeDq ? (el) => onSwipeDq(e.id, el) : undefined,
+    onSwipeFull: onNotesTap ? (el) => onNotesTap(e.id, el) : undefined,
+  });
+  return (
+    <button className={"md-finalresultrow" + (mine ? " mine" : "")} {...gesture}>
+      <span className="md-place">{(e.dq || e.scr || e.ns) ? "—" : ORD(i + 1)}</span>
+      <span className="md-resname">{e.l.name}</span>
+      <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
+      {e.dq ? <span className="md-dqbadge sm">DQ {dqLabel(get(e.id))}</span> : e.ns ? <span className="md-scrbadge">NS</span> : e.scr ? <span className="md-scrbadge">SCR</span> : <span className="md-restime">{e.time || "––.––"}</span>}
     </button>
   );
 }
@@ -4054,7 +4116,7 @@ html, body, #root { height: 100%; }
 .md-finalnextrow .md-evnum { color:var(--cyan); font-weight:800; }
 .md-panel.water.final { flex:1 1 auto; }
 .md-finalresults { flex:1 1 auto; min-height:0; overflow-y:auto; padding:6px 4px; }
-.md-finalresultrow { display:flex; align-items:center; gap:8px; padding:7px 10px; border-bottom:1px solid rgba(255,255,255,.06); color:var(--text); font-size:12.5px; }
+.md-finalresultrow { display:flex; align-items:center; gap:8px; padding:7px 10px; border:none; border-bottom:1px solid rgba(255,255,255,.06); background:none; width:100%; text-align:left; font:inherit; cursor:pointer; color:var(--text); font-size:12.5px; }
 .md-finalresultrow.mine { background:rgba(250,204,21,.08); }
 .md-finalresultrow .md-place { width:20px; flex:none; color:var(--muted); font-weight:800; font-variant-numeric:tabular-nums; }
 .md-finalresultrow .md-resname { flex:1; min-width:0; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
