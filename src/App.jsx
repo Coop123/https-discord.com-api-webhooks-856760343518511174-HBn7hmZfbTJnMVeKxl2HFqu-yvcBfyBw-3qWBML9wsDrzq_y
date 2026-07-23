@@ -2346,10 +2346,13 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     if (allDone) setRelaySplitsScope(null);
   };
   useEffect(() => { relaySplitsCloseCheck.current(); }, [data]);
-  const recordLap = (id, eventName) => {
+  // Splits (multi-tap lap timing) only apply to the home team — every other
+  // lane just needs a single tap to stop the clock and record a final time,
+  // whatever the event would normally ask for.
+  const recordLap = (id, eventName, mine) => {
     if (!clockActive) return;
     const d = get(id); if (d.time) return;
-    const req = requiredTapsFor(eventName);
+    const req = mine ? requiredTapsFor(eventName) : 1;
     const splits = [...(d.splits || [])];
     const elapsedSec = (Date.now() - clockActive.startedAt) / 1000;
     const prevCum = splits.reduce((s, x) => s + (toSeconds(x) || 0), 0);
@@ -2568,15 +2571,25 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     if (info && info.leg === undefined && info.sw && info.sw.swimmers && info.sw.team === homeTeam) { setRelaySplitsScope({ evIdx: info.ei, htIdx: info.hi, lane: info.ln }); return; }
     setPop({ id, rect: el.getBoundingClientRect() }); setAgeStack([]);
   };
+  // Swipe-right on any row jumps straight to the DQ/NS picker, skipping the
+  // popover entirely — same target resolution as the popover's own DQ button
+  // below, so a leg swimmer inside a relay still DQs just that one leg.
+  const openDqDirect = (id, el) => {
+    const info = swimmerAt(id); if (!info) return;
+    setDqTarget(info.relayBase || id); setDqSwimmer(info.leg !== undefined ? info.sw.name : null); setDqNsTarget(id); setDqAnchorRect(el.getBoundingClientRect()); setPop(null); setAgeStack([]);
+  };
+  // Double-tap on your own team's row opens the usual popover pre-focused on
+  // its notes box, saving a coach from fishing for it while a heat is moving.
+  const openPopNotes = (id, el) => { setPop({ id, rect: el.getBoundingClientRect(), focusNotes: true }); setAgeStack([]); };
   // Shared renderer for the swimmer action popover, used both for the base
   // popover (opened from any lane on the board) and for each "swimmer" level
   // pushed onto ageStack by the age-chip drill-down, so every level has full
   // DQ/scratch/notes functionality, not just the outermost one.
-  const renderSwimmerPop = (id, rect, depth, onCloseThis, pushAge, pushProfile, key) => {
+  const renderSwimmerPop = (id, rect, depth, onCloseThis, pushAge, pushProfile, key, focusNotes) => {
     const info = swimmerAt(id); if (!info) return null;
     const d = get(id);
     return (
-      <ActionPopover key={key} info={info} d={d} mine={info.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(info.eventName)} hideSplits={info.leg !== undefined || !!info.sw.swimmers} relaySwimmer={info.leg !== undefined} relaySplit={info.leg !== undefined ? (get(info.relayBase).splits || [])[info.leg] : null} progMeets={progMeets} rect={rect} depth={depth} onClose={onCloseThis}
+      <ActionPopover key={key} info={info} d={d} mine={info.sw.team === homeTeam} imEvent={/(\bim\b|individual medley)/i.test(info.eventName)} hideSplits={info.leg !== undefined || !!info.sw.swimmers} relaySwimmer={info.leg !== undefined} relaySplit={info.leg !== undefined ? (get(info.relayBase).splits || [])[info.leg] : null} progMeets={progMeets} rect={rect} depth={depth} onClose={onCloseThis} autoFocusNotes={!!focusNotes}
         onDq={() => { setDqTarget(info.relayBase || id); setDqSwimmer(info.leg !== undefined ? info.sw.name : null); setDqNsTarget(id); setDqAnchorRect(rect); setPop(null); setAgeStack([]); }}
         onDqQuick={() => toggleQuickDq(info.relayBase || id, info.leg !== undefined ? info.sw.name : null)}
         onToggle={(k) => toggleTag(id, k)} onSplits={(a) => update(id, { splits: a })} onNotes={(v) => update(id, { notes: v })} onNoShow={() => update(id, { noshow: !isNoShow(get(id)) })}
@@ -2645,7 +2658,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           <div className="md-panel od">
             <div className="md-phead"><span className="md-eyebrow">On deck</span>
               <span className="md-pmeta">{onDeck ? `#${events[onDeck.evIdx].num} ${shortEvent(onDeck.eventName)} · H${onDeck.num}` : "—"}</span></div>
-            <OnDeckStrip heat={onDeck} homeTeam={homeTeam} onPick={openPop} />
+            <OnDeckStrip heat={onDeck} homeTeam={homeTeam} onPick={openPop} onSwipeDq={openDqDirect} onNotesTap={openPopNotes} />
           </div>
 
           <div className={"md-panel water" + (isStarted ? " grow" : " prestart")}>
@@ -2668,13 +2681,14 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
             </div>
             {isStarted ? (<>
               <div className="md-lanes">
-                {slots(current, lanesPerHeat).map((l, i) => l ? (() => { const id = entryId(current.evIdx, current.htIdx, l.lane);
-                  return <LaneRow key={id} lane={l} d={get(id)} place={curHeatPlaces[id]} rec={records[current.evId]} active mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })}
-                    eventName={current.eventName} clockActive={!!clockActive} onLap={() => recordLap(id, current.eventName)} onSplitEdit={(arr) => update(id, { splits: arr })} />; })()
+                {slots(current, lanesPerHeat).map((l, i) => l ? (() => { const id = entryId(current.evIdx, current.htIdx, l.lane); const mine = l.team === homeTeam;
+                  return <LaneRow key={id} lane={l} d={get(id)} place={curHeatPlaces[id]} rec={records[current.evId]} active mine={mine} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })}
+                    eventName={current.eventName} clockActive={!!clockActive} onLap={() => recordLap(id, current.eventName, mine)} onSplitEdit={(arr) => update(id, { splits: arr })}
+                    onSwipeDq={(el) => openDqDirect(id, el)} onNotesTap={(el) => openPopNotes(id, el)} />; })()
                   : <div key={"e" + i} className="md-lane empty"><span className="md-lanenum">{i + 1}</span><span className="md-emptytxt">—</span></div>)}
               </div>
             </>) : (
-              <AllLanesStrip heat={current} homeTeam={homeTeam} onPick={openPop} />
+              <AllLanesStrip heat={current} homeTeam={homeTeam} onPick={openPop} onSwipeDq={openDqDirect} onNotesTap={openPopNotes} />
             )}
           </div>
 
@@ -2682,10 +2696,11 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
             <div className="md-phead"><span className="md-eyebrow">Previous</span>
               <span className="md-pmeta">{previous ? `#${events[previous.evIdx].num} ${shortEvent(previous.eventName)} · H${previous.num}` : "—"}</span></div>
             {previous && (isStarted
-              ? <PreviousSlider list={prevList} homeTeam={homeTeam} onPick={openPop} />
+              ? <PreviousSlider list={prevList} homeTeam={homeTeam} onPick={openPop} onNotesTap={openPopNotes} />
               : <div className="md-lanes">
                   {[...previous.lanes].map((l) => ({ l, id: entryId(previous.evIdx, previous.htIdx, l.lane) })).sort((a, b) => (prevHeatPlaces[a.id] || 99) - (prevHeatPlaces[b.id] || 99))
-                    .map(({ l, id }) => <LaneRow key={id} lane={l} d={get(id)} place={prevHeatPlaces[id]} rec={records[previous.evId]} mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })} />)}
+                    .map(({ l, id }) => <LaneRow key={id} lane={l} d={get(id)} place={prevHeatPlaces[id]} rec={records[previous.evId]} mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onTime={(v) => update(id, { time: v })}
+                      onSwipeDq={(el) => openDqDirect(id, el)} onNotesTap={(el) => openPopNotes(id, el)} />)}
                 </div>)}
           </div>
         </section>
@@ -2717,7 +2732,8 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
                     <div key={ht.num} className={"md-heat" + (isCur ? " cur" : "")}>
                       {!ev.flat && <button className="md-heatbar" onClick={() => setHeatPtr(fi)}><span>Heat {ht.num}</span>{isCur && <span className="md-curpill">On board</span>}</button>}
                       {ht.lanes.map((l) => { const id = entryId(evIdx, htIdx, l.lane);
-                        return <SheetRow key={id} lane={l} d={get(id)} place={finishedEvents[evIdx] ? places[id] : null} rec={records[ev.id]} mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onSwimmer={(leg, el) => openPop(id + "#" + leg, el)} legData={l.swimmers ? l.swimmers.map((s, i) => get(id + "#" + i)) : null} />; })}
+                        return <SheetRow key={id} lane={l} d={get(id)} place={finishedEvents[evIdx] ? places[id] : null} rec={records[ev.id]} mine={l.team === homeTeam} selected={pop?.id === id} onSelect={(el) => openPop(id, el)} onSwimmer={(leg, el) => openPop(id + "#" + leg, el)} legData={l.swimmers ? l.swimmers.map((s, i) => get(id + "#" + i)) : null}
+                          onSwipeDq={(el) => openDqDirect(id, el)} onNotesTap={(el) => openPopNotes(id, el)} />; })}
                     </div>
                   ); })}
               </div>
@@ -2736,7 +2752,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
         <div className="md-povscrim" onClick={() => { setPop(null); setAgeStack([]); }} />
         {renderSwimmerPop(pop.id, pop.rect, 0, () => { setPop(null); setAgeStack([]); },
           (ag, rect) => setAgeStack([{ kind: "age", ageGroup: ag, rect }]),
-          (name, team, rect) => setAgeStack([{ kind: "profile", name, team, rect }]), "base")}
+          (name, team, rect) => setAgeStack([{ kind: "profile", name, team, rect }]), "base", pop.focusNotes)}
         {ageStack.map((item, i) => item.kind === "age"
           ? <AgeGroupPopover key={"age" + i} ageGroup={item.ageGroup} roster={ageGroupPowerRoster(rankMeets, item.ageGroup)} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} onPick={(name, team, el) => setAgeStack((s) => [...s.slice(0, i + 1), { kind: "profile", name, team, rect: el.getBoundingClientRect() }])} />
           : <SwimmerProfilePopover key={"pf" + i} name={item.name} team={item.team} seasonMeets={rankMeets} liveMeet={{ meetName, mode, events, data }} rect={item.rect} depth={i + 1} onClose={() => setAgeStack((s) => s.slice(0, i))} onOpenLeague={openLeagueProfile} />)}
@@ -2978,7 +2994,25 @@ function UpdateLogModal({ onClose }) {
 // all shown at once (shrinking to fit, same tight-space fallback as the
 // pre-start strip) rather than a sliding carousel, since it's already
 // filtered to just the home team and usually only a handful of cards.
-function OnDeckStrip({ heat, homeTeam, onPick }) {
+// One On Deck card — its own component (not inline in the .map()) so
+// useRowGesture's hooks get a stable component instance per lane instead of
+// being called a variable number of times inside one render pass.
+function OnDeckCard({ id, l, teamLabel, nameLabel, onPick, onSwipeDq, onNotesTap }) {
+  const gesture = useRowGesture({
+    onTap: (el) => onPick(id, el),
+    onSwipeRight: onSwipeDq ? (el) => onSwipeDq(id, el) : undefined,
+    onDoubleTap: onNotesTap ? (el) => onNotesTap(id, el) : undefined,
+  });
+  return (
+    <button className="md-odcard mine sm" title={`${l.name} · ${l.team}${l.age ? " · " + l.age : ""} · seed ${l.seed}`} {...gesture}>
+      <span className="md-odlane">{l.lane}</span>
+      <span className="md-odcname">{nameLabel}</span>
+      <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{teamLabel}{l.age ? " · " + l.age : ""}</span>
+      <span className="md-odcseed">{l.seed}</span>
+    </button>
+  );
+}
+function OnDeckStrip({ heat, homeTeam, onPick, onSwipeDq, onNotesTap }) {
   const lanes = heat ? [...heat.lanes].filter((l) => l.team === homeTeam).sort((a, b) => a.lane - b.lane) : [];
   if (!heat) return <div className="md-odempty">No swimmers on deck.</div>;
   if (!lanes.length) return <div className="md-odempty">No {homeTeam} swimmers in this heat.</div>;
@@ -2990,12 +3024,7 @@ function OnDeckStrip({ heat, homeTeam, onPick }) {
       {lanes.map((l) => { const id = entryId(heat.evIdx, heat.htIdx, l.lane);
         const teamLabel = tightTeam ? (TEAM_MICRO[l.team] || l.team.slice(0, 2)) : l.team;
         const nameLabel = tightName ? abbrevName(l.name) : l.name;
-        return <button key={l.lane} className="md-odcard mine sm" title={`${l.name} · ${l.team}${l.age ? " · " + l.age : ""} · seed ${l.seed}`} onClick={(e) => onPick(id, e.currentTarget)}>
-          <span className="md-odlane">{l.lane}</span>
-          <span className="md-odcname">{nameLabel}</span>
-          <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{teamLabel}{l.age ? " · " + l.age : ""}</span>
-          <span className="md-odcseed">{l.seed}</span>
-        </button>; })}
+        return <OnDeckCard key={l.lane} id={id} l={l} teamLabel={teamLabel} nameLabel={nameLabel} onPick={onPick} onSwipeDq={onSwipeDq} onNotesTap={onNotesTap} />; })}
     </div>
   );
 }
@@ -3006,7 +3035,21 @@ function OnDeckStrip({ heat, homeTeam, onPick }) {
 // Falls back to tighter labels (name → initials, team → 2-letter code) once
 // the estimated per-card width can't fit the full versions, rather than
 // scrolling or clipping — full info is still available via the tooltip.
-function AllLanesStrip({ heat, homeTeam, onPick }) {
+function AllLanesCard({ id, l, mine, teamLabel, nameLabel, onPick, onSwipeDq, onNotesTap }) {
+  const gesture = useRowGesture({
+    onTap: (el) => onPick(id, el),
+    onSwipeRight: onSwipeDq ? (el) => onSwipeDq(id, el) : undefined,
+    onDoubleTap: mine && onNotesTap ? (el) => onNotesTap(id, el) : undefined,
+  });
+  return (
+    <button className={"md-odcard allfit" + (mine ? " mine" : "")} title={`${l.name} · ${l.team}`} {...gesture}>
+      <span className="md-odlane">{l.lane}</span>
+      <span className="md-odcname">{nameLabel}</span>
+      <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{teamLabel}</span>
+    </button>
+  );
+}
+function AllLanesStrip({ heat, homeTeam, onPick, onSwipeDq, onNotesTap }) {
   const lanes = heat ? [...heat.lanes].sort((a, b) => a.lane - b.lane) : [];
   if (!lanes.length) return <div className="md-odempty">No swimmers in this heat.</div>;
   const n = lanes.length;
@@ -3017,21 +3060,49 @@ function AllLanesStrip({ heat, homeTeam, onPick }) {
       {lanes.map((l) => { const id = entryId(heat.evIdx, heat.htIdx, l.lane);
         const teamLabel = tightTeam ? (TEAM_MICRO[l.team] || l.team.slice(0, 2)) : l.team;
         const nameLabel = tightName ? abbrevName(l.name) : firstNameOnly(l.name);
-        return <button key={l.lane} className={"md-odcard allfit" + (l.team === homeTeam ? " mine" : "")} title={`${l.name} · ${l.team}`} onClick={(e) => onPick(id, e.currentTarget)}>
-          <span className="md-odlane">{l.lane}</span>
-          <span className="md-odcname">{nameLabel}</span>
-          <span className="md-odcteam" style={{ color: teamColor(l.team) }}>{teamLabel}</span>
-        </button>; })}
+        return <AllLanesCard key={l.lane} id={id} l={l} mine={l.team === homeTeam} teamLabel={teamLabel} nameLabel={nameLabel} onPick={onPick} onSwipeDq={onSwipeDq} onNotesTap={onNotesTap} />; })}
     </div>
   );
 }
 
-function PreviousSlider({ list, homeTeam, onPick }) {
+const PREV_ROW_H = 34;
+// Previous panel row — tap opens the usual popover, double-tap on the home
+// team opens notes, same as the meet sheet. No swipe-right here: the slider
+// container above already claims horizontal drags to page through results,
+// and layering a second horizontal gesture on the same motion would fight it.
+function PrevRow({ e, mine, onPick, onNotesTap }) {
+  const pendingTimer = useRef(null);
+  const lastClickAt = useRef(0);
+  // The single tap has to wait out the double-tap window rather than fire
+  // immediately — it opens a scrim-covered popover that a real second tap
+  // can't reach through, so there's nothing to "override" after the fact.
+  const handleClick = (ev2) => {
+    const el = ev2.currentTarget;
+    if (!mine || !onNotesTap) { onPick(e.id, el); return; }
+    const now = Date.now();
+    if (pendingTimer.current && now - lastClickAt.current < 320) {
+      clearTimeout(pendingTimer.current); pendingTimer.current = null;
+      onNotesTap(e.id, el);
+      return;
+    }
+    lastClickAt.current = now;
+    pendingTimer.current = setTimeout(() => { pendingTimer.current = null; onPick(e.id, el); }, 320);
+  };
+  return (
+    <button className={"md-prevrow" + (mine ? " mine" : "")} style={{ height: PREV_ROW_H }} onClick={handleClick}>
+      <span className="md-place">{e.place ? ORD(e.place) : e.l.lane}</span>
+      <span className="md-resname">{e.l.name}</span>
+      <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
+      <span className="md-restime">{e.time || "––.––"}</span>
+    </button>
+  );
+}
+function PreviousSlider({ list, homeTeam, onPick, onNotesTap }) {
   const [idx, setIdx] = useState(0);
   const [winH, setWinH] = useState(68);
   const winRef = useRef(null);
   const hold = useRef(0); const tx = useRef(null); const ty = useRef(null);
-  const ROW = 34;
+  const ROW = PREV_ROW_H;
   const vis = Math.max(2, Math.floor(winH / ROW));
   const maxIdx = Math.max(0, list.length - vis);
   useLayoutEffect(() => { const el = winRef.current; if (!el) return; const measure = () => setWinH(el.clientHeight); measure(); const ro = new ResizeObserver(measure); ro.observe(el); return () => ro.disconnect(); }, []);
@@ -3046,14 +3117,7 @@ function PreviousSlider({ list, homeTeam, onPick }) {
       onTouchEnd={(e) => { if (tx.current === null) return; const dx = e.changedTouches[0].clientX - tx.current, dy = e.changedTouches[0].clientY - ty.current; tx.current = null; if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 24) nudge(dy < 0 ? 1 : -1); else if (Math.abs(dx) > 40) nudge(dx < 0 ? 1 : -1); }}>
       <div className="md-prevwin" ref={winRef}>
         <div className="md-prevroll" style={{ transform: `translateY(${-idx * ROW}px)` }}>
-          {list.map((e) => (
-            <button key={e.id} className={"md-prevrow" + (e.l.team === homeTeam ? " mine" : "")} style={{ height: ROW }} onClick={(ev2) => onPick(e.id, ev2.currentTarget)}>
-              <span className="md-place">{e.place ? ORD(e.place) : e.l.lane}</span>
-              <span className="md-resname">{e.l.name}</span>
-              <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
-              <span className="md-restime">{e.time || "––.––"}</span>
-            </button>
-          ))}
+          {list.map((e) => <PrevRow key={e.id} e={e} mine={e.l.team === homeTeam} onPick={onPick} onNotesTap={onNotesTap} />)}
         </div>
       </div>
     </div>
@@ -3201,16 +3265,63 @@ function TeamScore({ r, big, onClick }) {
   );
 }
 
-function LaneRow({ lane, d, place, rec, active, mine, selected, onSelect, onTime, eventName, clockActive, onLap, onSplitEdit }) {
+// Shared swipe/tap/double-tap handling for meet-sheet-style rows, so every
+// panel (meet sheet, In The Water, Previous, On Deck) responds the same way:
+// a plain tap does the row's usual thing, a swipe right jumps straight to
+// the DQ/NS picker, and a fast second tap in the same spot (home team only,
+// by caller's choice) opens notes. Tracks the pointerdown start point (which
+// bubbles harmlessly) and resolves the gesture on click, so nested controls
+// that already call stopPropagation() on click (time inputs, split boxes)
+// keep working exactly as before.
+//
+// The single tap has to WAIT out the double-tap window (rather than firing
+// immediately and letting a second tap override it, like the DQ button does)
+// because the single-tap action here opens a full-screen-scrim popover that
+// covers the row — a second physical tap would just land on the scrim and
+// close it, never reaching this element. Only pay that latency where a
+// double-tap is actually wired up; callers that leave onDoubleTap unset
+// (away-team rows, or a home lane mid-race with the clock still running)
+// get the old zero-delay behavior, since precise lap timing can't afford it.
+function useRowGesture({ onTap, onSwipeRight, onDoubleTap }) {
+  const start = useRef(null);
+  const pendingTimer = useRef(null);
+  const lastClickAt = useRef(0);
+  const onPointerDown = (e) => { start.current = { x: e.clientX, y: e.clientY }; };
+  const onClick = (e) => {
+    const s = start.current; start.current = null;
+    const dx = s ? e.clientX - s.x : 0, dy = s ? e.clientY - s.y : 0;
+    const el = e.currentTarget;
+    if (onSwipeRight && dx > 60 && Math.abs(dy) < 40) { onSwipeRight(el); return; }
+    if (!onDoubleTap) { onTap && onTap(el); return; }
+    const now = Date.now();
+    if (pendingTimer.current && now - lastClickAt.current < 320) {
+      clearTimeout(pendingTimer.current); pendingTimer.current = null;
+      onDoubleTap(el);
+      return;
+    }
+    lastClickAt.current = now;
+    pendingTimer.current = setTimeout(() => { pendingTimer.current = null; onTap && onTap(el); }, 320);
+  };
+  return { onPointerDown, onClick };
+}
+
+function LaneRow({ lane, d, place, rec, active, mine, selected, onSelect, onTime, eventName, clockActive, onLap, onSplitEdit, onSwipeDq, onNotesTap }) {
   const best = isBest(d.time, lane.seed), br = brokeRecord(d.time, rec), dq = hasDq(d), scr = isScratched(d), ns = isNoShow(d), off = scr || ns, tagCount = Object.keys(d.tags || {}).length;
   const fs = toSeconds(d.time), ss = toSeconds(lane.seed);
   const delta = !isNaN(fs) && !isNaN(ss) ? fs - ss : null; // negative = improved
   const deltaStr = delta === null ? null : (delta < 0 ? "−" : "+") + Math.abs(delta).toFixed(2);
-  const req = active && eventName ? requiredTapsFor(eventName) : 1;
+  // Splits (multi-tap lap timing) are only meaningful for the home team — the
+  // only swimmers whose leg-by-leg pace the coach actually tracks. Every other
+  // lane just needs one tap to stop the clock and record a final time.
+  const req = active && eventName && mine ? requiredTapsFor(eventName) : 1;
   const tapsLeft = active && clockActive && !off && !d.time;
   const setSplit = (i, v) => { const ns2 = [...(d.splits || [])]; ns2[i] = v; onSplitEdit && onSplitEdit(ns2); };
+  // While the clock's running and a tap still records a lap, double-tap has
+  // to stay off — every tap needs to land at zero latency, and the row isn't
+  // covered by anything a second tap could miss anyway.
+  const gesture = useRowGesture({ onTap: (el) => (tapsLeft ? onLap && onLap() : onSelect(el)), onSwipeRight: onSwipeDq, onDoubleTap: mine && !tapsLeft ? onNotesTap : undefined });
   return (
-    <div className={"md-lane clickable" + (selected ? " sel" : "") + (dq ? " dq" : "") + (off ? " scr" : "") + (mine ? " mine" : "")} onClick={(e) => (tapsLeft ? onLap && onLap() : onSelect(e.currentTarget))}>
+    <div className={"md-lane clickable" + (selected ? " sel" : "") + (dq ? " dq" : "") + (off ? " scr" : "") + (mine ? " mine" : "")} {...gesture}>
       <span className="md-lanenum">{lane.lane}</span>
       <span className="md-laneid">
         <span className="md-laneswimmer">{lane.name}{br && !dq && !off && <span className="md-br">BR</span>}</span>
@@ -3234,14 +3345,15 @@ function LaneRow({ lane, d, place, rec, active, mine, selected, onSelect, onTime
   );
 }
 
-function SheetRow({ lane, d, place, rec, mine, selected, onSelect, onSwimmer, legData }) {
+function SheetRow({ lane, d, place, rec, mine, selected, onSelect, onSwimmer, legData, onSwipeDq, onNotesTap }) {
   const best = isBest(d.time, lane.seed), br = brokeRecord(d.time, rec), dq = hasDq(d), scr = isScratched(d), ns = isNoShow(d), off = scr || ns, tags = Object.keys(d.tags || {});
   const fs = toSeconds(d.time), ss = toSeconds(lane.seed);
   const delta = !isNaN(fs) && !isNaN(ss) ? fs - ss : null; // negative = improved
   const deltaStr = delta === null ? null : (delta < 0 ? "−" : "+") + Math.abs(delta).toFixed(2);
+  const gesture = useRowGesture({ onTap: onSelect, onSwipeRight: onSwipeDq, onDoubleTap: mine ? onNotesTap : undefined });
   return (
     <div className={"md-srowwrap" + (lane.swimmers ? " relay" : "")}>
-      <button className={"md-swim" + (dq ? " dq" : "") + (off ? " scr" : "") + (selected ? " sel" : "") + (mine ? " mine" : "")} onClick={(e) => onSelect(e.currentTarget)}>
+      <button className={"md-swim" + (dq ? " dq" : "") + (off ? " scr" : "") + (selected ? " sel" : "") + (mine ? " mine" : "")} {...gesture}>
         <span className="md-slane">{lane.lane}</span>
         <span className="md-sid"><span className="md-sname">{lane.name}{br && !dq && !off && <span className="md-br">BR</span>}</span>
           <span className="md-steam" style={{ color: teamColor(lane.team) }}>{lane.team}{lane.age ? " · " + lane.age : ""}<em className="md-seed">seed {lane.seed}</em></span></span>
@@ -3279,10 +3391,14 @@ function popoverPos(rect, depth) {
   if (left + W > vw - m) left = Math.max(POV_SAFE_X, vw - W - m);
   return { top, left };
 }
-function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, relaySplit, progMeets, rect, depth, onClose, onDq, onDqQuick, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenAgeGroup, onOpenProfile }) {
+function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, relaySplit, progMeets, rect, depth, onClose, onDq, onDqQuick, onToggle, onSplits, onNotes, onNoShow, onScratch, onUnscratch, onOpenAgeGroup, onOpenProfile, autoFocusNotes }) {
   const ref = useRef(null);
+  const notesRef = useRef(null);
   const lastDqClick = useRef(0);
   const dq = hasDq(d), pend = isPendingDq(d);
+  // A double-tap on the row (home team only) opens straight to notes instead
+  // of making the coach scroll past DQ/scratch/work-on tags to find it.
+  useEffect(() => { if (autoFocusNotes && notesRef.current) notesRef.current.focus(); }, [autoFocusNotes]);
   // Double-click/double-tap opens the full code picker (own timing instead of
   // the native dblclick event, since iOS Safari's double-tap-to-zoom can
   // swallow it); a single tap does the obviously-right thing instead: mark a
@@ -3339,7 +3455,7 @@ function ActionPopover({ info, d, mine, imEvent, hideSplits, relaySwimmer, relay
           </div>
         )}
         {relaySwimmer && relaySplit && <div className="md-relaysplitread">⏱ Relay split: <b>{relaySplit}</b></div>}
-        <textarea className="md-notearea" placeholder={`Notes on ${info.sw.name.split(",")[0]}…`} value={d.notes || ""} onChange={(e) => onNotes(e.target.value)} />
+        <textarea ref={notesRef} className="md-notearea" placeholder={`Notes on ${info.sw.name.split(",")[0]}…`} value={d.notes || ""} onChange={(e) => onNotes(e.target.value)} />
       </>) : (
         <div className="md-otherteam">Other team — DQ and no-show only.</div>
       )}
