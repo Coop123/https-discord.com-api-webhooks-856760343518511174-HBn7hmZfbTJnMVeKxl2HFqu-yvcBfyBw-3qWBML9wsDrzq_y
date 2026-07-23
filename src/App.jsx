@@ -137,6 +137,10 @@ function ageGroupPowerRoster(seasonMeets, ageGroup) {
   return Object.values(computePower(seasonMeets || [], { ageGroup })).sort((a, b) => (b.power ?? -1) - (a.power ?? -1));
 }
 function rankedEvent(ev, evIdx, data, filter) { const relay = isRelayEvent(ev.name); let list = eventList(ev, evIdx, data).filter((e) => !isNaN(e.secs) && !e.dq && !e.scr && !e.ns); if (filter) list = list.filter((e) => filter.includes(e.l.team)); if (relay) list = list.filter((e) => e.l.relay === "A"); list.sort((a, b) => a.secs - b.secs); return list; }
+// Like rankedEvent, but keeps DQ'd/scratched/no-show entries (appended after
+// the timed ranking) instead of dropping them — Result Mode's per-event
+// results panels need DQs visible, not just finishers.
+function eventResultsAll(ev, evIdx, data, filter) { const relay = isRelayEvent(ev.name); let list = eventList(ev, evIdx, data); if (filter) list = list.filter((e) => filter.includes(e.l.team)); if (relay) list = list.filter((e) => e.l.relay === "A"); const timed = list.filter((e) => !isNaN(e.secs) && !e.dq && !e.scr && !e.ns).sort((a, b) => a.secs - b.secs); const flagged = list.filter((e) => e.dq || e.scr || e.ns); return [...timed, ...flagged]; }
 function computePlaces(events, data, filter, mode) { if (mode === "timetrial") return {}; const map = {}; events.forEach((ev, evIdx) => rankedEvent(ev, evIdx, data, filter).forEach((e, i) => (map[e.id] = i + 1))); return map; }
 // Place within a single heat (used live on the board before an event is final).
 function computeHeatPlaces(ev, evIdx, htIdx, data, filter) {
@@ -2334,6 +2338,13 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   // Loading any saved meet counts as finalized too — a meet pulled back up
   // from Settings is by definition a past one, not one still being run.
   const [meetFinalized, setMeetFinalized] = useState(false);
+  // Meet Mode / Result Mode is a separate, user-flippable display toggle —
+  // NOT the same thing as meetFinalized (which only locks notes/DQ editing).
+  // Meet mode is always available once a program is loaded; Result mode
+  // unlocks once the meet is over, a saved/finalized meet was loaded, or a
+  // results sheet has been uploaded — even mid-meet.
+  const [viewMode, setViewMode] = useState("meet");
+  const [resultsUploaded, setResultsUploaded] = useState(false);
   const lanesPerHeat = dualLanes;
   const sheetRef = useRef(null);
   const evRefs = useRef({});
@@ -2417,12 +2428,15 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   // Finalize review only needs the home team's own DQs — see pendingDqList.
   const pendingDqs = useMemo(() => pendingDqList(events, data, homeTeam), [events, data, homeTeam]);
   const meetOver = flatHeats.length > 0 && ptr === flatHeats.length - 1 && curHeatComplete;
-  // Review layout data (finalized meets only): the next 3 events after
-  // wherever the coach is currently scrolled, for quick jumping, and a
-  // top-10 scorer board standing in for "final results" — a finalized meet
-  // has no more live heat to show, so On Deck/In The Water get repurposed.
-  const nextEvents = useMemo(() => { if (!current) return []; const out = []; for (let i = current.evIdx + 1; i < events.length && out.length < 3; i++) out.push({ ev: events[i], evIdx: i }); return out; }, [events, current]);
-  const topScorers = useMemo(() => meetFinalized ? Object.values(computeSwimmerPoints(events, data, mode)).sort((a, b) => b.pts - a.pts).slice(0, 10) : [], [meetFinalized, events, data, mode]);
+  // Result Mode is available once there's something to show results for.
+  const canResultMode = meetOver || meetFinalized || resultsUploaded;
+  useEffect(() => { if (viewMode === "result" && !canResultMode) setViewMode("meet"); }, [viewMode, canResultMode]);
+  // Result Mode's two panels are scoped to whichever event the meet-sheet
+  // jump arrows currently point at (`current`) — "Up next" previews the
+  // following event's top 3 (DQs included), "In the water" shows the full,
+  // scrollable result list (DQs included) for the event itself.
+  const resultEventList = useMemo(() => current ? eventResultsAll(events[current.evIdx], current.evIdx, data, filter) : [], [events, data, current, mode, hostTeam, homeTeam, awayTeam]);
+  const nextEventResult = useMemo(() => { if (!current || current.evIdx + 1 >= events.length) return null; const idx = current.evIdx + 1; return { ev: events[idx], evIdx: idx, list: eventResultsAll(events[idx], idx, data, filter).slice(0, 3) }; }, [events, data, current, mode, hostTeam, homeTeam, awayTeam]);
   // Offers finalization once the meet is over regardless of whether any DQs
   // are still pending — a clean meet still needs the "finalize or keep
   // editing" choice, not just one with open DQs.
@@ -2513,12 +2527,12 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {}
       idx = idx.filter((x) => x.meetName !== meetName || x.date !== date); idx.push({ id, meetName, mode, date });
       await STORE.set(INDEX_KEY, JSON.stringify(idx)); flash("Saved to season ✓"); } catch (e) { flash("Saved (storage limit — kept for this session)"); } };
-  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = true; setMeetFinalized(true); setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
+  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = true; setMeetFinalized(true); setViewMode("result"); setResultsUploaded(true); setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
   const deleteMeet = async (id) => { if (STORE) { try { await STORE.delete(id); } catch (e) {} try { const r = await STORE.get(INDEX_KEY); if (r && r.value) await STORE.set(INDEX_KEY, JSON.stringify(JSON.parse(r.value).filter((x) => x.id !== id))); } catch (e) {} } setSeasonMeets((a) => a.filter((m) => m.id !== id)); flash("Meet removed"); };
   const clearData = async () => { if (typeof window !== "undefined" && window.confirm && !window.confirm("Clear all saved meets and reset the board? This can't be undone.")) return;
     if (STORE) { try { const r = await STORE.get(INDEX_KEY); if (r && r.value) for (const it of JSON.parse(r.value)) { try { await STORE.delete(it.id); } catch (e) {} } } catch (e) {}
       try { await STORE.delete(INDEX_KEY); } catch (e) {} try { await STORE.delete(CUR_KEY); } catch (e) {} }
-    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false); setHeatPtr(4); setModal(null); flash("Data cleared"); };
+    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false); setViewMode("meet"); setResultsUploaded(false); setHeatPtr(4); setModal(null); flash("Data cleared"); };
   const toggleTag = (id, key) => { const tags = { ...get(id).tags }; tags[key] ? delete tags[key] : (tags[key] = true); update(id, { tags }); };
   const toggleDqCode = (id, group, code, reason, swimmer) => { let dqs = [...(get(id).dqs || [])]; const i = dqs.findIndex((q) => q.code === code); if (i >= 0) dqs.splice(i, 1); else { dqs = dqs.filter((q) => q.code !== PEND_DQ_CODE); dqs.push({ code, reason, group, ...(swimmer ? { swimmer } : {}) }); } update(id, { dqs }); };
   // Quick tap: flag a DQ instantly with the reason left pending (toggles off
@@ -2671,19 +2685,25 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     // press Start — without this, a stale startedHeats/autoEnded entry left
     // over from whatever heat happened to share the same evIdx:htIdx key in
     // the previous meet would make the new first heat look already running.
-    setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false);
+    setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); autoFinalizeShown.current = false; setMeetFinalized(false); setViewMode("meet"); setResultsUploaded(false);
     setRelaySwapHistory({}); setModal("meetsetup"); };
   const scrollToEvent = (evId) => { const el = evRefs.current[evId]; if (el && sheetRef.current) sheetRef.current.scrollTo({ top: el.offsetTop - 8, behavior: "smooth" }); };
   const jumpToCurrent = () => scrollToEvent(current?.evId);
   // Jump the whole board (heat pointer) to the first heat of an event by index,
-  // and scroll the meet sheet to it — used by the event jump bar's arrows and
-  // typed-number/name lookup.
+  // and scroll the meet sheet to it — the full jump. In Result Mode this is
+  // what the arrows/Go always do, since "current" IS the event being shown.
   const goToEventIdx = (evIdx) => { if (evIdx < 0 || evIdx >= events.length) return; const fi = flatHeats.findIndex((f) => f.evIdx === evIdx); if (fi < 0) return; setHeatPtr(fi); scrollToEvent(events[evIdx].id); };
+  // Meet Mode's version: scrolls the meet sheet only, never touches the live
+  // current-race pointer. Meet Mode's arrows ask which of the two the coach
+  // wants (via arrowPicker below); Go always scrolls-only in Meet Mode.
+  const scrollOnlyToEventIdx = (evIdx) => { if (evIdx < 0 || evIdx >= events.length) return; scrollToEvent(events[evIdx].id); };
+  const [arrowPicker, setArrowPicker] = useState(null); // { dir: -1 | 1 }
   const [jumpQuery, setJumpQuery] = useState("");
   const jumpToQuery = () => { const q = jumpQuery.trim(); if (!q) return;
     let idx = events.findIndex((e) => String(e.num) === q);
     if (idx < 0) idx = events.findIndex((e) => e.name.toLowerCase().includes(q.toLowerCase()));
-    if (idx >= 0) goToEventIdx(idx); else flash("No matching event"); };
+    if (idx < 0) { flash("No matching event"); return; }
+    if (viewMode === "result") goToEventIdx(idx); else scrollOnlyToEventIdx(idx); };
 
   const slots = (heat, n) => { const out = []; for (let i = 1; i <= n; i++) out.push(heat.lanes.find((l) => l.lane === i) || null); return out; };
   const meetHasStarted = Object.keys(startedHeats).length > 0 || Object.values(data).some((d) => d && d.time);
@@ -2731,34 +2751,43 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
             </div>
           </>)}
         </div>
+        <div className="md-viewmodebar">
+          <button className={"md-vmbtn" + (viewMode === "meet" ? " active" : "")} onClick={() => setViewMode("meet")}>Meet</button>
+          <button className={"md-vmbtn" + (viewMode === "result" ? " active" : "")} disabled={!canResultMode} onClick={() => setViewMode("result")} title={canResultMode ? "" : "Available once the meet is finished or results are uploaded"}>Results</button>
+        </div>
         <ScoreStrip scores={scores} mode={mode} home={hostTeam} away={awayTeam} teams={teamsPresent} onTeamClick={(t) => { setStatsTeam(t); setModal("stats"); }} />
       </header>
 
       <div className="md-grid">
         {/* -------- LEFT: fixed stack -------- */}
         <section className={"md-left" + (showStartGate ? " gated" : "")}>
-          {meetFinalized ? (<>
+          {viewMode === "result" ? (<>
           <div className="md-panel od final">
-            <div className="md-phead"><span className="md-eyebrow">Next up</span></div>
+            <div className="md-phead"><span className="md-eyebrow">Up next</span>
+              <span className="md-pmeta">{nextEventResult ? `#${nextEventResult.ev.num} ${shortEvent(nextEventResult.ev.name)}` : "—"}</span></div>
             <div className="md-finalnext">
-              {nextEvents.length ? nextEvents.map(({ ev, evIdx }) => (
-                <button key={ev.id} className="md-finalnextrow" onClick={() => goToEventIdx(evIdx)}>
-                  <span className="md-evnum">#{ev.num}</span> {shortEvent(ev.name)}
-                </button>
-              )) : <div className="md-prevempty">End of the meet program.</div>}
+              {nextEventResult ? (nextEventResult.list.length ? nextEventResult.list.map((e, i) => (
+                <div key={e.id} className={"md-finalresultrow" + (e.l.team === homeTeam ? " mine" : "")}>
+                  <span className="md-place">{(e.dq || e.scr || e.ns) ? "—" : ORD(i + 1)}</span>
+                  <span className="md-resname">{e.l.name}</span>
+                  <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
+                  {e.dq ? <span className="md-dqbadge sm">DQ {dqLabel(get(e.id))}</span> : e.ns ? <span className="md-scrbadge">NS</span> : e.scr ? <span className="md-scrbadge">SCR</span> : <span className="md-restime">{e.time || "––.––"}</span>}
+                </div>
+              )) : <div className="md-prevempty">No results yet for this event.</div>) : <div className="md-prevempty">End of the meet program.</div>}
             </div>
           </div>
           <div ref={waterPanelRef} className="md-panel water grow final">
-            <div className="md-phead"><span className="md-eyebrow">Final results — top scorers</span></div>
+            <div className="md-phead"><span className="md-eyebrow">In the water — results</span>
+              <span className="md-pmeta">{current ? `#${events[current.evIdx].num} ${shortEvent(current.eventName)}` : "—"}</span></div>
             <div className="md-finalresults">
-              {topScorers.length ? topScorers.map((s, i) => (
-                <div key={s.name + "|" + s.team} className={"md-finalresultrow" + (s.team === homeTeam ? " mine" : "")}>
-                  <span className="md-place">{i + 1}</span>
-                  <span className="md-resname">{s.name}</span>
-                  <span className="md-resteam" style={{ color: teamColor(s.team) }}>{s.team}{s.age ? " · " + s.age : ""}</span>
-                  <span className="md-respts">{s.pts} pts</span>
+              {resultEventList.length ? resultEventList.map((e, i) => (
+                <div key={e.id} className={"md-finalresultrow" + (e.l.team === homeTeam ? " mine" : "")}>
+                  <span className="md-place">{(e.dq || e.scr || e.ns) ? "—" : ORD(i + 1)}</span>
+                  <span className="md-resname">{e.l.name}</span>
+                  <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
+                  {e.dq ? <span className="md-dqbadge sm">DQ {dqLabel(get(e.id))}</span> : e.ns ? <span className="md-scrbadge">NS</span> : e.scr ? <span className="md-scrbadge">SCR</span> : <span className="md-restime">{e.time || "––.––"}</span>}
                 </div>
-              )) : <div className="md-prevempty">No scored swims yet.</div>}
+              )) : <div className="md-prevempty">No results yet for this event.</div>}
             </div>
           </div>
           </>) : (<>
@@ -2830,12 +2859,20 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           <div className="md-sheethead"><span className="md-eyebrow">Meet sheet</span>
             <div className="md-jumpwrap">
               <div className="md-eventjump">
-                <button onClick={() => goToEventIdx((current?.evIdx ?? 0) - 1)} disabled={!current || current.evIdx <= 0} aria-label="Previous event" title="Previous event">▲</button>
+                <button onClick={() => viewMode === "result" ? goToEventIdx((current?.evIdx ?? 0) - 1) : setArrowPicker({ dir: -1 })} disabled={!current || current.evIdx <= 0} aria-label="Previous event" title="Previous event">▲</button>
                 <input value={jumpQuery} onChange={(e) => setJumpQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && jumpToQuery()} placeholder="# or name" aria-label="Jump to event" />
-                <button onClick={() => goToEventIdx((current?.evIdx ?? 0) + 1)} disabled={!current || current.evIdx >= events.length - 1} aria-label="Next event" title="Next event">▼</button>
+                <button onClick={() => viewMode === "result" ? goToEventIdx((current?.evIdx ?? 0) + 1) : setArrowPicker({ dir: 1 })} disabled={!current || current.evIdx >= events.length - 1} aria-label="Next event" title="Next event">▼</button>
               </div>
               <button className="md-jumpgo" onClick={jumpToQuery}>Go</button>
               <button className="md-jump" onClick={jumpToCurrent}>⌖ Current</button>
+              {arrowPicker && (<>
+                <div className="md-menuscrim" onClick={() => setArrowPicker(null)} />
+                <div className="md-arrowpicker">
+                  <div className="md-menutitle">Jump {arrowPicker.dir < 0 ? "back" : "forward"} one event</div>
+                  <button className="md-mbtn" onClick={() => { scrollOnlyToEventIdx((current?.evIdx ?? 0) + arrowPicker.dir); setArrowPicker(null); }}>📄 Meet sheet only</button>
+                  <button className="md-mbtn" onClick={() => { goToEventIdx((current?.evIdx ?? 0) + arrowPicker.dir); setArrowPicker(null); }}>🎯 Scoreboard — change current race</button>
+                </div>
+              </>)}
             </div>
           </div>
           <div className="md-sheet" ref={sheetRef}>
@@ -2891,11 +2928,11 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           // markers or clobber a DQ the coach already entered by hand.
           const dqs = p.dqs ? (cur.dqs && cur.dqs.length ? cur.dqs : p.dqs) : cur.dqs;
           nd[id] = { ...cur, ...p, ...(p.dqs ? { dqs } : {}) };
-        }); return nd; }); }}
+        }); return nd; }); setResultsUploaded(true); }}
         onSaveNew={({ meet, name, date, mode: mtype, host, away }) => {
           const saveDate = date || new Date().toISOString().slice(0, 10);
           setEvents(meet.events); setData(meet.data); setRecords({}); setStartedHeats({}); setHeatPtr(0);
-          setMeetName(name); setMeetDate(saveDate); setMode(mtype); if (host) setHostTeam(host); if (away) setAwayTeam(away); setModal(null);
+          setMeetName(name); setMeetDate(saveDate); setMode(mtype); if (host) setHostTeam(host); if (away) setAwayTeam(away); setModal(null); setResultsUploaded(true); setViewMode("result");
           const id = "meetdeck:meet:" + Date.now();
           const snap = { id, meetName: name, mode: mtype, date: saveDate, events: meet.events, data: meet.data, records: {}, homeTeam, hostTeam: host, awayTeam: away, dualLanes };
           setSeasonMeets((a) => [...a.filter((m) => !(m.meetName === name && m.date === saveDate)), snap]);
@@ -2953,6 +2990,17 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // redesign or workflow change. Add every new release as a fresh entry at
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
+  {
+    version: "2.0.0",
+    date: "2026-07-23",
+    title: "Meet Mode / Result Mode",
+    notes: [
+      "New Meet/Results toggle up top. Meet Mode is the usual live board (On Deck/In The Water/Previous); Result Mode is a new event-results browser — it unlocks once the meet is over, a saved meet is loaded, or a results sheet has been uploaded, and you can flip between the two any time.",
+      "Result Mode's \"In the water\" now shows that event's full results — DQs and no-shows included, ranked with the top 10 up front but scrollable to see everyone. \"Up next\" shows the top 3 of the following event, DQs included there too.",
+      "The meet sheet's ▲/▼ jump arrows and Go button now drive Result Mode's panels — jump to an event and its results show up in the left column. In Meet Mode they work differently: Go only scrolls the meet sheet, and the arrows ask whether you want to scroll the sheet or actually jump the live board to that race (\"Scoreboard\").",
+      "Versioning going forward: patch digit for small fixes, minor digit for bigger fixes, major digit when something genuinely new ships (like this).",
+    ],
+  },
   {
     version: "1.3.0",
     date: "2026-07-23",
@@ -3930,6 +3978,10 @@ html, body, #root { height: 100%; }
 .md-logowrap { position:relative; flex:none; }
 .md-logo { width:40px; height:40px; display:grid; place-items:center; font-size:25px; color:var(--ink); background:var(--cyan); border:none; border-radius:11px; font-weight:800; cursor:pointer; }
 .md-logo:hover { background:#5fe3f5; }
+.md-viewmodebar { flex:none; display:flex; align-items:center; gap:2px; background:#0c1c33; border-radius:9px; padding:2px; }
+.md-vmbtn { border:none; background:transparent; color:#94a3b8; font-weight:800; font-size:11.5px; padding:7px 10px; border-radius:7px; cursor:pointer; }
+.md-vmbtn.active { background:var(--cyan); color:#062a33; }
+.md-vmbtn:disabled { opacity:.35; cursor:default; }
 .md-menuscrim { position:fixed; inset:0; z-index:30; }
 .md-menu { position:absolute; top:48px; left:0; z-index:31; width:290px; max-height:76vh; overflow-y:auto; background:#fff; color:var(--sink); border-radius:14px; box-shadow:0 24px 60px -16px rgba(0,0,0,.5); padding:10px; display:flex; flex-direction:column; gap:8px; }
 .md-menutitle { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.1em; color:#94a3b8; padding:2px 2px 0; }
@@ -4081,7 +4133,8 @@ html, body, #root { height: 100%; }
 .md-sheethead { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 14px; border-bottom:1px solid var(--sline); background:#fbfdff; flex:none; }
 .md-jump { display:inline-flex; align-items:center; gap:5px; background:var(--cyan); color:#062a33; border:none; border-radius:8px; padding:7px 12px; font-weight:800; font-size:12.5px; cursor:pointer; white-space:nowrap; }
 .md-jump:hover { background:#5fe3f5; }
-.md-jumpwrap { display:flex; align-items:center; gap:6px; }
+.md-jumpwrap { display:flex; align-items:center; gap:6px; position:relative; }
+.md-arrowpicker { position:absolute; top:calc(100% + 6px); right:0; z-index:31; width:230px; background:#fff; color:var(--sink); border-radius:12px; box-shadow:0 20px 50px -14px rgba(0,0,0,.5); padding:8px; display:flex; flex-direction:column; gap:6px; }
 .md-eventjump { display:flex; align-items:center; gap:2px; background:#fff; border:1px solid var(--sline); border-radius:8px; padding:2px; }
 .md-eventjump button { width:22px; height:24px; display:grid; place-items:center; border:none; background:transparent; border-radius:5px; font-size:10px; color:#475569; cursor:pointer; }
 .md-eventjump button:hover:not(:disabled) { background:#f1f5f9; color:#0e7490; }
