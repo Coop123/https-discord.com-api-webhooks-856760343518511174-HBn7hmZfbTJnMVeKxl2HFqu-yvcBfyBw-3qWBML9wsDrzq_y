@@ -2664,9 +2664,20 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           <div className={"md-panel water" + (isStarted ? " grow" : " prestart")}>
             <div className="md-phead">
               <span className="md-waterhead">
-                {isRelayEvent(current?.eventName)
-                  ? <button className="md-splitsdot" onClick={() => setRelaySplitsScope({ evIdx: current.evIdx, htIdx: current.htIdx, lane: null })} aria-label="Open relay splits for the whole team" title="Relay splits — whole team" />
-                  : <span className="md-splitsdot static" />}
+                {(() => {
+                  // The dot is "live" (clickable, not the small static dot)
+                  // for any event that's actually tracking splits — 100 IM,
+                  // 100 free, and relays. But the whole-team splits POPUP only
+                  // makes sense for a relay, where four different swimmers'
+                  // legs need to be seen together; a solo swimmer's splits are
+                  // already right there inline on their own lane row, so a
+                  // tap on a solo event's dot just points that out instead.
+                  const hasSplits = requiredTapsFor(current?.eventName) > 1, relay = isRelayEvent(current?.eventName);
+                  if (!hasSplits) return <span className="md-splitsdot static" />;
+                  return relay
+                    ? <button className="md-splitsdot" onClick={() => setRelaySplitsScope({ evIdx: current.evIdx, htIdx: current.htIdx, lane: null })} aria-label="Open relay splits for the whole team" title="Relay splits — whole team" />
+                    : <button className="md-splitsdot solo" onClick={() => flash("Splits for this race show inline on each lane")} aria-label="Splits are being tracked for this race" title="Splits are being tracked — shown inline on each lane" />;
+                })()}
                 <span className="md-waterstack">
                   <span className="md-eyebrow water-e">In the water{!isStarted && <em className="md-waiting"> · ready</em>}</span>
                   {clockActive && <RaceClockDisplay startedAt={clockActive.startedAt} stopped={curHeatComplete} />}
@@ -3725,6 +3736,8 @@ html, body, #root { height: 100%; }
 .md-splitsdot { display:inline-block; width:18px; height:18px; margin-right:7px; border-radius:50%; background:#2563eb; border:none; padding:0; cursor:pointer; vertical-align:middle; box-shadow:0 0 0 4px rgba(37,99,235,.18); }
 .md-splitsdot:hover { background:#1d4ed8; }
 .md-splitsdot.static { background:var(--cyan); box-shadow:none; cursor:default; width:14px; height:14px; }
+.md-splitsdot.solo { background:var(--cyan); box-shadow:0 0 0 4px rgba(34,211,238,.2); }
+.md-splitsdot.solo:hover { background:#0891b2; }
 .md-waterhead { display:flex; align-items:center; gap:8px; }
 .md-waterstack { display:flex; flex-direction:column; align-items:flex-start; gap:1px; }
 .md-raceclock { flex:none; width:fit-content; margin:0; padding:1px 8px; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:13px; font-weight:800; letter-spacing:.04em; color:var(--cyan); background:#0a1a2e; border-radius:5px; }
