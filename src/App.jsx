@@ -1757,7 +1757,7 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam, mod
             {slots.map((s, i) => { const p = projections[i]; if (!s) return null;
               return (
                 <div key={i} className="md-cmpspreadrow">
-                  <div className="md-cmpspreadname" style={{ color: teamColor(s.team) }}>{s.name} <em>{s.team}</em>{p && winProb[simKey(p)] != null && <b className="md-cmpprobpct">{(winProb[simKey(p)] * 100).toFixed(0)}% to touch first</b>}</div>
+                  <div className="md-cmpspreadname" style={{ color: teamColor(s.team) }}>{s.name} <em>{s.team}</em></div>
                   {p ? (
                     <div className="md-cmpspread">
                       <div className="md-cmptrack">
@@ -1772,7 +1772,21 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam, mod
               ); })}
           </div>
         )}
-        {fastest && filled.length >= 2 && <div className="md-cmpwin">Projected fastest: <b style={{ color: teamColor(fastest.team) }}>{fastest.name}</b> ({fmtT(fastest.likely)}) · {((winProb[simKey(fastest)] || 0) * 100).toFixed(0)}% to touch first</div>}
+        {/* Every swimmer's win probability lives together at the bottom,
+            not scattered next to each name — same layout whether they got
+            here via the drag-drop bank (Complex) or the dropdowns (Simple). */}
+        {filled.length >= 2 && (
+          <div className="md-cmpwin">
+            <div className="md-cmpwintitle">🏁 Win probability{fastest ? <> — projected fastest <b style={{ color: teamColor(fastest.team) }}>{fastest.name}</b> ({fmtT(fastest.likely)})</> : null}</div>
+            {[...filled].sort((a, b) => (winProb[simKey(b)] || 0) - (winProb[simKey(a)] || 0)).map((p, i) => (
+              <div key={simKey(p)} className={"md-cmpwinrow" + (i === 0 ? " top" : "")}>
+                <span className="md-cmpwinname" style={{ color: teamColor(p.team) }}>{p.name} <em>{p.team}</em></span>
+                <div className="md-cmpwinbar"><div className="md-cmpwinfill" style={{ width: ((winProb[simKey(p)] || 0) * 100).toFixed(0) + "%", background: teamColor(p.team) }} /></div>
+                <span className="md-cmpwinpct">{((winProb[simKey(p)] || 0) * 100).toFixed(0)}%</span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
       </div>
       {profilePop && (
@@ -3981,7 +3995,6 @@ html, body, #root { height: 100%; }
 .md-cmpspreadrow { border-top:1px solid var(--sline); padding-top:10px; }
 .md-cmpspreadname { font-weight:800; font-size:13px; color:var(--sink); display:flex; align-items:center; gap:8px; }
 .md-cmpspreadname em { font-style:normal; font-size:10.5px; font-weight:800; opacity:.75; }
-.md-cmpprobpct { margin-left:auto; font-size:11px; font-weight:800; color:#0e7490; }
 .md-cmpspread { padding:4px 2px 0; }
 .md-cmptrack { position:relative; height:10px; border-radius:6px; background:#eef2f7; margin:10px 2px 6px; }
 .md-cmpband { position:absolute; top:0; bottom:0; border-radius:6px; background:#bae6fd; }
@@ -3989,7 +4002,15 @@ html, body, #root { height: 100%; }
 .md-cmpspreadlabels { display:flex; justify-content:space-between; font-size:12.5px; font-weight:800; color:#0f2036; font-variant-numeric:tabular-nums; }
 .md-cmpspreadlabels .mid { color:#0e7490; }
 .md-cmprate { font-size:11px; color:#64748b; margin-top:6px; }
-.md-cmpwin { margin:0 18px 12px; padding:10px 12px; background:#f0fdfa; border:1px solid #99f6e4; border-radius:10px; font-size:13px; font-weight:700; color:#0f2036; }
+.md-cmpwin { margin:0 18px 12px; padding:12px 14px; background:#f0fdfa; border:1px solid #99f6e4; border-radius:10px; }
+.md-cmpwintitle { font-size:13px; font-weight:800; color:#0f2036; margin-bottom:8px; }
+.md-cmpwinrow { display:grid; grid-template-columns:1fr 2fr auto; align-items:center; gap:10px; padding:4px 0; }
+.md-cmpwinname { font-size:12.5px; font-weight:700; color:var(--sink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.md-cmpwinname em { font-style:normal; font-size:10.5px; font-weight:800; opacity:.75; }
+.md-cmpwinbar { height:8px; border-radius:5px; background:#e0f2f7; overflow:hidden; }
+.md-cmpwinfill { height:100%; border-radius:5px; }
+.md-cmpwinpct { font-size:12.5px; font-weight:900; color:#0e7490; font-variant-numeric:tabular-nums; width:34px; text-align:right; }
+.md-cmpwinrow.top .md-cmpwinpct { color:#0f766e; }
 
 .md-imrow { display:flex; align-items:center; gap:6px; margin-bottom:8px; flex-wrap:wrap; }
 .md-imlabel { font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; }
