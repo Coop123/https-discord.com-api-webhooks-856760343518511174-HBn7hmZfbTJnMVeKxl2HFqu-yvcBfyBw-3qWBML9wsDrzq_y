@@ -1586,7 +1586,26 @@ function projectSwimmer(base, stats) {
 // drag between slots to swap, or tap-then-tap-a-slot as an alternative to
 // dragging (same Pointer Events pattern as the relay lineup editor, since
 // iOS/iPadOS Safari doesn't support native HTML5 drag-and-drop for touch).
-function CompareBoard({ people, slots, onAssign, onSwap, onRemove, onProfile }) {
+// Projection spread for one swimmer, rendered inline inside whatever box
+// holds them (a Simple-mode picker card, or a Complex-mode slot) rather than
+// in a separate list below — so the pick and its projection read as one
+// unit. `pct` comes from the parent so every box on screen shares the same
+// best→conservative scale and the bars stay visually comparable.
+function ProjectionBox({ p, stroke, pct }) {
+  if (!p) return <div className="md-prevempty sm">No {stroke} time on record.</div>;
+  return (
+    <div className="md-cmpspread boxed">
+      <div className="md-cmptrack">
+        <div className="md-cmpband" style={{ left: pct(p.best) + "%", width: Math.max(2, pct(p.conservative) - pct(p.best)) + "%" }} />
+        <div className="md-cmppin" style={{ left: pct(p.likely) + "%" }} title={`pinpoint ${fmtT(p.likely)}`} />
+      </div>
+      <div className="md-cmpspreadlabels"><span>{fmtT(p.best)}</span><span className="mid">{fmtT(p.likely)}</span><span>{fmtT(p.conservative)}</span></div>
+      <div className="md-cmprate">current best {fmtT(p.base)} · trending {(p.mean * 100).toFixed(1)}%/swim{p.n < 3 ? " (thin history)" : ""}</div>
+    </div>
+  );
+}
+
+function CompareBoard({ people, slots, projections, stroke, pct, onAssign, onSwap, onRemove, onProfile }) {
   const dragRef = useRef(null);
   const [overSlot, setOverSlot] = useState(null);
   const [draggingKey, setDraggingKey] = useState(null);
@@ -1651,7 +1670,7 @@ function CompareBoard({ people, slots, onAssign, onSwap, onRemove, onProfile }) 
       <div className="md-cmpslots">
         {slots.map((s, i) => (
           <div key={i} data-slot-idx={i} className={"md-cmpslot" + (overSlot === i ? " over" : "") + (selected ? " selectable" : "")}>
-            {s ? <>{chip(s, "slot", i)}<button className="md-cmpslotremove" onClick={() => onRemove(i)}>✕ remove</button></> : <span className="md-cmpslotempty" onClick={() => { if (selected) { doAssign(selected, i); setSelected(null); } }}>Drop swimmer {i + 1} here</span>}
+            {s ? <>{chip(s, "slot", i)}<ProjectionBox p={projections[i]} stroke={stroke} pct={pct} /><button className="md-cmpslotremove" onClick={() => onRemove(i)}>✕ remove</button></> : <span className="md-cmpslotempty" onClick={() => { if (selected) { doAssign(selected, i); setSelected(null); } }}>Drop swimmer {i + 1} here</span>}
           </div>
         ))}
       </div>
@@ -1678,7 +1697,7 @@ function CompareBoard({ people, slots, onAssign, onSwap, onRemove, onProfile }) 
 // not multi-select) age/gender filters + a name dropdown, instead of the
 // Complex mode's drag-and-drop bank. Two of these side by side replace the
 // 4-slot board when the coach just wants a quick head-to-head.
-function SimplePicker({ idx, people, slot, onAssign, onRemove }) {
+function SimplePicker({ idx, people, slot, proj, stroke, pct, onAssign, onRemove }) {
   const [team, setTeam] = useState(slot ? slot.team : "");
   const [ageSel, setAgeSel] = useState(null);
   const [genderSel, setGenderSel] = useState(null);
@@ -1701,6 +1720,7 @@ function SimplePicker({ idx, people, slot, onAssign, onRemove }) {
       <label className="md-ctl">Swimmer<select value={curVal} onChange={(e) => { const p = filtered.find((x) => x.name + "|" + x.team === e.target.value); onAssign(p || null); }}>
         <option value="">Choose…</option>{filtered.map((p) => <option key={p.name + "|" + p.team} value={p.name + "|" + p.team}>{p.name}{p.age ? ` (${p.age})` : ""} — {p.team}</option>)}
       </select></label>
+      {slot && <ProjectionBox p={proj} stroke={stroke} pct={pct} />}
       {slot && <button className="md-cmpslotremove" onClick={onRemove}>✕ remove</button>}
     </div>
   );
@@ -1745,31 +1765,11 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam, mod
           <button className="md-cmpmodebtn" onClick={toggleMode}>{mode === "complex" ? "Simple" : "Complex"}</button>
         </div>
         {mode === "complex" ? (
-          <CompareBoard people={people} slots={slots} onAssign={assign} onSwap={swapSlots} onRemove={removeSlot} onProfile={openProfile} />
+          <CompareBoard people={people} slots={slots} projections={projections} stroke={stroke} pct={pct} onAssign={assign} onSwap={swapSlots} onRemove={removeSlot} onProfile={openProfile} />
         ) : (
           <div className="md-cmpsimplewrap">
-            <SimplePicker idx={0} people={people} slot={slots[0]} onAssign={(p) => (p ? assign(0, p) : removeSlot(0))} onRemove={() => removeSlot(0)} />
-            <SimplePicker idx={1} people={people} slot={slots[1]} onAssign={(p) => (p ? assign(1, p) : removeSlot(1))} onRemove={() => removeSlot(1)} />
-          </div>
-        )}
-        {slots.some(Boolean) && (
-          <div className="md-cmpspreadwrap">
-            {slots.map((s, i) => { const p = projections[i]; if (!s) return null;
-              return (
-                <div key={i} className="md-cmpspreadrow">
-                  <div className="md-cmpspreadname" style={{ color: teamColor(s.team) }}>{s.name} <em>{s.team}</em></div>
-                  {p ? (
-                    <div className="md-cmpspread">
-                      <div className="md-cmptrack">
-                        <div className="md-cmpband" style={{ left: pct(p.best) + "%", width: Math.max(2, pct(p.conservative) - pct(p.best)) + "%" }} />
-                        <div className="md-cmppin" style={{ left: pct(p.likely) + "%" }} title={`pinpoint ${fmtT(p.likely)}`} />
-                      </div>
-                      <div className="md-cmpspreadlabels"><span>{fmtT(p.best)}</span><span className="mid">{fmtT(p.likely)}</span><span>{fmtT(p.conservative)}</span></div>
-                      <div className="md-cmprate">current best {fmtT(p.base)} · trending {(p.mean * 100).toFixed(1)}%/swim{p.n < 3 ? " (thin history)" : ""}</div>
-                    </div>
-                  ) : <div className="md-prevempty">No {stroke} time on record.</div>}
-                </div>
-              ); })}
+            <SimplePicker idx={0} people={people} slot={slots[0]} proj={projections[0]} stroke={stroke} pct={pct} onAssign={(p) => (p ? assign(0, p) : removeSlot(0))} onRemove={() => removeSlot(0)} />
+            <SimplePicker idx={1} people={people} slot={slots[1]} proj={projections[1]} stroke={stroke} pct={pct} onAssign={(p) => (p ? assign(1, p) : removeSlot(1))} onRemove={() => removeSlot(1)} />
           </div>
         )}
         {/* Every swimmer's win probability lives together at the bottom,
@@ -2635,10 +2635,27 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   const slots = (heat, n) => { const out = []; for (let i = 1; i <= n; i++) out.push(heat.lanes.find((l) => l.lane === i) || null); return out; };
   const meetHasStarted = Object.keys(startedHeats).length > 0 || Object.values(data).some((d) => d && d.time);
   const showStartGate = !meetGateDismissed && !meetHasStarted;
+  // Positions the Start Meet button over the In The Water panel specifically
+  // (not centered on the whole screen) — tracked via its own rect, since the
+  // button has to be a sibling of the blurred .md-left to stay sharp and
+  // clickable itself (a CSS filter on an ancestor blurs everything inside
+  // it as one compositor pass; a descendant can't opt back out of that).
+  const waterPanelRef = useRef(null);
+  const [waterRect, setWaterRect] = useState(null);
+  useLayoutEffect(() => {
+    if (!showStartGate) return;
+    const el = waterPanelRef.current; if (!el) return;
+    const measure = () => setWaterRect(el.getBoundingClientRect());
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener("resize", measure);
+    return () => { ro.disconnect(); window.removeEventListener("resize", measure); };
+  }, [showStartGate]);
 
   return (
     <div className="md-root">
-      <div className={"md-boardwrap" + (showStartGate ? " gated" : "")}>
+      <div className="md-boardwrap">
 
       <header className="md-top">
         <div className="md-logowrap">
@@ -2666,14 +2683,14 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 
       <div className="md-grid">
         {/* -------- LEFT: fixed stack -------- */}
-        <section className="md-left">
+        <section className={"md-left" + (showStartGate ? " gated" : "")}>
           <div className="md-panel od">
             <div className="md-phead"><span className="md-eyebrow">On deck</span>
               <span className="md-pmeta">{onDeck ? `#${events[onDeck.evIdx].num} ${shortEvent(onDeck.eventName)} · H${onDeck.num}` : "—"}</span></div>
             <OnDeckStrip heat={onDeck} homeTeam={homeTeam} onPick={openPop} onSwipeDq={openDqDirect} onNotesTap={openPopNotes} />
           </div>
 
-          <div className={"md-panel water" + (isStarted ? " grow" : " prestart")}>
+          <div ref={waterPanelRef} className={"md-panel water" + (isStarted ? " grow" : " prestart")}>
             <div className="md-phead">
               <span className="md-waterhead">
                 {(() => {
@@ -2730,7 +2747,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 
         {/* -------- RIGHT: results ticker + meet sheet (scrolls) -------- */}
         <section className="md-right">
-          <ResultsTicker resultsEvent={resultsEvent} list={resultsList} mode={mode} homeTeam={homeTeam} records={records} onPick={openPop} />
+          <ResultsTicker resultsEvent={resultsEvent} list={resultsList} mode={mode} homeTeam={homeTeam} records={records} onPick={openPop} onSwipeDq={openDqDirect} onNotesTap={openPopNotes} />
           <div className="md-sheethead"><span className="md-eyebrow">Meet sheet</span>
             <div className="md-jumpwrap">
               <div className="md-eventjump">
@@ -2765,8 +2782,8 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
         </section>
       </div>
       </div>
-      {showStartGate && (
-        <div className="md-startgate">
+      {showStartGate && waterRect && (
+        <div className="md-startgate" style={{ top: waterRect.top, left: waterRect.left, width: waterRect.width, height: waterRect.height }}>
           <button className="md-startgatebtn" onClick={() => setMeetGateDismissed(true)}>▶ Start Meet</button>
         </div>
       )}
@@ -2855,6 +2872,16 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // redesign or workflow change. Add every new release as a fresh entry at
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
+  {
+    version: "1.1.1",
+    date: "2026-07-23",
+    title: "Comparison layout, live-results gestures, start gate scoped",
+    notes: [
+      "Swimmer comparison: each swimmer's projection now lives inside their own picker box (Simple) or slot (Complex) instead of a separate list — win probability stays together at the bottom.",
+      "Live results (\"Last race\" ticker): swipe right on a row for the DQ/NS picker, double-tap your own team's row for notes — same gestures as the meet sheet.",
+      "Start Meet: the blur now only covers On Deck / In The Water / Previous, and the button sits right over the In The Water panel instead of the whole screen.",
+    ],
+  },
   {
     version: "1.1.0",
     date: "2026-07-23",
@@ -3184,10 +3211,28 @@ function PreviousSlider({ list, homeTeam, onPick, onNotesTap }) {
 
 // Last-race live ticker: shows 2 places, auto-slides one place every 2s,
 // loops back to 1st after the last scoring place. Swipe/arrows jump by 2.
-function ResultsTicker({ resultsEvent, list, mode, homeTeam, records, onPick }) {
+// One row of the live results ticker — its own component so useRowGesture's
+// hooks get a stable instance per row regardless of how the list length or
+// order changes between renders.
+function TickRow({ e, i, mine, pts, best, br, onPick, onSwipeDq, onNotesTap }) {
+  const gesture = useRowGesture({
+    onTap: (el) => onPick(e.id, el),
+    onSwipeRight: onSwipeDq ? (el) => onSwipeDq(e.id, el) : undefined,
+    onDoubleTap: mine && onNotesTap ? (el) => onNotesTap(e.id, el) : undefined,
+  });
+  return (
+    <button className={"md-tickrow" + (mine ? " mine" : "")} style={{ height: 30 }} {...gesture}>
+      <span className={"md-resplace p" + (i + 1)}>{ORD(i + 1)}</span>
+      <span className="md-resname">{e.l.name}</span>
+      <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
+      <span className="md-restime">{e.time}{best && <em className="md-best sm">B</em>}{br && <em className="md-br">BR</em>}</span>
+      <span className="md-respts">+{pts}</span>
+    </button>
+  );
+}
+function ResultsTicker({ resultsEvent, list, mode, homeTeam, records, onPick, onSwipeDq, onNotesTap }) {
   const [idx, setIdx] = useState(0);
   const holdUntil = useRef(0);
-  const touchX = useRef(null);
   const maxIdx = Math.max(0, list.length - 2);
   useEffect(() => { setIdx(0); }, [resultsEvent?.ev?.id]);
   useEffect(() => {
@@ -3206,9 +3251,11 @@ function ResultsTicker({ resultsEvent, list, mode, homeTeam, records, onPick }) 
   const table = mode === "champs" ? CHAMPS : DUAL;
   const ROW = 30;
   return (
-    <div className="md-ticker"
-      onTouchStart={(e) => { touchX.current = e.touches[0].clientX; }}
-      onTouchEnd={(e) => { if (touchX.current === null) return; const dx = e.changedTouches[0].clientX - touchX.current; touchX.current = null; if (Math.abs(dx) > 40) nudge(dx < 0 ? 2 : -2); }}>
+    // Paging is the ‹/› buttons below now, not a swipe on the container —
+    // a container-level swipe would fight the per-row swipe-right-for-DQ
+    // gesture on exactly the same axis, so one of them had to go, and the
+    // buttons already covered the same ground without the conflict.
+    <div className="md-ticker">
       <div className="md-tickhead">
         <span className="md-eyebrow gold">🏁 Last race</span>
         <span className="md-tickev">#{resultsEvent.ev.num} {shortEvent(resultsEvent.ev.name)}</span>
@@ -3224,16 +3271,7 @@ function ResultsTicker({ resultsEvent, list, mode, homeTeam, records, onPick }) 
             const pts = (table[i + 1] || 0) * (relay ? 2 : 1);
             const mine = e.l.team === homeTeam;
             const best = isBest(e.time, e.l.seed), br = brokeRecord(e.time, records[resultsEvent.ev.id]);
-            return (
-              <button key={e.id} className={"md-tickrow" + (mine ? " mine" : "")} style={{ height: ROW }}
-                onClick={(ev2) => onPick(e.id, ev2.currentTarget)}>
-                <span className={"md-resplace p" + (i + 1)}>{ORD(i + 1)}</span>
-                <span className="md-resname">{e.l.name}</span>
-                <span className="md-resteam" style={{ color: teamColor(e.l.team) }}>{e.l.team}{e.l.age ? " · " + e.l.age : ""}</span>
-                <span className="md-restime">{e.time}{best && <em className="md-best sm">B</em>}{br && <em className="md-br">BR</em>}</span>
-                <span className="md-respts">+{pts}</span>
-              </button>
-            );
+            return <TickRow key={e.id} e={e} i={i} mine={mine} pts={pts} best={best} br={br} onPick={onPick} onSwipeDq={onSwipeDq} onNotesTap={onNotesTap} />;
           })}
         </div>
       </div>
@@ -3756,10 +3794,9 @@ html, body, #root { height: 100%; }
 .md-root { --ink:#0a1628; --line:#1e3a5f; --cyan:#22d3ee; --muted:#7d93b0; --text:#e8f0fb; --sheet:#f4f7fb; --card:#fff; --sline:#e2e8f0; --sink:#0f2036; --dq:#ef4444; --amber:#f59e0b; --green:#10b981; --rec:#e0b400;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color:var(--sink); background:var(--sheet); height:100vh; display:flex; flex-direction:column; overflow:hidden; -webkit-font-smoothing:antialiased; }
 .md-lanenum,.md-timein,.md-timeout,.md-stime,.md-tspts,.md-restime { font-variant-numeric:tabular-nums; }
-.md-boardwrap { display:flex; flex-direction:column; flex:1; min-height:0; transition:filter .2s ease; }
-.md-boardwrap.gated { filter:blur(7px) saturate(.7); pointer-events:none; user-select:none; }
-.md-startgate { position:fixed; inset:0; z-index:50; display:grid; place-items:center; }
-.md-startgatebtn { padding:22px 50px; border-radius:20px; border:none; background:linear-gradient(135deg,#22d3ee,#0891b2); color:#062a33; font-weight:900; font-size:22px; letter-spacing:.02em; cursor:pointer; box-shadow:0 24px 60px -12px rgba(8,145,178,.65); }
+.md-boardwrap { display:flex; flex-direction:column; flex:1; min-height:0; }
+.md-startgate { position:fixed; z-index:50; display:grid; place-items:center; border-radius:13px; background:rgba(10,22,40,.4); transition:top .2s ease, left .2s ease, width .2s ease, height .2s ease; }
+.md-startgatebtn { padding:12px 26px; border-radius:14px; border:none; background:linear-gradient(135deg,#22d3ee,#0891b2); color:#062a33; font-weight:900; font-size:16px; letter-spacing:.02em; cursor:pointer; box-shadow:0 16px 36px -10px rgba(8,145,178,.65); white-space:nowrap; }
 .md-startgatebtn:hover { background:linear-gradient(135deg,#5fe3f5,#22d3ee); }
 .md-startgatebtn:active { transform:scale(.97); }
 .md-loginwrap { align-items:center; justify-content:center; padding:20px; }
@@ -3800,7 +3837,8 @@ html, body, #root { height: 100%; }
 .md-tspct small { color:var(--muted); font-size:8.5px; } .md-vs { color:var(--muted); font-weight:800; font-size:12px; }
 
 .md-grid { flex:1; min-height:0; display:grid; grid-template-columns:400px 1fr; gap:12px; padding:12px; }
-.md-left { min-height:0; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; }
+.md-left { min-height:0; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; transition:filter .2s ease; }
+.md-left.gated { filter:blur(7px) saturate(.7); pointer-events:none; user-select:none; }
 .md-eyebrow { text-transform:uppercase; letter-spacing:.12em; font-size:9.5px; font-weight:800; color:var(--muted); }
 .md-eyebrow.gold { color:var(--rec); }
 .md-panel { background:var(--ink); border:1px solid var(--line); border-radius:13px; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
@@ -4188,7 +4226,8 @@ html, body, #root { height: 100%; }
 .md-cmpradio input[type=checkbox]:checked { background:#2563eb; border-color:#2563eb; box-shadow:inset 0 0 0 3px #fff; }
 .md-cmpboard { display:flex; gap:16px; padding:0 18px 12px; align-items:flex-start; }
 .md-cmpslots { flex:1 1 55%; min-width:0; display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-.md-cmpslot { min-height:60px; border:2px dashed var(--sline); border-radius:10px; padding:8px; display:flex; flex-direction:column; align-items:flex-start; justify-content:center; gap:4px; transition:border-color .1s; }
+.md-cmpslot { min-height:60px; border:2px dashed var(--sline); border-radius:10px; padding:8px; display:flex; flex-direction:column; align-items:flex-start; justify-content:flex-start; gap:4px; transition:border-color .1s; }
+.md-cmpslot:has(.md-cmpslotempty) { justify-content:center; }
 .md-cmpslot.over { border-color:#0e7490; background:#ecfeff; }
 .md-cmpslot.selectable { border-color:#94a3b8; }
 .md-cmpslotempty { font-size:12px; color:#94a3b8; font-weight:700; margin:0 auto; }
@@ -4200,17 +4239,15 @@ html, body, #root { height: 100%; }
 .md-cmpchipteam { margin-left:auto; font-size:10px; font-weight:800; }
 .md-cmpchipinfo { flex:none; width:22px; height:22px; margin-left:4px; border-radius:50%; border:1px solid var(--sline); background:#f8fafc; color:#475569; font-size:12px; font-weight:800; cursor:pointer; display:grid; place-items:center; }
 .md-cmpchipinfo:hover { background:#eef2f7; color:#0e7490; }
-.md-cmpspreadwrap { padding:0 18px 10px; display:flex; flex-direction:column; gap:12px; }
-.md-cmpspreadrow { border-top:1px solid var(--sline); padding-top:10px; }
-.md-cmpspreadname { font-weight:800; font-size:13px; color:var(--sink); display:flex; align-items:center; gap:8px; }
-.md-cmpspreadname em { font-style:normal; font-size:10.5px; font-weight:800; opacity:.75; }
-.md-cmpspread { padding:4px 2px 0; }
+.md-cmpspread { padding:4px 2px 0; width:100%; }
+.md-cmpspread.boxed { border-top:1px solid var(--sline); margin-top:2px; padding-top:8px; }
 .md-cmptrack { position:relative; height:10px; border-radius:6px; background:#eef2f7; margin:10px 2px 6px; }
 .md-cmpband { position:absolute; top:0; bottom:0; border-radius:6px; background:#bae6fd; }
 .md-cmppin { position:absolute; top:-4px; width:3px; height:18px; background:#0e7490; border-radius:2px; transform:translateX(-1.5px); }
 .md-cmpspreadlabels { display:flex; justify-content:space-between; font-size:12.5px; font-weight:800; color:#0f2036; font-variant-numeric:tabular-nums; }
 .md-cmpspreadlabels .mid { color:#0e7490; }
 .md-cmprate { font-size:11px; color:#64748b; margin-top:6px; }
+.md-prevempty.sm { font-size:11px; padding-top:6px; border-top:1px solid var(--sline); margin-top:2px; width:100%; }
 .md-cmpwin { margin:0 18px 12px; padding:12px 14px; background:#f0fdfa; border:1px solid #99f6e4; border-radius:10px; }
 .md-cmpwintitle { font-size:13px; font-weight:800; color:#0f2036; margin-bottom:8px; }
 .md-cmpwinrow { display:grid; grid-template-columns:1fr 2fr auto; align-items:center; gap:10px; padding:4px 0; }
