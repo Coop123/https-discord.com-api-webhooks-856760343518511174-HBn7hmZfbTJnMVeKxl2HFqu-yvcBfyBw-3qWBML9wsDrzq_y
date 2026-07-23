@@ -938,25 +938,32 @@ function bestStrokeSeed(events, data, name, team, cat) {
 // used to keep replacement suggestions from double-booking someone who's
 // already committed to a different relay.
 function relaySlotsByTeam(events, team) {
-  const slots = new Map(); // name -> {evIdx, htIdx, lane, leg, eventName}
+  const slots = new Map(); // name -> {evIdx, htIdx, lane, leg, eventName, relay}
   events.forEach((ev, ei) => { if (!isRelayEvent(ev.name)) return;
     ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (l.team !== team || !l.swimmers) return;
-      l.swimmers.forEach((s, leg) => { if (s.name) slots.set(s.name, { evIdx: ei, htIdx: hi, lane: l.lane, leg, eventName: ev.name }); }); })); });
+      l.swimmers.forEach((s, leg) => { if (s.name) slots.set(s.name, { evIdx: ei, htIdx: hi, lane: l.lane, leg, eventName: ev.name, relay: l.relay }); }); })); });
   return slots;
 }
 // Where a team's relay currently sits by seed time (across all heats of the
 // event) vs. where it would land if its total changed by deltaSec (negative
 // = faster/less time, positive = slower/more time) — the shared math behind
 // both "is this move safe" and the replacement picker's +/- time & place.
-function relayPlaceProjection(events, team, evIdx, deltaSec) {
+// `relayLetter` disambiguates a team with more than one relay entry in the
+// same event (e.g. an A team and a B team both entered) — without it, two
+// entries sharing a team code would collide and the place math would be
+// ambiguous about which one it's actually tracking.
+function relayPlaceProjection(events, team, evIdx, deltaSec, relayLetter) {
   const ev = events[evIdx]; if (!ev || deltaSec == null || isNaN(deltaSec)) return null;
   const field = [];
-  ev.heats.forEach((ht) => ht.lanes.forEach((l) => { if (!l.swimmers) return; const s = toSeconds(l.seed); if (!isNaN(s)) field.push({ team: l.team, v: s }); }));
-  const idx = field.findIndex((f) => f.team === team); if (idx < 0) return null;
-  const oldPlace = [...field].sort((a, b) => a.v - b.v).findIndex((f) => f.team === team) + 1;
-  const oldTime = field[idx].v;
-  const newField = field.map((f) => f.team === team ? { ...f, v: f.v + deltaSec } : f);
-  const newPlace = [...newField].sort((a, b) => a.v - b.v).findIndex((f) => f.team === team) + 1;
+  ev.heats.forEach((ht) => ht.lanes.forEach((l) => { if (!l.swimmers) return; const s = toSeconds(l.seed); if (!isNaN(s)) field.push({ team: l.team, relay: l.relay, v: s }); }));
+  let idx = relayLetter != null ? field.findIndex((f) => f.team === team && f.relay === relayLetter) : -1;
+  if (idx < 0) idx = field.findIndex((f) => f.team === team);
+  if (idx < 0) return null;
+  const target = field[idx];
+  const oldPlace = [...field].sort((a, b) => a.v - b.v).indexOf(target) + 1;
+  const oldTime = target.v;
+  const newField = field.map((f) => f === target ? { ...f, v: f.v + deltaSec } : f);
+  const newPlace = [...newField].sort((a, b) => a.v - b.v).indexOf(newField[idx]) + 1;
   return { oldPlace, newPlace, placeDelta: oldPlace - newPlace, timeDelta: deltaSec, oldTime, newTime: oldTime + deltaSec };
 }
 // What happens to `name`'s OTHER relay if they're pulled out of it and
@@ -969,8 +976,8 @@ function relayDonorImpact(events, data, name, team, fromSlot) {
   const nameLegTime = bestStrokeSeed(events, data, name, team, stroke);
   const backfill = relayReplacementCandidatesRaw(events, data, fromSlot.evIdx, fromSlot.htIdx, fromSlot.lane, fromSlot.leg, team)[0];
   if (nameLegTime == null || !backfill || backfill.best == null) return null;
-  const proj = relayPlaceProjection(events, team, fromSlot.evIdx, backfill.best - nameLegTime);
-  return proj && { ...proj, backfillName: backfill.name, eventName: ev.name };
+  const proj = relayPlaceProjection(events, team, fromSlot.evIdx, backfill.best - nameLegTime, fromSlot.relay);
+  return proj && { ...proj, backfillName: backfill.name, eventName: ev.name, relayLetter: fromSlot.relay };
 }
 // Would pulling `name` out of their other relay (backfilling it with the next
 // best available teammate) cost that relay's seed-based place in its event?
@@ -1169,7 +1176,7 @@ function RelayDeltaLine({ label, d }) {
 // tap still swaps instantly too, since there's only ever one place to put
 // them here — no need to force select-then-place when a drag doesn't add
 // anything a tap couldn't already do faster.
-function RelayCandidateBoard({ legs, targetLeg, relayType, candidates, onSwap }) {
+function RelayCandidateBoard({ legs, targetLeg, relayType, candidates, siblings, onSwap }) {
   const dragRef = useRef(null);
   const [draggingName, setDraggingName] = useState(null);
   const [overSlot, setOverSlot] = useState(false);
@@ -1183,6 +1190,10 @@ function RelayCandidateBoard({ legs, targetLeg, relayType, candidates, onSwap })
     if (cur.moved) { if (isOverSlot(e.clientX, e.clientY)) onSwap(cur.c); return; }
     onSwap(cur.c);
   };
+  // Sibling-board picks are shown once, up top with the "Team B" framing —
+  // don't repeat them in the flat list below.
+  const siblingNames = new Set((siblings || []).flatMap((sib) => sib.legs.filter((l) => l.candidate).map((l) => l.name)));
+  const listCandidates = siblingNames.size ? candidates.filter((c) => !siblingNames.has(c.name)) : candidates;
   return (
     <div className="md-relayreplaceboard">
       <div className="md-rbdraglegs">
@@ -1198,9 +1209,31 @@ function RelayCandidateBoard({ legs, targetLeg, relayType, candidates, onSwap })
           </div>
         ))}
       </div>
-      <div className="md-rbbenchlabel">Drag a name onto the open leg — or just tap one to swap them in</div>
+      {siblings && siblings.length > 0 && (
+        <div className="md-relaysiblings">
+          {siblings.map((sib, si) => (
+            <div key={si} className="md-relaysibling">
+              <div className="md-relaysiblinglabel">Team {sib.relay} — also swimming this relay</div>
+              <div className="md-relaysiblinglegs">
+                {sib.legs.map((sl, li) => sl.candidate ? (
+                  <button key={li} type="button" className={"md-siblingchip pick" + (draggingName === sl.name ? " dragging" : "")} style={{ touchAction: "none" }}
+                    onPointerDown={(e) => onDown(e, sl.candidate)} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
+                    <b>{sl.name}</b><em>{sl.best != null ? fmtT(sl.best) : ""}</em>
+                    {sl.candidate.thisDelta && <span className={"md-delta sm " + (sl.candidate.thisDelta.timeDelta < 0 ? "pos" : "neg")}>{(sl.candidate.thisDelta.timeDelta < 0 ? "−" : "+") + Math.abs(sl.candidate.thisDelta.timeDelta).toFixed(2) + "s"}</span>}
+                  </button>
+                ) : (
+                  <span key={li} className="md-siblingchip blocked" title={sl.eligible === false ? "Not an eligible gender match for this leg" : "Moving them would cost Team " + sib.relay + " a place"}>
+                    {sl.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {listCandidates.length > 0 && <div className="md-rbbenchlabel">Drag a name onto the open leg — or just tap one to swap them in</div>}
       <div className="md-relaycandlist">
-        {candidates.map((c) => (
+        {listCandidates.map((c) => (
           <button key={c.name} type="button" className={"md-mbtn" + (draggingName === c.name ? " dragging" : "")} style={{ touchAction: "none" }}
             onPointerDown={(e) => onDown(e, c)} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
             <b>{c.name}</b>{c.age ? ` (${c.age})` : ""} — {c.best != null ? fmtT(c.best) : "no time on record"}
@@ -1215,7 +1248,8 @@ function RelayCandidateBoard({ legs, targetLeg, relayType, candidates, onSwap })
     </div>
   );
 }
-function RelayReplaceModal({ target, candidates, plan, planDelta, originalLegs, onClose, onSwap, onApplyPlan }) {
+function RelayReplaceModal({ target, candidates, siblings, plan, planDelta, originalLegs, onClose, onSwap, onApplyPlan }) {
+  const hasSiblingPick = siblings && siblings.some((sib) => sib.legs.some((l) => l.candidate));
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
@@ -1239,8 +1273,8 @@ function RelayReplaceModal({ target, candidates, plan, planDelta, originalLegs, 
             </div>
             {planDelta && <RelayDeltaLine label="This relay, projected:" d={planDelta} />}
             <button className="md-mbtn primary" onClick={onApplyPlan}>Apply this lineup</button>
-          </>) : candidates.length ? (
-            <RelayCandidateBoard legs={originalLegs} targetLeg={target.leg ?? originalLegs.indexOf(target.name)} relayType={/medley/i.test(target.eventName) ? "Medley" : "Free"} candidates={candidates} onSwap={onSwap} />
+          </>) : (candidates.length || hasSiblingPick) ? (
+            <RelayCandidateBoard legs={originalLegs} targetLeg={target.leg ?? originalLegs.indexOf(target.name)} relayType={/medley/i.test(target.eventName) ? "Medley" : "Free"} candidates={candidates} siblings={siblings} onSwap={onSwap} />
           ) : <div className="md-prevempty">No eligible teammate found on the roster for this age group.</div>}
           <button className="md-cancel" onClick={onClose}>Leave relay short (keep scratch)</button>
         </div>
@@ -2607,6 +2641,10 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     const inRange = seasonMeets.filter((m) => inSeasonRange(m.date, seasonRange));
     return liveAlreadySaved ? inRange : [live, ...inRange];
   }, [liveAlreadySaved, meetName, mode, liveMeetDateKey, events, data, homeTeam, hostTeam, awayTeam, dualLanes, seasonMeets, seasonRange]);
+  // The lane object being edited — needed for its own relay letter (A/B/…)
+  // so place projections don't collide when the team has more than one
+  // relay entry in this event.
+  const relayTargetLane = useMemo(() => { if (!relayReplaceTarget) return null; const ev = events[relayReplaceTarget.evIdx]; const ht = ev && ev.heats[relayReplaceTarget.htIdx]; return ht ? ht.lanes.find((x) => x.lane === relayReplaceTarget.lane) : null; }, [relayReplaceTarget, events]);
   const relayCandidates = useMemo(() => relayReplaceTarget ? relayReplacementCandidates(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, relayReplaceTarget.team) : [], [relayReplaceTarget, events, data]);
   // Time & place +/- for each candidate: this relay's own delta from
   // swapping in their time, plus (for a "move" candidate) the donor relay's
@@ -2617,25 +2655,68 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     const ev = events[evIdx];
     const stroke = ev && /medley/i.test(ev.name) ? (MEDLEY_LEGS[relayReplaceTarget.leg] || "Free") : "Free";
     const scratchedTime = bestStrokeSeed(events, data, name, team, stroke);
+    const targetLetter = relayTargetLane && relayTargetLane.relay;
     return relayCandidates.map((c) => ({
       ...c,
-      thisDelta: (scratchedTime != null && c.best != null) ? relayPlaceProjection(events, team, evIdx, c.best - scratchedTime) : null,
+      thisDelta: (scratchedTime != null && c.best != null) ? relayPlaceProjection(events, team, evIdx, c.best - scratchedTime, targetLetter) : null,
       donorDelta: c.moveFrom ? relayDonorImpact(events, data, c.name, team, c.moveFrom) : null,
     }));
-  }, [relayReplaceTarget, relayCandidates, events, data]);
+  }, [relayReplaceTarget, relayCandidates, relayTargetLane, events, data]);
   const medleyPlan = useMemo(() => relayReplaceTarget ? medleyReplacementPlan(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.name) : null, [relayReplaceTarget, events, data]);
-  const relayOriginalLegs = useMemo(() => { if (!relayReplaceTarget) return []; const ev = events[relayReplaceTarget.evIdx]; const ht = ev && ev.heats[relayReplaceTarget.htIdx]; const l = ht && ht.lanes.find((x) => x.lane === relayReplaceTarget.lane); return l && l.swimmers ? l.swimmers.map((s) => s.name) : []; }, [relayReplaceTarget, events]);
+  const relayOriginalLegs = useMemo(() => relayTargetLane && relayTargetLane.swimmers ? relayTargetLane.swimmers.map((s) => s.name) : [], [relayTargetLane]);
   // Whole-relay projected time/place delta for the "Apply this lineup" plan —
   // same math as a single-candidate swap, just against the plan's new total.
   const medleyPlanDelta = useMemo(() => {
-    if (!medleyPlan || !relayReplaceTarget) return null;
-    const ev = events[relayReplaceTarget.evIdx]; const ht = ev && ev.heats[relayReplaceTarget.htIdx];
-    const relayLane = ht && ht.lanes.find((l) => l.lane === relayReplaceTarget.lane);
-    if (!relayLane) return null;
-    const origTotal = toSeconds(relayLane.seed);
+    if (!medleyPlan || !relayReplaceTarget || !relayTargetLane) return null;
+    const origTotal = toSeconds(relayTargetLane.seed);
     if (isNaN(origTotal)) return null;
-    return relayPlaceProjection(events, relayReplaceTarget.team, relayReplaceTarget.evIdx, medleyPlan.total - origTotal);
-  }, [medleyPlan, relayReplaceTarget, events]);
+    return relayPlaceProjection(events, relayReplaceTarget.team, relayReplaceTarget.evIdx, medleyPlan.total - origTotal, relayTargetLane.relay);
+  }, [medleyPlan, relayReplaceTarget, relayTargetLane, events]);
+  // Any OTHER relay entries this team has in the same event (an A team and a
+  // B team both entered for this age group/gender) — shown alongside the
+  // scratched relay so a lineup fix can draw from either roster, not just
+  // the one with the hole.
+  const relaySiblingLanes = useMemo(() => {
+    if (!relayReplaceTarget) return [];
+    const ev = events[relayReplaceTarget.evIdx]; if (!ev) return [];
+    const out = [];
+    ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { if (l.team === relayReplaceTarget.team && l.swimmers && l.lane !== relayReplaceTarget.lane) out.push({ ...l, htIdx: hi }); }));
+    return out;
+  }, [relayReplaceTarget, events]);
+  // Per-sibling-leg pick info: a same-event sibling relay is automatically
+  // age-eligible (same event = same age group) and, for a straight relay,
+  // same-gender by construction — only a Mixed relay needs the scratched
+  // swimmer's own gender re-checked to keep the 2/2 split. Each leg either
+  // gets a ready-to-swap `candidate` (gender-eligible AND safe — pulling
+  // them won't cost the sibling relay a place) or a reason it's blocked.
+  const relaySiblingsInfo = useMemo(() => {
+    if (!relayReplaceTarget || !relaySiblingLanes.length) return [];
+    const { evIdx, team, name, leg } = relayReplaceTarget;
+    const ev = events[evIdx]; if (!ev) return [];
+    const stroke = /medley/i.test(ev.name) ? (MEDLEY_LEGS[leg] || "Free") : "Free";
+    const scratchedTime = bestStrokeSeed(events, data, name, team, stroke);
+    const evg = evGender(ev.name);
+    const genderMap = evg === "Mixed" ? swimmerGenderMap(events) : null;
+    const requiredGender = evg === "Mixed" ? genderMap[name + "|" + team] : null;
+    const targetLetter = relayTargetLane && relayTargetLane.relay;
+    return relaySiblingLanes.map((l) => ({
+      relay: l.relay,
+      legs: l.swimmers.map((s, legIdx) => {
+        if (!s.name) return { name: "", eligible: false, candidate: null };
+        const genderOk = !requiredGender || !genderMap[s.name + "|" + team] || genderMap[s.name + "|" + team] === requiredGender;
+        const fromSlot = { evIdx, htIdx: l.htIdx, lane: l.lane, leg: legIdx, eventName: ev.name, relay: l.relay };
+        const safe = genderOk && relayMoveIsSafe(events, data, s.name, team, fromSlot);
+        const best = bestStrokeSeed(events, data, s.name, team, stroke);
+        if (!safe) return { name: s.name, best, eligible: genderOk, candidate: null };
+        const thisDelta = (scratchedTime != null && best != null) ? relayPlaceProjection(events, team, evIdx, best - scratchedTime, targetLetter) : null;
+        const donorDelta = relayDonorImpact(events, data, s.name, team, fromSlot);
+        return {
+          name: s.name, best, eligible: true,
+          candidate: { name: s.name, best, stroke, moveFrom: fromSlot, thisDelta, donorDelta, verified: true, dqCount: dqCountThisMeet(events, data, s.name, team) },
+        };
+      }),
+    }));
+  }, [relayReplaceTarget, relaySiblingLanes, relayTargetLane, events, data]);
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2200); };
   // Restore last session, then autosave.
   useEffect(() => { if (!STORE) return; let live = true; (async () => { try { const r = await STORE.get(CUR_KEY); if (live && r && r.value) { const s = JSON.parse(r.value); if (s.events) { setEvents(s.events); setRecords(s.records || {}); setData(s.data || {}); if (s.meetName) setMeetName(s.meetName); if (s.meetDate) setMeetDate(s.meetDate); if (s.mode) setMode(s.mode); if (s.homeTeam) setHomeTeam(s.homeTeam); if (s.hostTeam) setHostTeam(s.hostTeam); if (s.awayTeam) setAwayTeam(s.awayTeam); if (s.dualLanes) setDualLanes(s.dualLanes); } } } catch (e) {}
@@ -3107,7 +3188,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           </div>
         </div>
       </div>}
-      {relayReplaceTarget && <RelayReplaceModal target={relayReplaceTarget} candidates={relayCandidatesWithDelta} plan={medleyPlan} planDelta={medleyPlanDelta} originalLegs={relayOriginalLegs} onClose={() => setRelayReplaceTarget(null)}
+      {relayReplaceTarget && <RelayReplaceModal target={relayReplaceTarget} candidates={relayCandidatesWithDelta} siblings={relaySiblingsInfo} plan={medleyPlan} planDelta={medleyPlanDelta} originalLegs={relayOriginalLegs} onClose={() => setRelayReplaceTarget(null)}
         onSwap={(c) => swapRelaySwimmer(relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, c)}
         onApplyPlan={() => applyRelayPlan(relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, medleyPlan)} />}
       {relayUndo && <div className="md-toast md-toastundo"><span>{relayUndo.label}</span><button className="md-undobtn" onClick={() => { relayUndo.fn(); setRelayUndo(null); }}>Undo</button></div>}
@@ -3127,6 +3208,16 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // redesign or workflow change. Add every new release as a fresh entry at
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
+  {
+    version: "2.3.1",
+    date: "2026-07-23",
+    title: "Relay scratch replacement: see both relays, safe cross-relay swaps",
+    notes: [
+      "Scratching a relay swimmer now also shows the team's other relay entry in that same age group/gender (an A team and a B team both entered), so a lineup fix can draw from either roster.",
+      "Tap or drag a name straight from that other relay into the open leg — only shown when it's a real help and won't cost that other relay a place, same safety check as any other move.",
+      "Fixed a place-projection mixup for teams with two relay entries in the same event (an A and a B) that could conflate the two when judging whether a move was safe.",
+    ],
+  },
   {
     version: "2.3.0",
     date: "2026-07-23",
@@ -4693,6 +4784,15 @@ html, body, #root { height: 100%; }
 .md-relayreplaceboard { display:flex; flex-direction:column; }
 .md-relaycandlist { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
 .md-mbtn.dragging { opacity:.4; }
+.md-relaysiblings { display:flex; flex-direction:column; gap:8px; margin-top:12px; padding-top:10px; border-top:1px dashed var(--sline); }
+.md-relaysibling { display:flex; flex-direction:column; gap:6px; }
+.md-relaysiblinglabel { font-size:10.5px; color:#94a3b8; font-weight:700; }
+.md-relaysiblinglegs { display:flex; flex-wrap:wrap; gap:6px; }
+.md-siblingchip { display:flex; align-items:center; gap:5px; padding:6px 9px; border-radius:8px; font-weight:700; font-size:12px; }
+.md-siblingchip.pick { border:1px solid #0e7490; background:#ecfeff; color:var(--sink); cursor:grab; touch-action:none; user-select:none; }
+.md-siblingchip.pick:active, .md-siblingchip.pick.dragging { cursor:grabbing; opacity:.45; box-shadow:0 4px 10px rgba(0,0,0,.15); }
+.md-siblingchip.pick em { font-weight:600; color:#64748b; font-style:normal; }
+.md-siblingchip.blocked { border:1px dashed var(--sline); background:#f8fafc; color:#94a3b8; cursor:default; }
 .md-rbdragleg.selectable { border-color:#cbd5e1; }
 .md-rbchip { width:100%; display:flex; align-items:center; gap:5px; padding:8px 10px; border-radius:8px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:12.5px; color:var(--sink); cursor:grab; user-select:none; }
 .md-rbchip:active, .md-rbchip.dragging { cursor:grabbing; opacity:.45; box-shadow:0 4px 10px rgba(0,0,0,.15); }
