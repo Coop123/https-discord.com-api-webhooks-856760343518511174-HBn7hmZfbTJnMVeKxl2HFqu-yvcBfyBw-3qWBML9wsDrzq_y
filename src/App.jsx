@@ -3065,6 +3065,15 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
   {
+    version: "2.2.1",
+    date: "2026-07-23",
+    title: "Import roster: multi-page paste, scrollable team list",
+    notes: [
+      "Import roster now takes more than one paste — “+ Add multiple” folds each page into the same import, same as the results importer, so a program that comes as several separate pages doesn't need to be pasted all at once.",
+      "Home team is now a scrollable checkbox-style list instead of a dropdown, so it's easy to pick out of a full champs-meet team list.",
+    ],
+  },
+  {
     version: "2.2.0",
     date: "2026-07-23",
     title: "Simpler event jump, open-splits prompt, Result Mode DQ reasons",
@@ -4089,27 +4098,47 @@ function OpenSplitsPanel({ list, onUpdateSplits, onSkip, onDone }) {
 function ImportModal({ onClose, onApply, defaultTeam }) {
   const [text, setText] = useState(""); const [busy, setBusy] = useState("");
   const parsed = useMemo(() => parseHeatSheet(text), [text]);
-  const teams = useMemo(() => { const s = new Set(); parsed.forEach((ev) => ev.heats.forEach((h) => h.lanes.forEach((l) => s.add(l.team)))); return [...s]; }, [parsed]);
+  // A meet program often comes as several separate pages/pastes (e.g. one
+  // per stroke or age group) — "+ Add multiple" folds each into this running
+  // set instead of forcing a single all-at-once paste, same idea as the
+  // results importer's Add one/Add multiple.
+  const [addedEvents, setAddedEvents] = useState([]);
+  const [justAdded, setJustAdded] = useState(0);
+  const allParsed = useMemo(() => [...addedEvents, ...parsed], [addedEvents, parsed]);
+  const teams = useMemo(() => { const s = new Set(); allParsed.forEach((ev) => ev.heats.forEach((h) => h.lanes.forEach((l) => s.add(l.team)))); return [...s]; }, [allParsed]);
   const [team, setTeam] = useState(defaultTeam);
-  useEffect(() => { const b = teams.find((t) => /bdst/i.test(t)); if (b) setTeam(b); }, [teams]);
-  const count = parsed.reduce((n, ev) => n + ev.heats.reduce((m, h) => m + h.lanes.length, 0), 0);
+  useEffect(() => { if (teams.length && !teams.includes(team)) { const b = teams.find((t) => /bdst/i.test(t)); setTeam(b || teams[0]); } }, [teams]);
+  const count = allParsed.reduce((n, ev) => n + ev.heats.reduce((m, h) => m + h.lanes.length, 0), 0);
   const onFile = async (e) => { const f = e.target.files?.[0]; if (!f) return;
     if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") { setBusy("Reading PDF…"); try { setText(await pdfToText(f)); setBusy(""); } catch { setBusy("Couldn't read the PDF here — paste the text instead."); } }
     else { const r = new FileReader(); r.onload = () => setText(String(r.result || "")); r.readAsText(f); } };
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Import roster</div><div className="md-msub">Upload the VCSL meet program PDF (or paste text). Preview shows what was read.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Import roster</div><div className="md-msub">Upload the VCSL meet program PDF (or paste text) — paste more than one page with “+ Add multiple”.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,.tsv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy || "PDF, .txt or .csv"}</span></div>
         <div className="md-impgrid">
           <textarea className="md-imparea" placeholder={"Paste here…\n\n#13 Girls 15-18 50 Yard Butterfly\nVCSL Record: 26.69 2018 Chelsea Huffman\nHeat 1 of 5 Finals\n3 Greenberg, Maayan 15 BDST 47.78"} value={text} onChange={(e) => setText(e.target.value)} />
           <div className="md-preview">
-            <div className="md-prevtop"><span>{parsed.length} events · {count} entries</span>{teams.length > 0 && <label className="md-ctl sm">Team<select value={team} onChange={(e) => setTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>}</div>
-            <div className="md-prevbody">{parsed.length === 0 ? <div className="md-prevempty">Nothing parsed yet — upload the meet program PDF and the preview fills in.</div>
-              : parsed.map((ev) => <div key={ev.id} className="md-prevev"><div className="md-prevevname">#{ev.num} {ev.name}{ev.record ? <em> · rec {ev.record}</em> : ""}</div>{ev.heats.map((h, i) => <div key={i} className="md-prevheat"><div className="md-prevheatn">Heat {h.num}</div>{h.lanes.map((l, j) => <div key={j} className={"md-prevlane" + (l.team === team ? " mine" : "")}><span>{l.lane}</span><span>{l.name}{l.swimmers ? ` (+${l.swimmers.length})` : ""}</span><span>{l.team}</span><span>{l.age || ""}</span><span>{l.seed}</span></div>)}</div>)}</div>)}</div>
+            <div className="md-prevtop"><span>{allParsed.length} events · {count} entries{addedEvents.length ? " so far" : ""}</span></div>
+            {teams.length > 0 && (
+              <div className="md-impteamwrap">
+                <span className="md-cmpchecklabel">Home team</span>
+                <div className="md-impteamlist">
+                  {teams.map((t) => <label key={t} className="md-cmpradio"><input type="checkbox" checked={team === t} onChange={() => setTeam(t)} />{TEAM_NAME[t] || t}</label>)}
+                </div>
+              </div>
+            )}
+            <div className="md-prevbody">{justAdded > 0 && <div className="md-impjustadded">✓ Added {justAdded} entr{justAdded === 1 ? "y" : "ies"} — paste or upload the next page, or Load meet once everything's in.</div>}
+              {allParsed.length === 0 ? <div className="md-prevempty">Nothing parsed yet — upload the meet program PDF and the preview fills in.</div>
+              : allParsed.map((ev) => <div key={ev.id} className="md-prevev"><div className="md-prevevname">#{ev.num} {ev.name}{ev.record ? <em> · rec {ev.record}</em> : ""}</div>{ev.heats.map((h, i) => <div key={i} className="md-prevheat"><div className="md-prevheatn">Heat {h.num}</div>{h.lanes.map((l, j) => <div key={j} className={"md-prevlane" + (l.team === team ? " mine" : "")}><span>{l.lane}</span><span>{l.name}{l.swimmers ? ` (+${l.swimmers.length})` : ""}</span><span>{l.team}</span><span>{l.age || ""}</span><span>{l.seed}</span></div>)}</div>)}</div>)}</div>
           </div>
         </div>
-        <div className="md-mfoot"><button className="md-cancel" onClick={onClose}>Cancel</button><button className="md-apply" disabled={count === 0} onClick={() => onApply({ events: parsed, myTeam: team })}>Load {count > 0 ? `${count} entries` : "meet"}</button></div>
+        <div className="md-mfoot">
+          <button className="md-cancel" onClick={onClose}>Cancel</button>
+          <button className="md-ghost2" disabled={!parsed.length} onClick={() => { setAddedEvents((a) => [...a, ...parsed]); setJustAdded(parsed.reduce((n, ev) => n + ev.heats.reduce((m, h) => m + h.lanes.length, 0), 0)); setText(""); }}>+ Add multiple</button>
+          <button className="md-apply" disabled={count === 0} onClick={() => onApply({ events: allParsed, myTeam: team })}>Load {count > 0 ? `${count} entries` : "meet"}</button>
+        </div>
       </div>
     </div>
   );
@@ -4453,6 +4482,8 @@ html, body, #root { height: 100%; }
 .md-ctl { display:flex; align-items:center; gap:6px; font-size:10.5px; color:#64748b; font-weight:700; text-transform:uppercase; }
 .md-ctl select { background:#fff; color:#0f2036; border:1px solid var(--sline); border-radius:8px; padding:6px 8px; font-size:13px; font-weight:700; }
 .md-prevbody { overflow-y:auto; padding:10px 14px; }
+.md-impteamwrap { padding:8px 14px; border-bottom:1px solid var(--sline); display:flex; flex-direction:column; gap:4px; }
+.md-impteamlist { display:flex; flex-direction:column; gap:2px; max-height:130px; overflow-y:auto; }
 .md-prevempty { color:#94a3b8; font-size:12.5px; line-height:1.55; }
 .md-impjustadded { background:#ecfdf5; border:1px solid #a7f3d0; color:#166534; font-weight:700; font-size:12.5px; border-radius:9px; padding:8px 10px; margin-bottom:10px; }
 .md-prevev { margin-bottom:10px; } .md-prevevname { font-weight:800; font-size:12.5px; color:#0f2036; margin-bottom:4px; } .md-prevevname em { color:#a8842a; font-style:normal; font-weight:700; }
