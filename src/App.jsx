@@ -3269,6 +3269,15 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
   {
+    version: "2.4.1",
+    date: "2026-07-23",
+    title: "Fix menu/gate overlap and stats header ghosting",
+    notes: [
+      "Opening the hamburger menu while the Start Meet gate is showing no longer lets the blur and Start Meet button bleed through on top of the menu — the menu now sits above it.",
+      "Fixed a Safari rendering glitch where a sliver of the team-color banner could ghost through the sticky \"High points\" / \"Improvement\" column headers on Meet stats and Team stats while scrolling.",
+    ],
+  },
+  {
     version: "2.4.0",
     date: "2026-07-23",
     title: "Five account roles, Owner permissions, standalone roster",
@@ -4590,8 +4599,8 @@ html, body, #root { height: 100%; }
 .md-vmbtn { border:none; background:transparent; color:#94a3b8; font-weight:800; font-size:11.5px; padding:7px 10px; border-radius:7px; cursor:pointer; }
 .md-vmbtn.active { background:var(--cyan); color:#062a33; }
 .md-vmbtn:disabled { opacity:.35; cursor:default; }
-.md-menuscrim { position:fixed; inset:0; z-index:30; }
-.md-menu { position:absolute; top:48px; left:0; z-index:31; width:290px; max-height:76vh; overflow-y:auto; background:#fff; color:var(--sink); border-radius:14px; box-shadow:0 24px 60px -16px rgba(0,0,0,.5); padding:10px; display:flex; flex-direction:column; gap:8px; }
+.md-menuscrim { position:fixed; inset:0; z-index:51; }
+.md-menu { position:absolute; top:48px; left:0; z-index:52; width:290px; max-height:76vh; overflow-y:auto; background:#fff; color:var(--sink); border-radius:14px; box-shadow:0 24px 60px -16px rgba(0,0,0,.5); padding:10px; display:flex; flex-direction:column; gap:8px; }
 .md-menutitle { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.1em; color:#94a3b8; padding:2px 2px 0; }
 .md-mrow { display:flex; flex-direction:column; gap:4px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:#64748b; }
 .md-mrow input, .md-mrow select { font-size:14px; font-weight:600; text-transform:none; letter-spacing:0; color:var(--sink); padding:8px 10px; border:1px solid var(--sline); border-radius:9px; background:#fff; }
@@ -4978,14 +4987,17 @@ html, body, #root { height: 100%; }
 .md-statsfilterpanel { display:flex; flex-direction:column; gap:8px; padding:12px 20px; border-bottom:1px solid var(--sline); background:#f8fafc; }
 .md-statcol { overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:12px 16px; border-right:1px solid var(--sline); }
 .md-statcol:last-child { border-right:none; }
-.md-stath { font-weight:800; font-size:13px; margin:0 0 8px; color:var(--sink); position:sticky; top:0; z-index:2; background:#fff; padding:12px 0 4px; margin-top:-12px; }
+/* transform + will-change force the sticky header onto its own compositing
+   layer — Safari otherwise sometimes lets a sliver of whatever's behind the
+   modal's rounded/clipped corners ghost through it on scroll. */
+.md-stath { font-weight:800; font-size:13px; margin:0 0 8px; color:var(--sink); position:sticky; top:0; z-index:2; background:#fff; padding:12px 0 4px; margin-top:-12px; transform:translateZ(0); will-change:transform; }
 .md-statrow { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #f1f5f9; background:#fff; }
 .md-statrank { width:20px; text-align:center; font-weight:800; color:#94a3b8; font-size:12px; }
 .md-statname { font-weight:700; font-size:13px; color:var(--sink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .md-statsub { font-size:11px; color:#94a3b8; }
 .md-statval { font-weight:900; font-size:14px; } .md-statval.gold { color:#a8842a; } .md-statval.green { color:#166534; } .md-statval.red { color:#b42318; }
 .md-agegrp { margin-bottom:10px; }
-.md-agehdr { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#0e7490; margin:0; padding:6px 0 2px; position:sticky; top:29px; z-index:1; background:#fff; }
+.md-agehdr { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#0e7490; margin:0; padding:6px 0 2px; position:sticky; top:29px; z-index:1; background:#fff; transform:translateZ(0); will-change:transform; }
 .md-gpill { width:18px; height:18px; display:grid; place-items:center; border-radius:50%; font-size:10px; font-weight:900; color:#fff; }
 .md-gpill.girls { background:#ec4899; } .md-gpill.boys { background:#3b82f6; } .md-gpill.mixed { background:#8b5cf6; }
 .md-gpill.sm { width:15px; height:15px; font-size:8.5px; flex:none; }
