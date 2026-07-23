@@ -609,6 +609,11 @@ function RelaySplitsPanel({ heat, evIdx, htIdx, scopeLane, data, homeTeam, onClo
 // Import a results sheet and merge final times by name+event for chosen teams.
 function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
   const [text, setText] = useState(""); const [busy, setBusy] = useState("");
+  // Same idea as Meet setup's "Import roster" -> apply -> land back on a
+  // ready-to-continue screen instead of being dumped at the home meet
+  // sheet: "Add one" merges and closes like before; "Add multiple" merges
+  // and clears the paste box for the next sheet, staying right here.
+  const [justAdded, setJustAdded] = useState(0);
   const parsed = useMemo(() => parseResults(text), [text]);
   const { patch, matched } = useMemo(() => mergeResults(parsed, events, null, homeTeam), [parsed, events, homeTeam]);
   const dqCount = useMemo(() => Object.values(patch).filter((p) => p.dqs).length, [patch]);
@@ -641,7 +646,7 @@ function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
           <div className="md-impgrid">
             <textarea className="md-imparea" placeholder={"Paste results text…"} value={text} onChange={(e) => setText(e.target.value)} />
             <div className="md-preview"><div className="md-prevtop"><span>{parsed.length} events · {count} results · <b>{matched}</b> merge onto loaded meet{dqCount ? <> · <b className="md-impdqnote">{dqCount} DQ{dqCount > 1 ? "s" : ""}</b> found for {homeTeam}</> : null}</span></div>
-              <div className="md-prevbody"><div className="md-prevempty">“Merge” fills finals onto the loaded program by event # + name. Any {homeTeam} row marked DQ on the sheet gets flagged as a pending DQ — pick the reason from the usual DQ button after merging — and keeps the time too if the sheet has one. “Save as new meet” builds and saves a fresh meet from just this results sheet.</div></div></div>
+              <div className="md-prevbody">{justAdded > 0 && <div className="md-impjustadded">✓ Added {justAdded} result{justAdded > 1 ? "s" : ""} — paste or upload the next sheet.</div>}<div className="md-prevempty">“Add one”/“Add multiple” fill finals onto the loaded program by event # + name. Any {homeTeam} row marked DQ on the sheet gets flagged as a pending DQ — pick the reason from the usual DQ button after merging — and keeps the time too if the sheet has one. “Save as new meet” builds and saves a fresh meet from just this results sheet.</div></div></div>
           </div>
         )}
         <div className="md-mfoot"><button className="md-cancel" onClick={form ? () => setForm(false) : onClose}>{form ? "Back" : "Cancel"}</button>
@@ -649,7 +654,8 @@ function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
             ? <button className="md-apply" disabled={!count || !name.trim()} onClick={() => onSaveNew({ meet: resultsToMeet(parsed), name: name.trim(), date, mode: mtype, host, away })}>Save meet</button>
             : <>
               <button className="md-ghost2" disabled={!count} onClick={() => setForm(true)}>Save as new meet</button>
-              <button className="md-apply" disabled={matched === 0} onClick={() => onApply(patch)}>Merge {matched} results</button>
+              <button className="md-ghost2" disabled={matched === 0} onClick={() => { onApply(patch); setJustAdded(matched); setText(""); }}>+ Add multiple</button>
+              <button className="md-apply" disabled={matched === 0} onClick={() => { onApply(patch); onClose(); }}>Add one — {matched} result{matched === 1 ? "" : "s"}</button>
             </>}
         </div>
       </div>
@@ -2263,6 +2269,10 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   const [leagueProfileTarget, setLeagueProfileTarget] = useState(null);
   const openLeagueProfile = (name, team) => { setLeagueProfileTarget({ name, team }); setModal("league"); setMenuOpen(false); setPop(null); setAgeStack([]); };
   const [startedHeats, setStartedHeats] = useState({});
+  // Blurred "Start Meet" gate — shown once per freshly-imported/loaded meet,
+  // before anything has actually happened. Dismissing it just unlocks the
+  // normal board; pre-race/race/post-race behavior underneath is untouched.
+  const [meetGateDismissed, setMeetGateDismissed] = useState(false);
   const [showFinalizeDqs, setShowFinalizeDqs] = useState(false);
   const autoFinalizeShown = useRef(false);
   const lanesPerHeat = dualLanes;
@@ -2425,12 +2435,12 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {}
       idx = idx.filter((x) => x.meetName !== meetName || x.date !== date); idx.push({ id, meetName, mode, date });
       await STORE.set(INDEX_KEY, JSON.stringify(idx)); flash("Saved to season ✓"); } catch (e) { flash("Saved (storage limit — kept for this session)"); } };
-  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
+  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
   const deleteMeet = async (id) => { if (STORE) { try { await STORE.delete(id); } catch (e) {} try { const r = await STORE.get(INDEX_KEY); if (r && r.value) await STORE.set(INDEX_KEY, JSON.stringify(JSON.parse(r.value).filter((x) => x.id !== id))); } catch (e) {} } setSeasonMeets((a) => a.filter((m) => m.id !== id)); flash("Meet removed"); };
   const clearData = async () => { if (typeof window !== "undefined" && window.confirm && !window.confirm("Clear all saved meets and reset the board? This can't be undone.")) return;
     if (STORE) { try { const r = await STORE.get(INDEX_KEY); if (r && r.value) for (const it of JSON.parse(r.value)) { try { await STORE.delete(it.id); } catch (e) {} } } catch (e) {}
       try { await STORE.delete(INDEX_KEY); } catch (e) {} try { await STORE.delete(CUR_KEY); } catch (e) {} }
-    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setHeatPtr(4); setModal(null); flash("Data cleared"); };
+    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false); setHeatPtr(4); setModal(null); flash("Data cleared"); };
   const toggleTag = (id, key) => { const tags = { ...get(id).tags }; tags[key] ? delete tags[key] : (tags[key] = true); update(id, { tags }); };
   const toggleDqCode = (id, group, code, reason, swimmer) => { let dqs = [...(get(id).dqs || [])]; const i = dqs.findIndex((q) => q.code === code); if (i >= 0) dqs.splice(i, 1); else { dqs = dqs.filter((q) => q.code !== PEND_DQ_CODE); dqs.push({ code, reason, group, ...(swimmer ? { swimmer } : {}) }); } update(id, { dqs }); };
   // Quick tap: flag a DQ instantly with the reason left pending (toggles off
@@ -2569,7 +2579,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     // press Start — without this, a stale startedHeats/autoEnded entry left
     // over from whatever heat happened to share the same evIdx:htIdx key in
     // the previous meet would make the new first heat look already running.
-    setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {};
+    setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setMeetGateDismissed(false);
     setRelaySwapHistory({}); setModal("meetsetup"); };
   const scrollToEvent = (evId) => { const el = evRefs.current[evId]; if (el && sheetRef.current) sheetRef.current.scrollTo({ top: el.offsetTop - 8, behavior: "smooth" }); };
   const jumpToCurrent = () => scrollToEvent(current?.evId);
@@ -2584,9 +2594,12 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     if (idx >= 0) goToEventIdx(idx); else flash("No matching event"); };
 
   const slots = (heat, n) => { const out = []; for (let i = 1; i <= n; i++) out.push(heat.lanes.find((l) => l.lane === i) || null); return out; };
+  const meetHasStarted = Object.keys(startedHeats).length > 0 || Object.values(data).some((d) => d && d.time);
+  const showStartGate = !meetGateDismissed && !meetHasStarted;
 
   return (
     <div className="md-root">
+      <div className={"md-boardwrap" + (showStartGate ? " gated" : "")}>
 
       <header className="md-top">
         <div className="md-logowrap">
@@ -2698,6 +2711,12 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           </div>
         </section>
       </div>
+      </div>
+      {showStartGate && (
+        <div className="md-startgate">
+          <button className="md-startgatebtn" onClick={() => setMeetGateDismissed(true)}>▶ Start Meet</button>
+        </div>
+      )}
 
       {pop && popInfo && (<>
         <div className="md-povscrim" onClick={() => { setPop(null); setAgeStack([]); }} />
@@ -2722,7 +2741,7 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
           // markers or clobber a DQ the coach already entered by hand.
           const dqs = p.dqs ? (cur.dqs && cur.dqs.length ? cur.dqs : p.dqs) : cur.dqs;
           nd[id] = { ...cur, ...p, ...(p.dqs ? { dqs } : {}) };
-        }); return nd; }); setModal(null); }}
+        }); return nd; }); }}
         onSaveNew={({ meet, name, date, mode: mtype, host, away }) => {
           const saveDate = date || new Date().toISOString().slice(0, 10);
           setEvents(meet.events); setData(meet.data); setRecords({}); setStartedHeats({}); setHeatPtr(0);
@@ -3516,6 +3535,12 @@ html, body, #root { height: 100%; }
 .md-root { --ink:#0a1628; --line:#1e3a5f; --cyan:#22d3ee; --muted:#7d93b0; --text:#e8f0fb; --sheet:#f4f7fb; --card:#fff; --sline:#e2e8f0; --sink:#0f2036; --dq:#ef4444; --amber:#f59e0b; --green:#10b981; --rec:#e0b400;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color:var(--sink); background:var(--sheet); height:100vh; display:flex; flex-direction:column; overflow:hidden; -webkit-font-smoothing:antialiased; }
 .md-lanenum,.md-timein,.md-timeout,.md-stime,.md-tspts,.md-restime { font-variant-numeric:tabular-nums; }
+.md-boardwrap { display:flex; flex-direction:column; flex:1; min-height:0; transition:filter .2s ease; }
+.md-boardwrap.gated { filter:blur(7px) saturate(.7); pointer-events:none; user-select:none; }
+.md-startgate { position:fixed; inset:0; z-index:50; display:grid; place-items:center; }
+.md-startgatebtn { padding:22px 50px; border-radius:20px; border:none; background:linear-gradient(135deg,#22d3ee,#0891b2); color:#062a33; font-weight:900; font-size:22px; letter-spacing:.02em; cursor:pointer; box-shadow:0 24px 60px -12px rgba(8,145,178,.65); }
+.md-startgatebtn:hover { background:linear-gradient(135deg,#5fe3f5,#22d3ee); }
+.md-startgatebtn:active { transform:scale(.97); }
 .md-loginwrap { align-items:center; justify-content:center; padding:20px; }
 .md-loginbox { width:100%; max-width:340px; display:flex; flex-direction:column; gap:12px; background:var(--card); border-radius:16px; padding:26px; box-shadow:0 24px 60px -14px rgba(6,14,28,.35); }
 .md-loginlogo { font-size:22px; font-weight:800; }
@@ -3793,6 +3818,7 @@ html, body, #root { height: 100%; }
 .md-ctl select { background:#fff; color:#0f2036; border:1px solid var(--sline); border-radius:8px; padding:6px 8px; font-size:13px; font-weight:700; }
 .md-prevbody { overflow-y:auto; padding:10px 14px; }
 .md-prevempty { color:#94a3b8; font-size:12.5px; line-height:1.55; }
+.md-impjustadded { background:#ecfdf5; border:1px solid #a7f3d0; color:#166534; font-weight:700; font-size:12.5px; border-radius:9px; padding:8px 10px; margin-bottom:10px; }
 .md-prevev { margin-bottom:10px; } .md-prevevname { font-weight:800; font-size:12.5px; color:#0f2036; margin-bottom:4px; } .md-prevevname em { color:#a8842a; font-style:normal; font-weight:700; }
 .md-prevheat { margin:0 0 6px 6px; } .md-prevheatn { font-size:10.5px; font-weight:700; color:#94a3b8; text-transform:uppercase; }
 .md-prevlane { display:grid; grid-template-columns:22px 1fr auto auto auto; gap:8px; font-size:12px; padding:3px 0; color:#475569; }
