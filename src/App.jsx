@@ -2259,6 +2259,12 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     if (last && last !== APP_VERSION) setModal("whatsnew");
     if (last !== APP_VERSION) STORE.set(UPDATE_SEEN_KEY, APP_VERSION).catch(() => {});
   })(); return () => { live = false; }; }, []);
+  const [seasonRange, setSeasonRange] = useState(DEFAULT_SEASON_RANGE);
+  useEffect(() => { if (!STORE) return; let live = true; (async () => {
+    let r = null; try { const res = await STORE.get(SEASON_RANGE_KEY); if (res && res.value) r = JSON.parse(res.value); } catch (e) {}
+    if (live && r) setSeasonRange(r);
+  })(); return () => { live = false; }; }, []);
+  const saveSeasonRange = (next) => { setSeasonRange(next); if (STORE) STORE.set(SEASON_RANGE_KEY, JSON.stringify(next)).catch(() => {}); };
   const [menuOpen, setMenuOpen] = useState(false);
   const [pop, setPop] = useState(null);
   const [ageStack, setAgeStack] = useState([]); // age-chip drill-down, stacked on top of `pop`
@@ -2394,10 +2400,16 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   // them apart (e.g. for a "saved meets" count in a subtitle).
   const liveMeetDateKey = meetDate || new Date().toISOString().slice(0, 10);
   const liveAlreadySaved = seasonMeets.some((m) => m.meetName === meetName && m.date === liveMeetDateKey);
+  // Saved meets outside the admin-defined season window (default: the whole
+  // calendar year, so this is a no-op unless a custom range is set) don't
+  // count toward League/Team stats. The live in-progress meet always counts
+  // regardless — it's the one on the board right now, not a past record to
+  // include or exclude by date.
   const rankMeets = useMemo(() => {
     const live = { meetName, mode, date: liveMeetDateKey, events, data, homeTeam, hostTeam, awayTeam, dualLanes };
-    return liveAlreadySaved ? seasonMeets : [live, ...seasonMeets];
-  }, [liveAlreadySaved, meetName, mode, liveMeetDateKey, events, data, homeTeam, hostTeam, awayTeam, dualLanes, seasonMeets]);
+    const inRange = seasonMeets.filter((m) => inSeasonRange(m.date, seasonRange));
+    return liveAlreadySaved ? inRange : [live, ...inRange];
+  }, [liveAlreadySaved, meetName, mode, liveMeetDateKey, events, data, homeTeam, hostTeam, awayTeam, dualLanes, seasonMeets, seasonRange]);
   const relayCandidates = useMemo(() => relayReplaceTarget ? relayReplacementCandidates(events, data, relayReplaceTarget.evIdx, relayReplaceTarget.htIdx, relayReplaceTarget.lane, relayReplaceTarget.leg, relayReplaceTarget.team) : [], [relayReplaceTarget, events, data]);
   // Time & place +/- for each candidate: this relay's own delta from
   // swapping in their time, plus (for a "move" candidate) the donor relay's
@@ -2802,7 +2814,8 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       {modal === "season" && <SeasonModal onClose={() => setModal(null)} homeTeam={homeTeam} meets={rankMeets} />}
       {modal === "meetsetup" && <MeetSetupModal onClose={() => setModal(null)} meetName={meetName} setMeetName={setMeetName} meetDate={meetDate} setMeetDate={setMeetDate} mode={mode} setMode={setMode} dualLanes={dualLanes} setDualLanes={setDualLanes} hostTeam={hostTeam} setHostTeam={setHostTeam} awayTeam={awayTeam} setAwayTeam={setAwayTeam} teams={teamsPresent} onImport={() => setModal("import")} />}
       {modal === "settings" && <SettingsModal onClose={() => setModal(null)} homeTeam={homeTeam} setHomeTeam={setHomeTeam} teams={teamsPresent} onMeetSetup={() => setModal("meetsetup")} onResults={() => setModal("results")} onSave={() => saveToSeason()} onExport={() => setModal("export")} onClear={clearData} meets={seasonMeets} onLoad={loadMeet} onDelete={deleteMeet}
-        session={session} isAdmin={isAdmin} role={myRole} onLogout={onLogout} onManageAccounts={() => setModal("accounts")} canViewUpdateLog={canViewUpdateLog} onUpdateLog={() => setModal("updatelog")} />}
+        session={session} isAdmin={isAdmin} role={myRole} onLogout={onLogout} onManageAccounts={() => setModal("accounts")} canViewUpdateLog={canViewUpdateLog} onUpdateLog={() => setModal("updatelog")}
+        seasonRange={seasonRange} onSaveSeasonRange={saveSeasonRange} />}
       {modal === "accounts" && isAdmin && <AccountsModal onClose={() => setModal(null)} accounts={accounts} onSave={onSaveAccounts} currentUsername={session?.username} />}
       {modal === "whatsnew" && <WhatsNewModal entry={CHANGELOG[0]} onClose={() => setModal(null)} />}
       {modal === "updatelog" && canViewUpdateLog && <UpdateLogModal onClose={() => setModal(null)} />}
@@ -2843,6 +2856,18 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
   {
+    version: "1.1.0",
+    date: "2026-07-23",
+    title: "Meet sheet gestures, smarter splits, custom season range",
+    notes: [
+      "Swimmer comparison: win probability now lives in one shared section at the bottom for every swimmer, in both Simple and Complex mode — no more hunting for a badge next to each name.",
+      "Splits (multi-tap lap timing) now only apply to your own team; every other lane just needs one tap to stop the clock and record their time.",
+      "Swipe right on any row — meet sheet, In The Water, Previous, On Deck — to jump straight to the DQ/NS picker. Double-tap your own team's row to open notes.",
+      "The In The Water dot now goes live for any race that's tracking splits (100 IM, 100 free, relays), not just relays — though the full team splits popup still only makes sense, and only opens, for a relay.",
+      "Saved meets: filter the list by year, and (admin-only) define a custom season date range — e.g. May to July — instead of assuming a calendar year.",
+    ],
+  },
+  {
     version: "1.0.0",
     date: "2026-07-22",
     title: "MeetDeck 1.0 — versioned releases begin",
@@ -2863,6 +2888,28 @@ const UPDATE_SEEN_KEY = "meetdeck:updateseen:v1";
 
 const ACCOUNTS_KEY = "meetdeck:accounts:v1";
 const SESSION_KEY = "meetdeck:session:v1";
+
+const SEASON_RANGE_KEY = "meetdeck:seasonrange:v1";
+// MM-DD, inclusive. Full calendar year by default, so a team that never
+// touches this setting sees exactly the old year-based grouping.
+const DEFAULT_SEASON_RANGE = { startMD: "01-01", endMD: "12-31" };
+const monthDayOf = (dateStr) => (dateStr || "").slice(5, 10);
+// A window where start > end wraps the new year (e.g. Nov to Feb).
+function inSeasonRange(dateStr, range) {
+  const md = monthDayOf(dateStr); if (!md) return true;
+  const { startMD, endMD } = range || DEFAULT_SEASON_RANGE;
+  return startMD <= endMD ? (md >= startMD && md <= endMD) : (md >= startMD || md <= endMD);
+}
+// Which "season year" a meet belongs to under the custom range — a meet that
+// falls in the wraparound tail (e.g. a January date under a Nov-Feb range)
+// counts toward the PRECEDING year's season, since that's the season it
+// closed out, not the one that had just started.
+function seasonYearOf(dateStr, range) {
+  const y = parseInt((dateStr || "").slice(0, 4), 10); if (!y) return null;
+  const { startMD, endMD } = range || DEFAULT_SEASON_RANGE;
+  if (startMD > endMD && monthDayOf(dateStr) <= endMD) return y - 1;
+  return y;
+}
 const DEFAULT_ACCOUNTS = [
   { username: "Coach-Cooper", password: "123456", role: "admin" },
   // Dedicated test login — role "test" unlocks the full Update log (every
@@ -3215,8 +3262,22 @@ function MeetSetupModal({ onClose, meetName, setMeetName, meetDate, setMeetDate,
   );
 }
 
-function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete, session, isAdmin, role, onLogout, onManageAccounts, canViewUpdateLog, onUpdateLog }) {
+function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onResults, onSave, onExport, onClear, meets, onLoad, onDelete, session, isAdmin, role, onLogout, onManageAccounts, canViewUpdateLog, onUpdateLog, seasonRange, onSaveSeasonRange }) {
   const [pendingDelete, setPendingDelete] = useState(null);
+  const [yearFilter, setYearFilter] = useState("all");
+  // Buckets by the admin-defined season range, not raw calendar year, so a
+  // custom range (e.g. Nov-Feb) groups a meet with the season it belongs to
+  // rather than splitting one season's meets across two year buckets.
+  const years = useMemo(() => [...new Set((meets || []).map((m) => seasonYearOf(m.date, seasonRange)).filter(Boolean))].sort((a, b) => b - a), [meets, seasonRange]);
+  const filteredMeets = useMemo(() => (meets || []).filter((m) => yearFilter === "all" || seasonYearOf(m.date, seasonRange) === +yearFilter), [meets, yearFilter, seasonRange]);
+  const range = seasonRange || DEFAULT_SEASON_RANGE;
+  const [rangeStart, setRangeStart] = useState(range.startMD);
+  const [rangeEnd, setRangeEnd] = useState(range.endMD);
+  const [rangeErr, setRangeErr] = useState("");
+  const saveRange = () => {
+    if (!/^\d{2}-\d{2}$/.test(rangeStart) || !/^\d{2}-\d{2}$/.test(rangeEnd)) { setRangeErr("Use MM-DD, e.g. 05-01."); return; }
+    setRangeErr(""); onSaveSeasonRange({ startMD: rangeStart, endMD: rangeEnd });
+  };
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
@@ -3233,15 +3294,34 @@ function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onR
           <button className="md-mbtn" onClick={onSave}>💾 Save this meet to season</button>
           <button className="md-mbtn primary" onClick={onExport}>Export to Google Sheets</button>
           <div className="md-mdiv" />
-          <div className="md-menutitle">Saved meets ({(meets || []).length})</div>
+          {isAdmin && (
+            <>
+              <div className="md-menutitle">Season date range (admin)</div>
+              <div className="md-msub" style={{ marginBottom: 6 }}>Defines what counts as one season for year filtering and League/Team stats below — e.g. 05-01 to 07-31 for a summer league. Repeats every year; the default (01-01 to 12-31) is the full calendar year.</div>
+              <div className="md-rangerow">
+                <label className="md-mrow">Start (MM-DD)<input value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} placeholder="05-01" /></label>
+                <label className="md-mrow">End (MM-DD)<input value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} placeholder="07-31" /></label>
+                <button className="md-mbtn sm" onClick={saveRange}>Save range</button>
+              </div>
+              {rangeErr && <div className="md-loginerr">{rangeErr}</div>}
+              <div className="md-mdiv" />
+            </>
+          )}
+          <div className="md-menutitle">Saved meets ({filteredMeets.length}{yearFilter !== "all" ? ` of ${(meets || []).length}` : ""})</div>
+          {years.length > 1 && (
+            <label className="md-mrow yearfilter">Filter by year<select value={yearFilter} onChange={(e) => setYearFilter(e.target.value)}>
+              <option value="all">All years</option>
+              {years.map((y) => <option key={y} value={y}>{y}</option>)}
+            </select></label>
+          )}
           <div className="md-savedmeets">
-            {(meets || []).length ? [...meets].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((m) => (
+            {filteredMeets.length ? [...filteredMeets].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((m) => (
               <div key={m.id} className="md-meetrow">
                 <div className="md-meetinfo"><div className="md-meetname">{m.meetName}</div><div className="md-meetmeta">{m.date} · {m.mode === "timetrial" ? "Time trials" : m.mode === "champs" ? "Champs" : "Dual"}</div></div>
                 <button className="md-meetload" onClick={() => onLoad(m)}>Load</button>
                 <button className="md-meetdel" onClick={() => setPendingDelete(m)} aria-label="Delete">🗑</button>
               </div>
-            )) : <div className="md-prevempty">No saved meets yet.</div>}
+            )) : <div className="md-prevempty">{yearFilter === "all" ? "No saved meets yet." : "No saved meets for that year."}</div>}
           </div>
           <div className="md-mdiv" />
           {isAdmin && <button className="md-mbtn danger" onClick={onClear}>🗑 Clear all data &amp; reset</button>}
@@ -4279,6 +4359,10 @@ html, body, #root { height: 100%; }
 .md-meetload:hover { background:#5fe3f5; }
 .md-meetdel { flex:none; width:34px; height:34px; border-radius:8px; border:1px solid #fecaca; background:#fff; color:#b42318; font-size:14px; cursor:pointer; }
 .md-meetdel:hover { background:#fef2f2; }
+.md-rangerow { display:flex; align-items:flex-end; gap:10px; }
+.md-rangerow .md-mrow { flex:1; }
+.md-rangerow .md-mbtn { flex:none; }
+.md-mrow.yearfilter { margin-bottom:8px; }
 
 .md-onlymine { display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:700; color:#475569; padding:2px 2px 8px; }
 .md-onlymine input { width:16px; height:16px; }
