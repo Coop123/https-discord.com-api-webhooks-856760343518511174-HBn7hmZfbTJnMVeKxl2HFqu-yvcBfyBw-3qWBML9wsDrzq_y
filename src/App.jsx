@@ -300,16 +300,21 @@ function bestLegTime(meets, name, team, stroke, ageGroup, gender) {
   return seasonBestStroke(meets, name, team, stroke);
 }
 const MEDLEY_LEGS = ["Back", "Breast", "Fly", "Free"];
-// Core mixed-medley optimizer: 2 girls + 2 boys, Free leg always a girl (house
-// rule). Searches which of Back/Breast/Fly the second girl covers, and how
-// the two boys split the remaining two strokes, picking the fastest total —
-// e.g. if the girl who's best at Breast is unavailable, this can shift a boy
-// into Breast and slot the second girl into Back instead.
+// Core mixed-medley optimizer: prefers 2 girls + 2 boys, Free leg always a
+// girl (house rule). Searches which of Back/Breast/Fly the second girl
+// covers, and how the two boys split the remaining two strokes, picking the
+// fastest total — e.g. if the girl who's best at Breast is unavailable,
+// this can shift a boy into Breast and slot the second girl into Back
+// instead. When the roster doesn't have 2+ of each gender (e.g. 3 boys, 1
+// girl), falls back to optimalMedley's plain fastest-(person,stroke)
+// pairing across everyone — still a mixed relay whenever it can be, just
+// without the strict 2/2 split this meet doesn't have the swimmers for.
 function optimalMixedMedley(roster, timeOf) {
   const girls = roster.filter((c) => c.gender === "Girls");
   const boys = roster.filter((c) => c.gender === "Boys");
+  if (girls.length < 2 || boys.length < 2) return optimalMedley(roster, timeOf);
   const girlsWithFree = girls.map((g) => ({ ...g, free: timeOf(g.name, "Free") })).filter((g) => g.free != null).sort((a, b) => a.free - b.free);
-  if (!girlsWithFree.length || boys.length < 2) return null;
+  if (!girlsWithFree.length) return optimalMedley(roster, timeOf);
   const NONFREE = ["Back", "Breast", "Fly"];
   let bestPlan = null;
   girlsWithFree.slice(0, 5).forEach((freeGirl, fi) => {
@@ -336,7 +341,7 @@ function optimalMixedMedley(roster, timeOf) {
       });
     });
   });
-  return bestPlan;
+  return bestPlan || optimalMedley(roster, timeOf);
 }
 // Single-gender medley: greedily match the fastest available (swimmer,
 // stroke) pairs first, so a scratch naturally reshuffles who swims what.
@@ -398,6 +403,26 @@ function buildMedleyRelaysSeason(meets, ageGroup, gender, excludeByTeam) {
     if (!plan) return { team, event: "Medley", swimmers: [], total: null, full: false };
     return { team, event: "Medley", swimmers: plan.legs, total: plan.total, full: true };
   }).filter((r) => r.full).sort((a, b) => a.total - b.total);
+}
+const RELAY_LETTERS = ["A", "B", "C", "D"];
+// Builds one lettered "squad" (A/B/C/D) per team: A is the fastest 4, B is
+// the fastest 4 left over once A's swimmers are excluded, C once A+B are
+// excluded, and so on — same excludeByTeam gate (locked other-stroke-type
+// relay + absentees) layered underneath every step, per team independently.
+function buildRelayLetter(meets, ageGroup, gender, relayType, excludeByTeam, letter) {
+  const idx = RELAY_LETTERS.indexOf(letter);
+  const builder = relayType === "Medley" ? buildMedleyRelaysSeason : buildFreeRelaysSeason;
+  if (idx <= 0) return builder(meets, ageGroup, gender, excludeByTeam);
+  const usedByTeam = {}; // team -> Set(names already used by an earlier letter)
+  for (let i = 0; i < idx; i++) {
+    const stepExclude = (team) => { const base = excludeByTeam ? excludeByTeam(team) : null; const used = usedByTeam[team];
+      if (!base && !used) return null; return new Set([...(base || []), ...(used || [])]); };
+    builder(meets, ageGroup, gender, stepExclude).forEach((r) => {
+      const set = usedByTeam[r.team] || (usedByTeam[r.team] = new Set()); r.swimmers.forEach((s) => set.add(s.name)); });
+  }
+  const finalExclude = (team) => { const base = excludeByTeam ? excludeByTeam(team) : null; const used = usedByTeam[team];
+    if (!base && !used) return null; return new Set([...(base || []), ...(used || [])]); };
+  return builder(meets, ageGroup, gender, finalExclude);
 }
 // Merge an uploaded results sheet (final times by name+event) for chosen teams.
 function mergeResults(parsedEvents, targetEvents, teamsToApply, homeTeam) {
@@ -1876,8 +1901,7 @@ function AttendanceToggle({ present, onToggle }) {
     <div className="md-attndtoggle" style={{ touchAction: "none" }}
       onPointerDown={onDown} onPointerMove={onMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
       <span className={"md-attndthumb" + (present ? "" : " no")} />
-      <span className={"md-attndseg yes" + (present ? " on" : "")}>Yes</span>
-      <span className={"md-attndseg no" + (!present ? " on" : "")}>No</span>
+      <span className={"md-attndseg yes" + (present ? " on" : "")}>Yes</span><span className={"md-attndseg no" + (!present ? " on" : "")}>No</span>
     </div>
   );
 }
@@ -1931,12 +1955,13 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const [ag, setAg] = useState(ageGroups[0] || "11-12");
   const [gender, setGender] = useState("Girls");
   const [relayType, setRelayType] = useState("Free");
+  const [teamLetter, setTeamLetter] = useState("A");
   const [overrides, setOverrides] = useState({});
   const [locked, setLocked] = useState({});
   const [editing, setEditing] = useState(null);
   const mixed = MIXED_GROUPS.includes(ag);
   const genderMap = useMemo(() => seasonGenderMap(meets), [meets]);
-  const keyFor = (team, type) => (type || relayType) + "|" + ag + "|" + team;
+  const keyFor = (team, type) => (type || relayType) + "|" + teamLetter + "|" + ag + "|" + team;
   const otherType = relayType === "Free" ? "Medley" : "Free";
   // Every team that appears anywhere in the season data — the coach opts
   // teams into the comparison (home team is always included); teams left
@@ -1954,18 +1979,29 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   const isAbsent = (name, team) => attendance[name + "|" + team] === false;
   const toggleAttendance = (name, team) => setAttendance((a) => ({ ...a, [name + "|" + team]: a[name + "|" + team] === false ? true : false }));
   const resetAttendance = (team) => setAttendance((a) => { const na = {}; Object.entries(a).forEach(([k, v]) => { if (!k.endsWith("|" + team)) na[k] = v; }); return na; });
-  // If a team doesn't have 8+ swimmers in this age group, there just aren't
-  // enough people for two fully-distinct A squads — let someone swim both
-  // instead of leaving a relay short. Only enforce "one A relay per person"
-  // when the roster is deep enough to reasonably expect it. Absent swimmers
-  // are always excluded regardless of depth — they just aren't there.
+  // If a team doesn't have enough swimmers of the RIGHT gender(s) in this
+  // age group, there just aren't enough people for two fully-distinct A
+  // squads — let someone swim both instead of leaving a relay short. Mixed
+  // age groups need 4+ boys AND 4+ girls (8 total, gender-balanced) to keep
+  // Free-A and Medley-A independent; single-gender age groups need 8+ of
+  // that one gender. Only enforce "one A relay per person" when the roster
+  // is actually deep enough. Absent swimmers never count toward depth or
+  // get auto-picked/offered, regardless.
+  const hasRelayDepth = (team) => {
+    const roster = seasonRoster(meets, team).filter((c) => ageGroupOf(c.age) === ag && !isAbsent(c.name, team));
+    if (mixed) {
+      const boys = roster.filter((c) => genderMap[c.name + "|" + team] === "Boys").length;
+      const girls = roster.filter((c) => genderMap[c.name + "|" + team] === "Girls").length;
+      return boys >= 4 && girls >= 4;
+    }
+    return roster.filter((c) => genderMap[c.name + "|" + team] === gender).length >= 8;
+  };
   const excludeByTeam = (team) => { const other = locked[keyFor(team, otherType)];
-    const depth = seasonRoster(meets, team).filter((c) => ageGroupOf(c.age) === ag).length;
-    const otherExcl = other && depth >= 8 ? other.swimmers.map((s) => s.name) : [];
+    const otherExcl = other && hasRelayDepth(team) ? other.swimmers.map((s) => s.name) : [];
     const absent = seasonRoster(meets, team).filter((c) => ageGroupOf(c.age) === ag && isAbsent(c.name, team)).map((c) => c.name);
     if (!otherExcl.length && !absent.length) return null;
     return new Set([...otherExcl, ...absent]); };
-  const baseRelaysAll = useMemo(() => relayType === "Medley" ? buildMedleyRelaysSeason(meets, ag, gender, excludeByTeam) : buildFreeRelaysSeason(meets, ag, gender, excludeByTeam), [meets, ag, gender, relayType, locked, attendance]);
+  const baseRelaysAll = useMemo(() => buildRelayLetter(meets, ag, gender, relayType, excludeByTeam, teamLetter), [meets, ag, gender, relayType, teamLetter, locked, attendance]);
   const baseRelays = useMemo(() => baseRelaysAll.filter((r) => rankTeams.includes(r.team)), [baseRelaysAll, rankTeams]);
   const relays = useMemo(() => baseRelays.map((r) => { const key = keyFor(r.team); if (locked[key]) return locked[key]; return applyRelayOverride(r, overrides[key], meets, ag, genderMap); }).sort((a, b) => a.total - b.total), [baseRelays, overrides, locked, meets, ag, genderMap, relayType]);
   const projected = useMemo(() => relays.map((r) => projectRelay(r, meets)).sort((a, b) => a.projTotal - b.projTotal), [relays, meets]);
@@ -1991,9 +2027,8 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
     const key = keyFor(r.team); const isLocked = !!locked[key]; const hasOverride = overrides[key] && overrides[key].some(Boolean); const roster = editing === r.team ? rosterFor(r.team) : [];
     const excluded = excludeByTeam(r.team); // this team's other-type A relay, locked in — those 4 aren't eligible here
     const otherLocked = locked[keyFor(r.team, otherType)];
-    const depth = seasonRoster(meets, r.team).filter((c) => ageGroupOf(c.age) === ag).length;
     const doubleANames = otherLocked ? r.legs.filter((l) => otherLocked.swimmers.some((s) => s.name === l.name)).map((l) => l.name) : [];
-    const doubleASeverity = depth < 8 ? "yellow" : "red";
+    const doubleASeverity = hasRelayDepth(r.team) ? "red" : "yellow";
     return (
       <div key={r.team} className={"md-rbteam" + (extraClass ? " " + extraClass : "") + (isLocked ? " locked" : "")}>
         <div className="md-rbhead"><span className="md-rbrank">{rankIdx + 1}</span><span className="md-rbteamname" style={{ color: teamColor(r.team) }}>{r.team}</span>
@@ -2026,9 +2061,10 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Relay builder — fastest {relayType.toLowerCase()} relay</div><div className="md-msub">Built from the whole season ({meets.length} meet{meets.length === 1 ? "" : "s"}) · check off teams to compare against · lock in a lineup to freeze it while comparing.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Relay builder — fastest {relayType.toLowerCase()} relay ({teamLetter} team)</div><div className="md-msub">Built from the whole season ({meets.length} meet{meets.length === 1 ? "" : "s"}) · check off teams to compare against · lock in a lineup to freeze it while comparing.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl">
           <div className="md-rbtabs">{["Free", "Medley"].map((t) => <button key={t} className={"md-rbtab" + (relayType === t ? " on" : "")} onClick={() => setRelayType(t)}>{t}</button>)}</div>
+          <div className="md-rbtabs" title="B/C/D are built from whoever's left after the letter(s) before it">{RELAY_LETTERS.map((l) => <button key={l} className={"md-rbtab" + (teamLetter === l ? " on" : "")} onClick={() => setTeamLetter(l)}>{l} team</button>)}</div>
           <label className="md-ctl">Age<select value={ag} onChange={(e) => setAg(e.target.value)}>{ageGroups.map((a) => <option key={a} value={a}>{a}</option>)}</select></label>
           {mixed ? <span className="md-mixtag">Mixed</span> : <label className="md-ctl">Gender<select value={gender} onChange={(e) => setGender(e.target.value)}>{["Girls", "Boys"].map((g) => <option key={g} value={g}>{g}</option>)}</select></label>}
           <button className="md-mbtn sm" onClick={(e) => setAttendanceOpen(attendanceOpen ? null : { rect: e.currentTarget.getBoundingClientRect() })}>🧍 Who's coming</button>
@@ -3674,10 +3710,10 @@ html, body, #root { height: 100%; }
 .md-attndrow { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 4px; font-size:13px; font-weight:700; color:var(--sink); }
 .md-attndrow em { font-style:normal; color:#94a3b8; font-weight:600; margin-left:2px; }
 .md-attndname { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.md-attndtoggle { position:relative; flex:none; width:88px; height:28px; border-radius:14px; background:#eef2f7; border:1px solid var(--sline); cursor:pointer; user-select:none; }
+.md-attndtoggle { position:relative; display:flex; flex:none; width:88px; height:28px; border-radius:14px; background:#eef2f7; border:1px solid var(--sline); cursor:pointer; user-select:none; overflow:hidden; }
 .md-attndthumb { position:absolute; top:1px; left:1px; width:42px; height:24px; border-radius:12px; background:#10b981; transition:transform .15s ease, background .15s ease; }
 .md-attndthumb.no { transform:translateX(42px); background:#ef4444; }
-.md-attndseg { position:relative; z-index:1; display:inline-flex; align-items:center; justify-content:center; width:44px; height:26px; font-size:10.5px; font-weight:800; color:#94a3b8; }
+.md-attndseg { position:relative; z-index:1; flex:1 1 0; min-width:0; display:flex; align-items:center; justify-content:center; height:26px; font-size:10.5px; font-weight:800; color:#94a3b8; }
 .md-attndseg.on { color:#fff; }
 .md-povhead { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:10px; }
 .md-povname { font-weight:800; font-size:16px; display:flex; align-items:center; gap:7px; }
