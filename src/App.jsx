@@ -2380,7 +2380,8 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
     if (!curHeatComplete) { seenIncomplete.current[curKey] = true; return; }
     if (seenIncomplete.current[curKey] && !autoEnded.current[curKey]) { autoEnded.current[curKey] = true; setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1)); }
   }, [curKey, curHeatComplete, flatHeats.length]);
-  const pendingDqs = useMemo(() => pendingDqList(events, data), [events, data]);
+  // Finalize review only needs the home team's own DQs — see pendingDqList.
+  const pendingDqs = useMemo(() => pendingDqList(events, data, homeTeam), [events, data, homeTeam]);
   const meetOver = flatHeats.length > 0 && ptr === flatHeats.length - 1 && curHeatComplete;
   // Review layout data (finalized meets only): the next 3 events after
   // wherever the coach is currently scrolled, for quick jumping, and a
@@ -2919,6 +2920,16 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
   {
+    version: "1.2.1",
+    date: "2026-07-23",
+    title: "Two-tier swipe gesture, home-team-only DQ review",
+    notes: [
+      "Swipe right on any row: swipe part-way across for the DQ/NS quick picker, swipe (most of) the way across for the full popover — notes and everything else. Distance is relative to the row's own width, so it feels the same on a wide meet-sheet row and a narrow On Deck card.",
+      "Dropped the old double-tap-for-notes delay now that the swipe covers it — plain taps open instantly again.",
+      "Finalize meet's DQ review list now only shows your own team's DQs waiting on a reason — an opposing swimmer's DQ is just a scoring flag, it was never going to get an official reason from your bench anyway.",
+    ],
+  },
+  {
     version: "1.2.0",
     date: "2026-07-23",
     title: "Meet finalization: DQ review gate, lock, and review layout",
@@ -3142,8 +3153,8 @@ function UpdateLogModal({ onClose }) {
 function OnDeckCard({ id, l, teamLabel, nameLabel, onPick, onSwipeDq, onNotesTap }) {
   const gesture = useRowGesture({
     onTap: (el) => onPick(id, el),
-    onSwipeRight: onSwipeDq ? (el) => onSwipeDq(id, el) : undefined,
-    onDoubleTap: onNotesTap ? (el) => onNotesTap(id, el) : undefined,
+    onSwipeHalf: onSwipeDq ? (el) => onSwipeDq(id, el) : undefined,
+    onSwipeFull: onNotesTap ? (el) => onNotesTap(id, el) : undefined,
   });
   return (
     <button className="md-odcard mine sm" title={`${l.name} · ${l.team}${l.age ? " · " + l.age : ""} · seed ${l.seed}`} {...gesture}>
@@ -3180,8 +3191,8 @@ function OnDeckStrip({ heat, homeTeam, onPick, onSwipeDq, onNotesTap }) {
 function AllLanesCard({ id, l, mine, teamLabel, nameLabel, onPick, onSwipeDq, onNotesTap }) {
   const gesture = useRowGesture({
     onTap: (el) => onPick(id, el),
-    onSwipeRight: onSwipeDq ? (el) => onSwipeDq(id, el) : undefined,
-    onDoubleTap: mine && onNotesTap ? (el) => onNotesTap(id, el) : undefined,
+    onSwipeHalf: onSwipeDq ? (el) => onSwipeDq(id, el) : undefined,
+    onSwipeFull: onNotesTap ? (el) => onNotesTap(id, el) : undefined,
   });
   return (
     <button className={"md-odcard allfit" + (mine ? " mine" : "")} title={`${l.name} · ${l.team}`} {...gesture}>
@@ -3274,8 +3285,8 @@ function PreviousSlider({ list, homeTeam, onPick, onNotesTap }) {
 function TickRow({ e, i, mine, pts, best, br, onPick, onSwipeDq, onNotesTap }) {
   const gesture = useRowGesture({
     onTap: (el) => onPick(e.id, el),
-    onSwipeRight: onSwipeDq ? (el) => onSwipeDq(e.id, el) : undefined,
-    onDoubleTap: mine && onNotesTap ? (el) => onNotesTap(e.id, el) : undefined,
+    onSwipeHalf: onSwipeDq ? (el) => onSwipeDq(e.id, el) : undefined,
+    onSwipeFull: onNotesTap ? (el) => onNotesTap(e.id, el) : undefined,
   });
   return (
     <button className={"md-tickrow" + (mine ? " mine" : "")} style={{ height: 30 }} {...gesture}>
@@ -3454,42 +3465,34 @@ function TeamScore({ r, big, onClick }) {
   );
 }
 
-// Shared swipe/tap/double-tap handling for meet-sheet-style rows, so every
-// panel (meet sheet, In The Water, Previous, On Deck) responds the same way:
-// a plain tap does the row's usual thing, a swipe right jumps straight to
-// the DQ/NS picker, and a fast second tap in the same spot (home team only,
-// by caller's choice) opens notes. Tracks the pointerdown start point (which
-// bubbles harmlessly) and resolves the gesture on click, so nested controls
-// that already call stopPropagation() on click (time inputs, split boxes)
-// keep working exactly as before.
-//
-// The single tap has to WAIT out the double-tap window (rather than firing
-// immediately and letting a second tap override it, like the DQ button does)
-// because the single-tap action here opens a full-screen-scrim popover that
-// covers the row — a second physical tap would just land on the scrim and
-// close it, never reaching this element. Only pay that latency where a
-// double-tap is actually wired up; callers that leave onDoubleTap unset
-// (away-team rows, or a home lane mid-race with the clock still running)
-// get the old zero-delay behavior, since precise lap timing can't afford it.
-function useRowGesture({ onTap, onSwipeRight, onDoubleTap }) {
+// Shared swipe/tap handling for meet-sheet-style rows, so every panel (meet
+// sheet, In The Water, On Deck, live results) responds the same way: a plain
+// tap does the row's usual thing; swiping right part-way across the row
+// opens the DQ/NS quick picker, and swiping (most of) the way across opens
+// the full popover — notes and everything else. Distance is measured as a
+// fraction of the row's own width, not a fixed pixel count, so "half way"
+// and "fully across" mean the same thing on a wide meet-sheet row and a
+// narrow On Deck card. A swipe is an unambiguous gesture (it requires
+// deliberate horizontal movement a tap never has), so unlike a double-tap
+// there's nothing to disambiguate — no wait-and-see delay needed, taps stay
+// at zero latency. Tracks the pointerdown start point (which bubbles
+// harmlessly) and resolves the gesture on click, so nested controls that
+// already call stopPropagation() on click (time inputs, split boxes) keep
+// working exactly as before.
+function useRowGesture({ onTap, onSwipeHalf, onSwipeFull }) {
   const start = useRef(null);
-  const pendingTimer = useRef(null);
-  const lastClickAt = useRef(0);
   const onPointerDown = (e) => { start.current = { x: e.clientX, y: e.clientY }; };
   const onClick = (e) => {
     const s = start.current; start.current = null;
     const dx = s ? e.clientX - s.x : 0, dy = s ? e.clientY - s.y : 0;
     const el = e.currentTarget;
-    if (onSwipeRight && dx > 60 && Math.abs(dy) < 40) { onSwipeRight(el); return; }
-    if (!onDoubleTap) { onTap && onTap(el); return; }
-    const now = Date.now();
-    if (pendingTimer.current && now - lastClickAt.current < 320) {
-      clearTimeout(pendingTimer.current); pendingTimer.current = null;
-      onDoubleTap(el);
-      return;
+    if (dx > 0 && Math.abs(dy) < 40) {
+      const w = el.getBoundingClientRect().width || 1;
+      const frac = dx / w;
+      if (frac >= 0.7 && onSwipeFull) { onSwipeFull(el); return; }
+      if (frac >= 0.25 && onSwipeHalf) { onSwipeHalf(el); return; }
     }
-    lastClickAt.current = now;
-    pendingTimer.current = setTimeout(() => { pendingTimer.current = null; onTap && onTap(el); }, 320);
+    onTap && onTap(el);
   };
   return { onPointerDown, onClick };
 }
@@ -3505,10 +3508,7 @@ function LaneRow({ lane, d, place, rec, active, mine, selected, onSelect, onTime
   const req = active && eventName && mine ? requiredTapsFor(eventName) : 1;
   const tapsLeft = active && clockActive && !off && !d.time;
   const setSplit = (i, v) => { const ns2 = [...(d.splits || [])]; ns2[i] = v; onSplitEdit && onSplitEdit(ns2); };
-  // While the clock's running and a tap still records a lap, double-tap has
-  // to stay off — every tap needs to land at zero latency, and the row isn't
-  // covered by anything a second tap could miss anyway.
-  const gesture = useRowGesture({ onTap: (el) => (tapsLeft ? onLap && onLap() : onSelect(el)), onSwipeRight: onSwipeDq, onDoubleTap: mine && !tapsLeft ? onNotesTap : undefined });
+  const gesture = useRowGesture({ onTap: (el) => (tapsLeft ? onLap && onLap() : onSelect(el)), onSwipeHalf: onSwipeDq, onSwipeFull: onNotesTap });
   return (
     <div className={"md-lane clickable" + (selected ? " sel" : "") + (dq ? " dq" : "") + (off ? " scr" : "") + (mine ? " mine" : "")} {...gesture}>
       <span className="md-lanenum">{lane.lane}</span>
@@ -3539,7 +3539,7 @@ function SheetRow({ lane, d, place, rec, mine, selected, onSelect, onSwimmer, le
   const fs = toSeconds(d.time), ss = toSeconds(lane.seed);
   const delta = !isNaN(fs) && !isNaN(ss) ? fs - ss : null; // negative = improved
   const deltaStr = delta === null ? null : (delta < 0 ? "−" : "+") + Math.abs(delta).toFixed(2);
-  const gesture = useRowGesture({ onTap: onSelect, onSwipeRight: onSwipeDq, onDoubleTap: mine ? onNotesTap : undefined });
+  const gesture = useRowGesture({ onTap: onSelect, onSwipeHalf: onSwipeDq, onSwipeFull: onNotesTap });
   return (
     <div className={"md-srowwrap" + (lane.swimmers ? " relay" : "")}>
       <button className={"md-swim" + (dq ? " dq" : "") + (off ? " scr" : "") + (selected ? " sel" : "") + (mine ? " mine" : "")} {...gesture}>
@@ -3742,9 +3742,14 @@ function SwimmerProfilePopover({ name, team, seasonMeets, liveMeet, rect, depth,
 // Every entry currently flagged DQ with the reason still pending — feeds the
 // non-blocking Finalize DQs panel so reasons can be filled in once the paper
 // DQ slips come in, without having to remember which lane/heat each was in.
-function pendingDqList(events, data) {
+// `team`, when given, restricts the list to that team's own DQs — used for
+// the finalize review, since an opposing swimmer's DQ is just a scoring flag
+// the coach marks and moves on from; they'll never have (or need) an
+// official reason code the way a DQ on the coach's own team does.
+function pendingDqList(events, data, team) {
   const out = [];
   events.forEach((ev, evIdx) => ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => {
+    if (team && l.team !== team) return;
     const id = entryId(evIdx, htIdx, l.lane), d = data[id] || {};
     if (!isPendingDq(d)) return;
     const pend = (d.dqs || []).find((q) => q.code === PEND_DQ_CODE);
