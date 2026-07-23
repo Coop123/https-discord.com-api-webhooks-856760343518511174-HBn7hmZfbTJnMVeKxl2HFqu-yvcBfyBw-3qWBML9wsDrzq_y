@@ -1273,7 +1273,7 @@ function swimsForMeet(name, team, meet) {
 function computeSwimmerProfile(name, team, seasonMeets, liveMeet) {
   const sorted = [...(seasonMeets || [])].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
   const notes = [], dqs = [], improvements = [], splits = [];
-  let totalPts = 0, improveSum = 0, improveN = 0;
+  let totalPts = 0, improveSum = 0, improveN = 0, age;
   sorted.forEach((m) => { const table = m.mode === "champs" ? CHAMPS : DUAL; const tt = m.mode === "timetrial"; const data = m.data || {};
     // Same whole-meet gate as computeSeason/computePower: points only count
     // once every event is finished; notes/DQs/splits/improvements below stay
@@ -1283,6 +1283,7 @@ function computeSwimmerProfile(name, team, seasonMeets, liveMeet) {
       const placeOf = {}; if (!tt && pointsOk) rankedEvent(ev, ei, data, null).forEach((e, i) => (placeOf[e.id] = i + 1));
       ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => {
         if (l.swimmers) { l.swimmers.forEach((s, leg) => { if (s.name !== name || l.team !== team) return;
+          if (s.age) age = s.age;
           const id = entryId(ei, hi, l.lane) + "#" + leg; const d = data[id] || {};
           if (d.notes) notes.push({ note: d.notes, ev: shortEvent(ev.name), meet: m.meetName, date: m.date });
           (d.dqs || []).forEach((q) => dqs.push({ ...q, ev: shortEvent(ev.name), meet: m.meetName, date: m.date }));
@@ -1292,6 +1293,7 @@ function computeSwimmerProfile(name, team, seasonMeets, liveMeet) {
           if (sp) splits.push({ split: sp, leg: leg + 1, stroke: /medley/i.test(ev.name) ? (MEDLEY_LEGS[leg] || "Free") : "Free", ev: shortEvent(ev.name), meet: m.meetName, date: m.date });
         }); return; }
         if (l.name !== name || l.team !== team) return;
+        if (l.age) age = l.age;
         const id = entryId(ei, hi, l.lane); const d = data[id] || {};
         if (d.notes) notes.push({ note: d.notes, ev: shortEvent(ev.name), meet: m.meetName, date: m.date });
         (d.dqs || []).forEach((q) => dqs.push({ ...q, ev: shortEvent(ev.name), meet: m.meetName, date: m.date }));
@@ -1303,10 +1305,16 @@ function computeSwimmerProfile(name, team, seasonMeets, liveMeet) {
       }));
     });
   });
+  // The live/currently-loaded meet is the most recent age on record — scan it
+  // last so it wins over whatever the season history has (kids age up).
+  if (liveMeet) (liveMeet.events || []).forEach((ev) => ev.heats.forEach((ht) => ht.lanes.forEach((l) => {
+    if (l.swimmers) { l.swimmers.forEach((s) => { if (s.name === name && l.team === team && s.age) age = s.age; }); return; }
+    if (l.name === name && l.team === team && l.age) age = l.age;
+  })));
   improvements.sort((a, b) => b.drop - a.drop);
   const lastMeet = sorted[sorted.length - 1];
   return {
-    notes: notes.reverse(), dqs: dqs.reverse(), improvements: improvements.slice(0, 5), splits: splits.reverse(),
+    age, notes: notes.reverse(), dqs: dqs.reverse(), improvements: improvements.slice(0, 5), splits: splits.reverse(),
     improvePct: improveN ? Math.round((improveSum / improveN) * 1000) / 10 : 0, totalPts,
     lastMeet, lastMeetSwims: lastMeet ? swimsForMeet(name, team, lastMeet) : [],
     upcomingSwims: liveMeet ? swimsForMeet(name, team, liveMeet) : [],
@@ -1431,7 +1439,7 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet, initialProfile }) {
       <div className="md-leaguepage" role="dialog">
         <div className="md-lgtopbar"><button className="md-lgback" onClick={() => (sel ? setProfile(null) : onClose())}>{sel ? `← ${TEAM_NAME[profile.team] || profile.team}` : "← MeetDeck"}</button><button className="md-x sm" onClick={onClose}>✕</button></div>
         <div className="md-lgbanner" style={{ background: `linear-gradient(135deg, ${teamColor(profile.team)}, #0f2036)` }}>
-          <div className="md-lgbannerteam">{profile.name}</div>
+          <div className="md-lgbannerteam">{profile.name}{prof.age ? <em className="md-lgbannerage">({prof.age})</em> : null}</div>
           <div className="md-lgbannerstats">
             <div className="md-lgstat"><b>{prof.totalPts}</b><span>season points</span></div>
             <div className="md-lgstat"><b>{prof.improvePct}%</b><span>avg improvement</span></div>
@@ -1643,7 +1651,7 @@ function ProjectionBox({ p, stroke, pct }) {
   );
 }
 
-function CompareBoard({ people, slots, projections, stroke, pct, onAssign, onSwap, onRemove, onProfile }) {
+function CompareBoard({ people, slots, projections, stroke, pct, onAssign, onSwap, onRemove, onProfile, winPanel }) {
   const dragRef = useRef(null);
   const [overSlot, setOverSlot] = useState(null);
   const [draggingKey, setDraggingKey] = useState(null);
@@ -1705,12 +1713,15 @@ function CompareBoard({ people, slots, projections, stroke, pct, onAssign, onSwa
   };
   return (
     <div className="md-cmpboard">
-      <div className="md-cmpslots">
-        {slots.map((s, i) => (
-          <div key={i} data-slot-idx={i} className={"md-cmpslot" + (overSlot === i ? " over" : "") + (selected ? " selectable" : "")}>
-            {s ? <>{chip(s, "slot", i)}<ProjectionBox p={projections[i]} stroke={stroke} pct={pct} /><button className="md-cmpslotremove" onClick={() => onRemove(i)}>✕ remove</button></> : <span className="md-cmpslotempty" onClick={() => { if (selected) { doAssign(selected, i); setSelected(null); } }}>Drop swimmer {i + 1} here</span>}
-          </div>
-        ))}
+      <div className="md-cmpslotscol">
+        <div className="md-cmpslots">
+          {slots.map((s, i) => (
+            <div key={i} data-slot-idx={i} className={"md-cmpslot" + (overSlot === i ? " over" : "") + (selected ? " selectable" : "")}>
+              {s ? <>{chip(s, "slot", i)}<ProjectionBox p={projections[i]} stroke={stroke} pct={pct} /><button className="md-cmpslotremove" onClick={() => onRemove(i)}>✕ remove</button></> : <span className="md-cmpslotempty" onClick={() => { if (selected) { doAssign(selected, i); setSelected(null); } }}>Drop swimmer {i + 1} here</span>}
+            </div>
+          ))}
+        </div>
+        {winPanel}
       </div>
       <div className="md-cmpbank">
         <div className="md-cmpbankfilters">
@@ -1793,6 +1804,22 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam, mod
   const domain = filled.length ? { min: Math.min(...filled.map((p) => p.best)), max: Math.max(...filled.map((p) => p.conservative)) } : null;
   const pct = (t) => domain ? Math.min(100, Math.max(0, ((t - domain.min) / (domain.max - domain.min || 1)) * 100)) : 0;
   const fastest = filled.length ? [...filled].sort((a, b) => a.likely - b.likely)[0] : null;
+  // In Complex mode this renders in the open space under the 4 slots (left
+  // column) instead of full-width below the whole board — the bank stays
+  // put on the right, so slots+probability and the bank fit side by side
+  // without the modal growing taller than the screen.
+  const winPanel = filled.length >= 2 ? (
+    <div className={"md-cmpwin" + (mode === "complex" ? " inboard" : "")}>
+      <div className="md-cmpwintitle">🏁 Win probability{fastest ? <> — projected fastest <b style={{ color: teamColor(fastest.team) }}>{fastest.name}</b> ({fmtT(fastest.likely)})</> : null}</div>
+      {[...filled].sort((a, b) => (winProb[simKey(b)] || 0) - (winProb[simKey(a)] || 0)).map((p, i) => (
+        <div key={simKey(p)} className={"md-cmpwinrow" + (i === 0 ? " top" : "")}>
+          <span className="md-cmpwinname" style={{ color: teamColor(p.team) }}>{p.name} <em>{p.team}</em></span>
+          <div className="md-cmpwinbar"><div className="md-cmpwinfill" style={{ width: ((winProb[simKey(p)] || 0) * 100).toFixed(0) + "%", background: teamColor(p.team) }} /></div>
+          <span className="md-cmpwinpct">{((winProb[simKey(p)] || 0) * 100).toFixed(0)}%</span>
+        </div>
+      ))}
+    </div>
+  ) : null;
 
   return (
     <div className="md-scrim" onClick={onClose}>
@@ -1803,28 +1830,17 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam, mod
           <button className="md-cmpmodebtn" onClick={toggleMode}>{mode === "complex" ? "Simple" : "Complex"}</button>
         </div>
         {mode === "complex" ? (
-          <CompareBoard people={people} slots={slots} projections={projections} stroke={stroke} pct={pct} onAssign={assign} onSwap={swapSlots} onRemove={removeSlot} onProfile={openProfile} />
+          <CompareBoard people={people} slots={slots} projections={projections} stroke={stroke} pct={pct} onAssign={assign} onSwap={swapSlots} onRemove={removeSlot} onProfile={openProfile} winPanel={winPanel} />
         ) : (
           <div className="md-cmpsimplewrap">
             <SimplePicker idx={0} people={people} slot={slots[0]} proj={projections[0]} stroke={stroke} pct={pct} onAssign={(p) => (p ? assign(0, p) : removeSlot(0))} onRemove={() => removeSlot(0)} />
             <SimplePicker idx={1} people={people} slot={slots[1]} proj={projections[1]} stroke={stroke} pct={pct} onAssign={(p) => (p ? assign(1, p) : removeSlot(1))} onRemove={() => removeSlot(1)} />
           </div>
         )}
-        {/* Every swimmer's win probability lives together at the bottom,
-            not scattered next to each name — same layout whether they got
-            here via the drag-drop bank (Complex) or the dropdowns (Simple). */}
-        {filled.length >= 2 && (
-          <div className="md-cmpwin">
-            <div className="md-cmpwintitle">🏁 Win probability{fastest ? <> — projected fastest <b style={{ color: teamColor(fastest.team) }}>{fastest.name}</b> ({fmtT(fastest.likely)})</> : null}</div>
-            {[...filled].sort((a, b) => (winProb[simKey(b)] || 0) - (winProb[simKey(a)] || 0)).map((p, i) => (
-              <div key={simKey(p)} className={"md-cmpwinrow" + (i === 0 ? " top" : "")}>
-                <span className="md-cmpwinname" style={{ color: teamColor(p.team) }}>{p.name} <em>{p.team}</em></span>
-                <div className="md-cmpwinbar"><div className="md-cmpwinfill" style={{ width: ((winProb[simKey(p)] || 0) * 100).toFixed(0) + "%", background: teamColor(p.team) }} /></div>
-                <span className="md-cmpwinpct">{((winProb[simKey(p)] || 0) * 100).toFixed(0)}%</span>
-              </div>
-            ))}
-          </div>
-        )}
+        {/* Simple mode has no bank taking up the right side, so its win
+            probability panel stays full-width below the two picker cards
+            (Complex mode's copy renders inside CompareBoard instead). */}
+        {mode === "simple" && winPanel}
         <div className="md-mfoot"><button className="md-apply" onClick={onClose}>Done</button></div>
       </div>
       {profilePop && (
@@ -2991,6 +3007,15 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
   {
+    version: "2.0.1",
+    date: "2026-07-23",
+    title: "Swimmer age on profile, comparison layout fit",
+    notes: [
+      "Swimmer profile (quick-look popover and the full page) now shows age next to the name.",
+      "Swimmer comparison Complex mode: win probability now sits in the open space under the 4 slots instead of a separate block below — the bank stays put, so slots+probability and the bank fit side by side on screen.",
+    ],
+  },
+  {
     version: "2.0.0",
     date: "2026-07-23",
     title: "Meet Mode / Result Mode",
@@ -3805,7 +3830,7 @@ function SwimmerProfilePopover({ name, team, seasonMeets, liveMeet, rect, depth,
   return (
     <div ref={ref} className="md-profilepov" style={{ top: pos.top, left: pos.left }} role="dialog">
       <div className="md-agepovhead">
-        <span>{onOpenLeague ? <button type="button" className="md-povnamelink" onClick={() => onOpenLeague(name, team)}>{name}</button> : name} <em style={{ color: teamColor(team) }}>{team}</em></span>
+        <span>{onOpenLeague ? <button type="button" className="md-povnamelink" onClick={() => onOpenLeague(name, team)}>{name}</button> : name}{prof.age ? <em className="md-povage">({prof.age})</em> : null} <em style={{ color: teamColor(team) }}>{team}</em></span>
         <button className="md-x sm" onClick={onClose}>✕</button>
       </div>
       <div className="md-profilestats">
@@ -4202,6 +4227,7 @@ html, body, #root { height: 100%; }
 .md-agepov { position:fixed; z-index:61; width:270px; max-height:60vh; overflow-y:auto; background:#fff; border-radius:14px; box-shadow:0 24px 60px -14px rgba(6,14,28,.55); border:1px solid var(--sline); padding:10px; }
 .md-agepovhead { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; font-weight:800; font-size:13.5px; }
 .md-agepovhead em { font-style:normal; font-size:11px; font-weight:800; margin-left:4px; }
+.md-povage { color:#94a3b8; }
 .md-agepovlist { display:flex; flex-direction:column; gap:2px; }
 .md-agepovrow { display:flex; align-items:center; gap:8px; padding:6px 7px; border-radius:8px; border:none; background:none; text-align:left; font-size:13px; font-weight:700; cursor:pointer; color:var(--sink); width:100%; }
 .md-agepovrow:hover { background:#f1f5f9; }
@@ -4433,7 +4459,8 @@ html, body, #root { height: 100%; }
 .md-cmpradio input[type=checkbox] { appearance:none; -webkit-appearance:none; width:16px; height:16px; margin:0; border-radius:50%; border:2px solid #94a3b8; cursor:pointer; }
 .md-cmpradio input[type=checkbox]:checked { background:#2563eb; border-color:#2563eb; box-shadow:inset 0 0 0 3px #fff; }
 .md-cmpboard { display:flex; gap:16px; padding:0 18px 12px; align-items:flex-start; }
-.md-cmpslots { flex:1 1 55%; min-width:0; display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.md-cmpslotscol { flex:1 1 55%; min-width:0; display:flex; flex-direction:column; gap:12px; }
+.md-cmpslots { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 .md-cmpslot { min-height:60px; border:2px dashed var(--sline); border-radius:10px; padding:8px; display:flex; flex-direction:column; align-items:flex-start; justify-content:flex-start; gap:4px; transition:border-color .1s; }
 .md-cmpslot:has(.md-cmpslotempty) { justify-content:center; }
 .md-cmpslot.over { border-color:#0e7490; background:#ecfeff; }
@@ -4457,6 +4484,8 @@ html, body, #root { height: 100%; }
 .md-cmprate { font-size:11px; color:#64748b; margin-top:6px; }
 .md-prevempty.sm { font-size:11px; padding-top:6px; border-top:1px solid var(--sline); margin-top:2px; width:100%; }
 .md-cmpwin { margin:0 18px 12px; padding:12px 14px; background:#f0fdfa; border:1px solid #99f6e4; border-radius:10px; }
+.md-cmpwin.inboard { margin:0; }
+.md-cmpwin.inboard .md-cmpwinrow { grid-template-columns:1.3fr 1fr auto; gap:6px; }
 .md-cmpwintitle { font-size:13px; font-weight:800; color:#0f2036; margin-bottom:8px; }
 .md-cmpwinrow { display:grid; grid-template-columns:1fr 2fr auto; align-items:center; gap:10px; padding:4px 0; }
 .md-cmpwinname { font-size:12.5px; font-weight:700; color:var(--sink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -4487,6 +4516,7 @@ html, body, #root { height: 100%; }
 .md-lgsub { font-size:13.5px; color:#64748b; margin:4px 0 0; }
 .md-lgbanner { padding:28px 24px; color:#fff; display:flex; flex-direction:column; gap:14px; }
 .md-lgbannerteam { font-size:28px; font-weight:900; }
+.md-lgbannerage { font-style:normal; font-size:16px; font-weight:700; color:rgba(255,255,255,.65); margin-left:8px; }
 .md-lgbannerstats { display:flex; gap:28px; }
 .md-lgstat { display:flex; flex-direction:column; }
 .md-lgstat b { font-size:22px; font-weight:900; }
