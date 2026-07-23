@@ -129,7 +129,7 @@ function requiredTapsFor(name) {
   return 1;
 }
 
-function eventList(ev, evIdx, data) { const out = []; ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { const id = entryId(evIdx, htIdx, l.lane); const d = data[id] || {}; out.push({ id, l, secs: toSeconds(d.time), dq: hasDq(d), scr: isScratched(d), ns: isNoShow(d), time: d.time }); })); return out; }
+function eventList(ev, evIdx, data) { const out = []; ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { const id = entryId(evIdx, htIdx, l.lane); const d = data[id] || {}; out.push({ id, l, secs: toSeconds(d.time), dq: hasDq(d), pend: isPendingDq(d), scr: isScratched(d), ns: isNoShow(d), time: d.time }); })); return out; }
 // Everyone in the given age group across the whole season, ranked by Power —
 // used by the popover's age-chip drill-down so "open the ranks for age
 // group" shows an actual leaderboard rather than just a name list.
@@ -146,16 +146,29 @@ function computeHeatPlaces(ev, evIdx, htIdx, data, filter) {
   if (isRelayEvent(ev.name)) list = list.filter((e) => e.l.relay === "A");
   list.sort((a, b) => a.secs - b.secs); const map = {}; list.forEach((e, i) => (map[e.id] = i + 1)); return map;
 }
+// Scoreboard/standings points — an event's points only land once that WHOLE
+// event (every heat) is finished, so the scoreboard doesn't creep up heat by
+// heat; times/swims still count as soon as they're entered (that part stays live).
 function computeScores(events, data, mode, filter) { const table = mode === "champs" ? CHAMPS : DUAL; const pts = {}, swims = {}, imp = {}; if (mode === "timetrial") return { pts, swims, imp };
   events.forEach((ev, evIdx) => { const relay = isRelayEvent(ev.name);
-    rankedEvent(ev, evIdx, data, filter).forEach((e, i) => { const p = (table[i+1] || 0) * (relay ? 2 : 1); pts[e.l.team] = (pts[e.l.team] || 0) + p; });
+    if (eventFinished(ev, evIdx, data, filter)) rankedEvent(ev, evIdx, data, filter).forEach((e, i) => { const p = (table[i+1] || 0) * (relay ? 2 : 1); pts[e.l.team] = (pts[e.l.team] || 0) + p; });
     eventList(ev, evIdx, data).forEach((e) => { if (isNaN(e.secs)) return; if (filter && !filter.includes(e.l.team)) return; swims[e.l.team] = (swims[e.l.team] || 0) + 1; if (!e.dq && isBest(data[e.id]?.time, e.l.seed)) imp[e.l.team] = (imp[e.l.team] || 0) + 1; }); });
   return { pts, swims, imp }; }
-// An event is finished when every entered lane has a time or a DQ (and ≥1 time).
+// An event is finished when every entered lane has a time or a CONFIRMED DQ
+// (and ≥1 time) — a pending DQ (tapped but no reason picked yet) doesn't
+// count as resolved, so the event (and anything scored from it) stays "in
+// progress" until the coach either confirms a reason or clears it.
 function eventFinished(ev, evIdx, data, filter) {
   let entered = 0, done = 0, timed = 0;
-  eventList(ev, evIdx, data).forEach((e) => { if (filter && !filter.includes(e.l.team)) return; entered++; if (!isNaN(e.secs) || e.dq) done++; if (!isNaN(e.secs)) timed++; });
+  eventList(ev, evIdx, data).forEach((e) => { if (filter && !filter.includes(e.l.team)) return; entered++; if (!isNaN(e.secs) || (e.dq && !e.pend)) done++; if (!isNaN(e.secs)) timed++; });
   return entered > 0 && timed > 0 && done === entered;
+}
+// Whole meet — every event finished (see eventFinished above). Used to gate
+// Team stats / League / swimmer-profile points so a live in-progress meet's
+// score doesn't ripple into season-wide numbers before it's actually over
+// (notes/DQs/splits still surface live regardless — see rankMeets).
+function meetFullyFinished(events, data) {
+  return events.length > 0 && events.every((ev, evIdx) => eventFinished(ev, evIdx, data));
 }
 
 const AGE_GROUPS = ["6u", "7-8", "9-10", "11-12", "13-14", "15-18"];
@@ -165,10 +178,12 @@ const MIXED_GROUPS = ["6u", "15-18"]; // relays here are 2 boys + 2 girls
 function evGender(name) { const n = (name || "").toLowerCase(); if (n.startsWith("girls") || n.includes(" girls")) return "Girls"; if (n.startsWith("boys") || n.includes(" boys")) return "Boys"; return "Mixed"; }
 function evAgeGroup(name) { const n = name || ""; if (/6\s*&\s*under|\b6u\b/i.test(n)) return "6u"; const m = n.match(/(\d+)\s*-\s*(\d+)/); if (m) return `${m[1]}-${m[2]}`; return "Open"; }
 
-// Points earned by each individual swimmer (relays credited to the relay entry).
+// Points earned by each individual swimmer (relays credited to the relay
+// entry). Same per-event completion gate as computeScores — an event's
+// points don't show on Meet stats until every heat of it is done.
 function computeSwimmerPoints(events, data, mode, filter) {
   const table = mode === "champs" ? CHAMPS : DUAL; const out = {};
-  events.forEach((ev, evIdx) => { if (isRelayEvent(ev.name)) return;
+  events.forEach((ev, evIdx) => { if (isRelayEvent(ev.name)) return; if (!eventFinished(ev, evIdx, data, filter)) return;
     rankedEvent(ev, evIdx, data, filter).forEach((e, i) => {
       const pts = (table[i + 1] || 0); if (!pts) return;
       const key = e.l.name + "|" + e.l.team;
@@ -673,17 +688,22 @@ function completedStrokeProgression(list) {
 }
 
 // Aggregate saved meets → per-swimmer season totals. Time-trial meets earn no
-// points and are excluded from the improvement percentage.
+// points and are excluded from the improvement percentage. A meet only
+// contributes POINTS once it's fully finished (every event, every heat) —
+// this only actually matters for the live in-progress meet merged in by the
+// caller, since a saved meet is by definition already over; swims/improved
+// (both time-based, not points) still count as soon as times are entered.
 function computeSeason(meets) {
   const sw = {};
   meets.forEach((m) => { const tt = m.mode === "timetrial"; const table = m.mode === "champs" ? CHAMPS : DUAL; const data = m.data || {};
+    const pointsOk = meetFullyFinished(m.events || [], data);
     (m.events || []).forEach((ev, evIdx) => { if (isRelayEvent(ev.name)) return;
-      const placeOf = {}; if (!tt) rankedEvent(ev, evIdx, data, null).forEach((e, i) => (placeOf[e.id] = i + 1));
+      const placeOf = {}; if (!tt && pointsOk) rankedEvent(ev, evIdx, data, null).forEach((e, i) => (placeOf[e.id] = i + 1));
       ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { const id = entryId(evIdx, htIdx, l.lane), d = data[id] || {};
         const key = l.name + "|" + l.team; (sw[key] || (sw[key] = { name: l.name, team: l.team, age: l.age, gender: evGender(ev.name), pts: 0, swims: 0, improved: 0, meets: 0 }));
         if (l.age) sw[key].age = l.age;
         const fs = toSeconds(d.time), ss = toSeconds(l.seed);
-        if (!tt) { const p = placeOf[id]; if (p) sw[key].pts += (table[p] || 0); if (!isNaN(fs)) { sw[key].swims++; if (!isNaN(ss) && fs < ss) sw[key].improved++; } }
+        if (!tt) { if (pointsOk) { const p = placeOf[id]; if (p) sw[key].pts += (table[p] || 0); } if (!isNaN(fs)) { sw[key].swims++; if (!isNaN(ss) && fs < ss) sw[key].improved++; } }
       }));
     });
   });
@@ -1105,11 +1125,14 @@ function computeImpRate(name, team, meets) {
 function computePower(meets, filter) {
   const sw = {}, bestByEv = {};
   meets.forEach((m) => { const table = m.mode === "champs" ? CHAMPS : DUAL; const tt = m.mode === "timetrial"; const data = m.data || {};
+    // Points only count once the WHOLE meet is finished (see computeSeason);
+    // speed (from times/seeds) and improvement rate still update live.
+    const pointsOk = meetFullyFinished(m.events || [], data);
     (m.events || []).forEach((ev, ei) => { if (isRelayEvent(ev.name)) return;
       const g = evGender(ev.name), ag = evAgeGroup(ev.name), cat = categorize(ev.name);
       if (filter) { if (filter.gender && filter.gender !== "All" && g !== filter.gender) return; if (filter.ageGroup && filter.ageGroup !== "All" && ag !== filter.ageGroup) return; if (filter.stroke && filter.stroke !== "All" && cat !== filter.stroke) return; }
       const ekey = g + "|" + ag + "|" + cat;
-      const placeOf = {}; if (!tt) rankedEvent(ev, ei, data, null).forEach((e, i) => (placeOf[e.id] = i + 1));
+      const placeOf = {}; if (!tt && pointsOk) rankedEvent(ev, ei, data, null).forEach((e, i) => (placeOf[e.id] = i + 1));
       ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => { const id = entryId(ei, hi, l.lane); const d = data[id] || {}; const t = toSeconds(d.time); const s = isNaN(t) ? toSeconds(l.seed) : t; if (isNaN(s)) return; const key = l.name + "|" + l.team;
         // Individual events are always Girls- or Boys-only, but guard anyway
         // so a swimmer's own gender tick can never come out as "Mixed" (that
@@ -1117,7 +1140,7 @@ function computePower(meets, filter) {
         (sw[key] || (sw[key] = { name: l.name, team: l.team, age: l.age, gender: g === "Mixed" ? undefined : g, events: {}, pts: 0, improveSum: 0, improveN: 0 }));
         if (l.age) sw[key].age = l.age; sw[key].events[ekey] = Math.min(sw[key].events[ekey] ?? Infinity, s);
         (bestByEv[ekey] || (bestByEv[ekey] = {})); if (bestByEv[ekey][key] === undefined || s < bestByEv[ekey][key]) bestByEv[ekey][key] = s;
-        if (!tt) { const p = placeOf[id]; if (p) sw[key].pts += (table[p] || 0); }
+        if (!tt && pointsOk) { const p = placeOf[id]; if (p) sw[key].pts += (table[p] || 0); }
         const fs = toSeconds(d.time), ss = toSeconds(l.seed);
         if (!isNaN(fs) && !isNaN(ss) && ss > 0) { sw[key].improveSum += (ss - fs) / ss; sw[key].improveN++; }
       })); });
@@ -1142,10 +1165,14 @@ function topKidScore(s, maxPts) {
   const ptsScore = maxPts ? (s.pts / maxPts) * 100 : 0;
   return Math.round(0.5 * improveScore + 0.5 * ptsScore);
 }
-// Team standings (W-L, points for/against, margins) from dual meets.
+// Team standings (W-L, points for/against, margins) from dual meets. A
+// meet only counts toward the record once it's fully finished — otherwise
+// an in-progress dual's provisional W/L could flip back and forth as heats
+// come in, which has no place in a season standings table.
 function computeStandings(meets) {
   const rec = {};
   meets.forEach((m) => { if (m.mode !== "dual" || !m.hostTeam || !m.awayTeam) return;
+    if (!meetFullyFinished(m.events || [], m.data || {})) return;
     const scores = computeScores(m.events || [], m.data || {}, "dual", [m.hostTeam, m.awayTeam]);
     const hs = scores.pts[m.hostTeam] || 0, as = scores.pts[m.awayTeam] || 0;
     [[m.hostTeam, hs, as], [m.awayTeam, as, hs]].forEach(([t, pf, pa]) => { (rec[t] || (rec[t] = { team: t, w: 0, l: 0, tie: 0, pf: 0, pa: 0, meets: [] }));
@@ -1179,8 +1206,12 @@ function computeSwimmerProfile(name, team, seasonMeets, liveMeet) {
   const notes = [], dqs = [], improvements = [], splits = [];
   let totalPts = 0, improveSum = 0, improveN = 0;
   sorted.forEach((m) => { const table = m.mode === "champs" ? CHAMPS : DUAL; const tt = m.mode === "timetrial"; const data = m.data || {};
+    // Same whole-meet gate as computeSeason/computePower: points only count
+    // once every event is finished; notes/DQs/splits/improvements below stay
+    // live regardless (they aren't "points").
+    const pointsOk = meetFullyFinished(m.events || [], data);
     (m.events || []).forEach((ev, ei) => {
-      const placeOf = {}; if (!tt) rankedEvent(ev, ei, data, null).forEach((e, i) => (placeOf[e.id] = i + 1));
+      const placeOf = {}; if (!tt && pointsOk) rankedEvent(ev, ei, data, null).forEach((e, i) => (placeOf[e.id] = i + 1));
       ev.heats.forEach((ht, hi) => ht.lanes.forEach((l) => {
         if (l.swimmers) { l.swimmers.forEach((s, leg) => { if (s.name !== name || l.team !== team) return;
           const id = entryId(ei, hi, l.lane) + "#" + leg; const d = data[id] || {};
@@ -2356,12 +2387,12 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
       let idx = []; try { const r = await STORE.get(INDEX_KEY); if (r && r.value) idx = JSON.parse(r.value); } catch (e) {}
       idx = idx.filter((x) => x.meetName !== meetName || x.date !== date); idx.push({ id, meetName, mode, date });
       await STORE.set(INDEX_KEY, JSON.stringify(idx)); flash("Saved to season ✓"); } catch (e) { flash("Saved (storage limit — kept for this session)"); } };
-  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
+  const loadMeet = (snap) => { setEvents(snap.events || []); setData(snap.data || {}); setRecords(snap.records || {}); if (snap.meetName) setMeetName(snap.meetName); if (snap.date) setMeetDate(snap.date); if (snap.mode) setMode(snap.mode); if (snap.homeTeam) setHomeTeam(snap.homeTeam); if (snap.hostTeam) setHostTeam(snap.hostTeam); if (snap.awayTeam) setAwayTeam(snap.awayTeam); if (snap.dualLanes) setDualLanes(snap.dualLanes); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setHeatPtr(0); setModal(null); flash("Loaded " + (snap.meetName || "meet")); };
   const deleteMeet = async (id) => { if (STORE) { try { await STORE.delete(id); } catch (e) {} try { const r = await STORE.get(INDEX_KEY); if (r && r.value) await STORE.set(INDEX_KEY, JSON.stringify(JSON.parse(r.value).filter((x) => x.id !== id))); } catch (e) {} } setSeasonMeets((a) => a.filter((m) => m.id !== id)); flash("Meet removed"); };
   const clearData = async () => { if (typeof window !== "undefined" && window.confirm && !window.confirm("Clear all saved meets and reset the board? This can't be undone.")) return;
     if (STORE) { try { const r = await STORE.get(INDEX_KEY); if (r && r.value) for (const it of JSON.parse(r.value)) { try { await STORE.delete(it.id); } catch (e) {} } } catch (e) {}
       try { await STORE.delete(INDEX_KEY); } catch (e) {} try { await STORE.delete(CUR_KEY); } catch (e) {} }
-    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); setHeatPtr(4); setModal(null); flash("Data cleared"); };
+    setSeasonMeets([]); setEvents(SEED_EVENTS); setRecords(INITIAL_RECORDS); setData(INITIAL_DATA); setMeetDate(new Date().toISOString().slice(0, 10)); setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {}; setHeatPtr(4); setModal(null); flash("Data cleared"); };
   const toggleTag = (id, key) => { const tags = { ...get(id).tags }; tags[key] ? delete tags[key] : (tags[key] = true); update(id, { tags }); };
   const toggleDqCode = (id, group, code, reason, swimmer) => { let dqs = [...(get(id).dqs || [])]; const i = dqs.findIndex((q) => q.code === code); if (i >= 0) dqs.splice(i, 1); else { dqs = dqs.filter((q) => q.code !== PEND_DQ_CODE); dqs.push({ code, reason, group, ...(swimmer ? { swimmer } : {}) }); } update(id, { dqs }); };
   // Quick tap: flag a DQ instantly with the reason left pending (toggles off
@@ -2495,7 +2526,13 @@ function MeetDeckBoard({ session, isAdmin, onLogout, accounts, onSaveAccounts })
   };
   // Return to Meet setup (not closing out entirely) so lanes-per-heat — which
   // depends on the just-imported roster — can be adjusted right away.
-  const applyImport = (parsed) => { setEvents(parsed.events); setRecords(Object.fromEntries(parsed.events.filter((e) => e.record).map((e) => [e.id, e.record]))); if (parsed.myTeam) setHomeTeam(parsed.myTeam); setData({}); setPop(null); setHeatPtr(0); setRelaySwapHistory({}); setModal("meetsetup"); };
+  const applyImport = (parsed) => { setEvents(parsed.events); setRecords(Object.fromEntries(parsed.events.filter((e) => e.record).map((e) => [e.id, e.record]))); if (parsed.myTeam) setHomeTeam(parsed.myTeam); setData({}); setPop(null); setHeatPtr(0);
+    // A freshly imported program's first heat must wait for the coach to
+    // press Start — without this, a stale startedHeats/autoEnded entry left
+    // over from whatever heat happened to share the same evIdx:htIdx key in
+    // the previous meet would make the new first heat look already running.
+    setStartedHeats({}); autoEnded.current = {}; seenIncomplete.current = {};
+    setRelaySwapHistory({}); setModal("meetsetup"); };
   const scrollToEvent = (evId) => { const el = evRefs.current[evId]; if (el && sheetRef.current) sheetRef.current.scrollTo({ top: el.offsetTop - 8, behavior: "smooth" }); };
   const jumpToCurrent = () => scrollToEvent(current?.evId);
   // Jump the whole board (heat pointer) to the first heat of an event by index,
