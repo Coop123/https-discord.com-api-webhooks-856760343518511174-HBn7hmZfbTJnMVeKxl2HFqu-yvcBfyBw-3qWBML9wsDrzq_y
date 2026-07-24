@@ -2309,11 +2309,14 @@ function parseResults(text) {
     const times = [...cleanLine.matchAll(/\b\d{1,2}:\d{2}\.\d{2}\b|\b\d{1,3}\.\d{2}\b/g)].map((x) => x[0]);
     if (!times.length && !isDq) continue;
     const seed = times.length > 1 ? times[0] : "NT", final = times.length ? times[times.length - 1] : "";
+    // A DQ'd swim's place column prints as a run of dashes ("---") instead of
+    // a number — accept that in place of the leading place digits, same as
+    // the numbered case, so a DQ row isn't dropped for failing to match here.
     if (!ev.relay) {
-      const nm = cleanLine.match(/^\*?\d+\s+([A-Za-zÀ-ÿ'’.\-]+,\s*[A-Za-zÀ-ÿ'’.\- ]+?)\s+(\d{1,2})\s+([A-Za-z].*)$/);
+      const nm = cleanLine.match(/^\*?(?:\d+|-+)\s+([A-Za-zÀ-ÿ'’.\-]+,\s*[A-Za-zÀ-ÿ'’.\- ]+?)\s+(\d{1,2})\s+([A-Za-z].*)$/);
       if (nm) ev.heats[0].lanes.push({ name: nm[1].trim(), age: +nm[2], team: normTeam(nm[3]), seed, finalTime: final, lane: ev.heats[0].lanes.length + 1, ...(isDq ? { dq: true } : {}) });
     } else {
-      const rm = cleanLine.match(/^\*?\d+\s+(.+?)\s+([A-Z])\b/);
+      const rm = cleanLine.match(/^\*?(?:\d+|-+)\s+(.+?)\s+([A-Z])\b/);
       if (rm) ev.heats[0].lanes.push({ name: normTeam(rm[1]) + " " + rm[2], team: normTeam(rm[1]), relay: rm[2], seed, finalTime: final, lane: ev.heats[0].lanes.length + 1, swimmers: [], ...(isDq ? { dq: true } : {}) });
     }
   }
@@ -2976,6 +2979,12 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
   // moves the board.
   const goToEventIdx = (evIdx) => { if (evIdx < 0 || evIdx >= events.length) return; const fi = flatHeats.findIndex((f) => f.evIdx === evIdx); if (fi < 0) return; setHeatPtr(fi); scrollToEvent(events[evIdx].id); };
   const scrollOnlyToEventIdx = (evIdx) => { if (evIdx < 0 || evIdx >= events.length) return; scrollToEvent(events[evIdx].id); };
+  // Scoreboard-only event jump — the mirror image of scrollOnlyToEventIdx:
+  // moves the live current-race pointer to the target event's first heat
+  // without touching the meet sheet's scroll position, so the board can be
+  // stepped event-by-event independently of wherever the sheet happens to
+  // be scrolled.
+  const goToEventIdxOnly = (evIdx) => { if (evIdx < 0 || evIdx >= events.length) return; const fi = flatHeats.findIndex((f) => f.evIdx === evIdx); if (fi < 0) return; setHeatPtr(fi); };
   const [jumpQuery, setJumpQuery] = useState("");
   const [goMenuOpen, setGoMenuOpen] = useState(false);
   const resolveQueryIdx = () => { const q = jumpQuery.trim(); if (!q) return null;
@@ -3093,9 +3102,13 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
               {isStarted
                 ? <button className="md-endrace" onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1} aria-label="Stop / end race" />
                 : <button className="md-startsq" onClick={startRace} aria-label="Start race">▶</button>}
-              <span className="md-pnav"><button onClick={() => setHeatPtr((p) => Math.max(0, p - 1))} disabled={ptr === 0}>‹</button>
+              <span className="md-pnav">
+                <button onClick={() => goToEventIdxOnly(current.evIdx - 1)} disabled={current.evIdx <= 0} title="Previous event — scoreboard only">«</button>
+                <button onClick={() => setHeatPtr((p) => Math.max(0, p - 1))} disabled={ptr === 0} title="Previous heat">‹</button>
                 <span className="md-pmeta">#{events[current.evIdx].num} {shortEvent(current?.eventName)} · H{current?.num}</span>
-                <button onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1}>›</button></span>
+                <button onClick={() => setHeatPtr((p) => Math.min(flatHeats.length - 1, p + 1))} disabled={ptr >= flatHeats.length - 1} title="Next heat">›</button>
+                <button onClick={() => goToEventIdxOnly(current.evIdx + 1)} disabled={current.evIdx >= events.length - 1} title="Next event — scoreboard only">»</button>
+              </span>
             </div>
             {isStarted ? (<>
               <div className="md-lanes">
@@ -3271,6 +3284,15 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
 // redesign or workflow change. Add every new release as a fresh entry at
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
+  {
+    version: "2.5.0",
+    date: "2026-07-24",
+    title: "Fix DQs from real results PDFs, scoreboard event arrows",
+    notes: [
+      "Results-sheet DQs were still going missing on real Hy-Tek results exports — a DQ'd swim's place prints as \"---\" instead of a number, which the importer's row-matching required and silently dropped the whole row. Fixed for both individual swims and relays; verified against a full 55-page real results PDF (47 for 47 DQs caught).",
+      "Added « / » arrows next to the In The Water heat arrows to step the live scoreboard forward and back by event, independent of wherever the meet sheet is scrolled.",
+    ],
+  },
   {
     version: "2.4.3",
     date: "2026-07-24",
