@@ -3269,6 +3269,15 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
   {
+    version: "2.4.2",
+    date: "2026-07-24",
+    title: "Fix place badges overflowing on Results, bigger Settings",
+    notes: [
+      "Fixed place badges (1st, 2nd… 10th+) on the Results tab overflowing their pill and running into the swimmer's name in a large field.",
+      "Settings is now bigger and reflowed (paired-up buttons, a combined password row) so a lot less scrolling is needed to see everything.",
+    ],
+  },
+  {
     version: "2.4.1",
     date: "2026-07-23",
     title: "Fix menu/gate overlap and stats header ghosting",
@@ -4016,30 +4025,38 @@ function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onR
         <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">⚙ Settings</div><div className="md-msub">Setup, team, saved meets &amp; data · v{APP_VERSION}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
           {session && <div className="md-acctrow"><span>Signed in as <b>{session.username}</b> · {ROLE_LABEL[role] || role}{isOwner ? " · Owner" : ""}</span><button className="md-mbtn sm" onClick={onLogout}>Log out</button></div>}
-          {(isAdmin || isOwner) && <button className="md-mbtn" onClick={onManageAccounts}>👤 Manage accounts</button>}
-          {canViewUpdateLog && <button className="md-mbtn" onClick={onUpdateLog}>📋 Update log</button>}
+          {((isAdmin || isOwner) || canViewUpdateLog) && <div className="md-mbtngrid">
+            {(isAdmin || isOwner) && <button className="md-mbtn" onClick={onManageAccounts}>👤 Manage accounts</button>}
+            {canViewUpdateLog && <button className="md-mbtn" onClick={onUpdateLog}>📋 Update log</button>}
+          </div>}
           <div className="md-mdiv" />
           <div className="md-menutitle">Change my password</div>
-          <label className="md-mrow">Current password<input type="password" value={curPw} onChange={(e) => setCurPw(e.target.value)} /></label>
-          <label className="md-mrow">New password<input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} /></label>
-          <label className="md-mrow">Confirm new password<input type="password" value={newPw2} onChange={(e) => setNewPw2(e.target.value)} /></label>
+          <div className="md-rangerow">
+            <label className="md-mrow">Current password<input type="password" value={curPw} onChange={(e) => setCurPw(e.target.value)} /></label>
+            <label className="md-mrow">New password<input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} /></label>
+          </div>
+          <div className="md-rangerow">
+            <label className="md-mrow">Confirm new password<input type="password" value={newPw2} onChange={(e) => setNewPw2(e.target.value)} /></label>
+            <button className="md-mbtn sm" onClick={changeMyPassword}>Change password</button>
+          </div>
           {pwMsg.text && <div className={pwMsg.ok ? "md-pwok" : "md-loginerr"}>{pwMsg.text}</div>}
-          <button className="md-mbtn sm" onClick={changeMyPassword}>Change password</button>
           <div className="md-mdiv" />
           {isLeadTier ? (<>
-            <button className="md-mbtn" onClick={onMeetSetup}>Meet set up</button>
-            <button className="md-mbtn" onClick={onResults}>Results</button>
-            {onManageRoster && <button className="md-mbtn" onClick={onManageRoster}>🏊 Manage roster</button>}
+            <div className="md-mbtngrid">
+              <button className="md-mbtn" onClick={onMeetSetup}>Meet set up</button>
+              <button className="md-mbtn" onClick={onResults}>Results</button>
+              {onManageRoster && <button className="md-mbtn" onClick={onManageRoster}>🏊 Manage roster</button>}
+            </div>
             <div className="md-mdiv" />
           </>) : <div className="md-msub" style={{ marginBottom: 10 }}>Meet setup, results import, and the roster are managed by a Head Coach, Team Manager, Owner, or Admin.</div>}
           <label className="md-mrow">Main team (yours)<select value={homeTeam} onChange={(e) => setHomeTeam(e.target.value)}>{teams.map((t) => <option key={t} value={t}>{TEAM_NAME[t] || t}</option>)}</select></label>
-          {isLeadTier && <>
+          {isLeadTier && <div className="md-mbtngrid">
             <button className="md-mbtn" onClick={onSave}>💾 Save this meet to season</button>
             <button className="md-mbtn primary" onClick={onExport}>Export to Google Sheets</button>
             {meetFinalized
               ? <button className="md-mbtn" onClick={onReopenMeet}>🔓 Reopen meet for editing</button>
               : <button className="md-mbtn" onClick={onReviewFinalize}>🚩 Review &amp; finalize meet</button>}
-          </>}
+          </div>}
           <div className="md-mdiv" />
           {isLeadTier && (
             <>
@@ -4607,6 +4624,8 @@ html, body, #root { height: 100%; }
 .md-mrow input:disabled { background:#f1f5f9; color:#94a3b8; }
 .md-mdiv { height:1px; background:var(--sline); margin:2px 0; }
 .md-mbtn { text-align:left; padding:10px 12px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:13.5px; cursor:pointer; color:var(--sink); }
+.md-mbtngrid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.md-mbtngrid .md-mbtn { text-align:center; }
 .md-mbtn.danger { border-color:#fecaca; color:#b42318; } .md-mbtn.danger:hover { background:#fef2f2; }
 .md-mbtn:hover { background:#f1f5f9; } .md-mbtn.primary { background:var(--cyan); border-color:var(--cyan); color:#062a33; }
 .md-mbtn.sm { padding:6px 10px; font-size:12px; }
@@ -4648,7 +4667,7 @@ html, body, #root { height: 100%; }
 .md-finalresults { flex:1 1 auto; min-height:0; overflow-y:auto; padding:6px 4px; }
 .md-finalresultrow { display:flex; align-items:center; gap:8px; padding:7px 10px; border:none; border-bottom:1px solid rgba(255,255,255,.06); background:none; width:100%; text-align:left; font:inherit; cursor:pointer; color:var(--text); font-size:12.5px; touch-action:pan-y; }
 .md-finalresultrow.mine { background:rgba(250,204,21,.08); }
-.md-finalresultrow .md-place { width:20px; flex:none; color:var(--muted); font-weight:800; font-variant-numeric:tabular-nums; }
+.md-finalresultrow .md-place { min-width:26px; width:auto; flex:none; text-align:center; color:var(--muted); font-weight:800; font-variant-numeric:tabular-nums; }
 .md-finalresultrow .md-resname { flex:1; min-width:0; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .md-finalresultrow .md-resteam { flex:none; font-size:10.5px; font-weight:800; }
 .md-finalresultrow .md-respts { flex:none; font-weight:800; color:var(--cyan); font-variant-numeric:tabular-nums; }
@@ -5234,8 +5253,8 @@ html, body, #root { height: 100%; }
 
 .md-gear { position:fixed; left:16px; bottom:16px; z-index:35; width:52px; height:52px; border-radius:50%; border:none; background:#0f2036; color:#fff; font-size:24px; cursor:pointer; box-shadow:0 10px 30px -8px rgba(0,0,0,.6); }
 .md-gear:hover { background:#1a3050; }
-.md-settings { width:min(560px,96vw); }
-.md-setbody { padding:16px 18px; overflow-y:auto; display:flex; flex-direction:column; gap:10px; }
+.md-settings { width:min(640px,96vw); max-height:min(96vh,860px); }
+.md-setbody { padding:14px 18px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; }
 .md-fixed { font-size:13px; color:#94a3b8; font-weight:700; padding:8px 0; }
 .md-stepper { display:inline-flex; align-items:center; gap:2px; }
 .md-stepper button { width:38px; height:38px; border-radius:9px; border:1px solid var(--sline); background:#fff; font-size:20px; font-weight:800; color:#0f2036; cursor:pointer; }
