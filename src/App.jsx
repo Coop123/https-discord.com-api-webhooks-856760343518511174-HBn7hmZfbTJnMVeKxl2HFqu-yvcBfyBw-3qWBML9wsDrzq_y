@@ -429,7 +429,7 @@ function buildRelayLetter(meets, ageGroup, gender, relayType, excludeByTeam, let
   return builder(meets, ageGroup, gender, finalExclude);
 }
 // Merge an uploaded results sheet (final times by name+event) for chosen teams.
-function mergeResults(parsedEvents, targetEvents, teamsToApply, homeTeam) {
+function mergeResults(parsedEvents, targetEvents, teamsToApply) {
   const patch = {}; let matched = 0;
   const idx = {}; // "evnum|name" -> {evIdx, htIdx, lane, team}
   targetEvents.forEach((ev, evIdx) => ev.heats.forEach((ht, htIdx) => ht.lanes.forEach((l) => { idx[ev.num + "|" + l.name.toLowerCase()] = { evIdx, htIdx, lane: l.lane, team: l.team }; })));
@@ -437,15 +437,18 @@ function mergeResults(parsedEvents, targetEvents, teamsToApply, homeTeam) {
     const hit = idx[ev.num + "|" + l.name.toLowerCase()];
     if (!hit || (teamsToApply && !teamsToApply.includes(hit.team))) return;
     const id = entryId(hit.evIdx, hit.htIdx, hit.lane);
-    // DQ rows only get flagged for our own team — a pending DQ requiring the
-    // coach to pick the reason via the usual DQ button, same as a live tap.
+    // Any team's DQ row on the sheet gets flagged, same as resultsToMeet —
+    // the Finalize DQ review list already filters to just homeTeam's pending
+    // DQs (pendingDqList), so an opposing swimmer's flag here is purely a
+    // scoring marker and never shows up asking the coach for a reason.
     // A DQ'd swim can still have a recorded time on the sheet (the swim
     // happened, it just didn't count) — keep that time too instead of
     // discarding it, same as a DQ entered live with a time already typed in.
-    if (l.dq) { if (hit.team === homeTeam) {
+    if (l.dq) {
       const dqTime = l.finalTime || l.seed;
       patch[id] = { ...(patch[id] || {}), ...(!isNaN(toSeconds(dqTime)) ? { time: dqTime } : {}), dqs: [{ code: PEND_DQ_CODE, reason: "Reason pending — awaiting DQ slip", group: "Pending" }] }; matched++;
-    } return; }
+      return;
+    }
     if (toSeconds(l.finalTime || l.seed) && !isNaN(toSeconds(l.finalTime || l.seed))) {
       patch[id] = { ...(patch[id] || {}), time: l.finalTime || l.seed }; matched++;
     }
@@ -619,7 +622,7 @@ function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
   // and clears the paste box for the next sheet, staying right here.
   const [justAdded, setJustAdded] = useState(0);
   const parsed = useMemo(() => parseResults(text), [text]);
-  const { patch, matched } = useMemo(() => mergeResults(parsed, events, null, homeTeam), [parsed, events, homeTeam]);
+  const { patch, matched } = useMemo(() => mergeResults(parsed, events, null), [parsed, events]);
   const dqCount = useMemo(() => Object.values(patch).filter((p) => p.dqs).length, [patch]);
   const count = parsed.reduce((n, ev) => n + ev.heats[0].lanes.length, 0);
   // "Save as new meet": setup (name/date/type/lanes/teams) FIRST, same fields
@@ -668,8 +671,8 @@ function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
         ) : (
           <div className="md-impgrid">
             <textarea className="md-imparea" placeholder={"Paste results text…"} value={text} onChange={(e) => setText(e.target.value)} />
-            <div className="md-preview"><div className="md-prevtop"><span>{parsed.length} events · {count} results · <b>{matched}</b> merge onto loaded meet{dqCount ? <> · <b className="md-impdqnote">{dqCount} DQ{dqCount > 1 ? "s" : ""}</b> found for {homeTeam}</> : null}</span></div>
-              <div className="md-prevbody">{justAdded > 0 && <div className="md-impjustadded">✓ Added {justAdded} result{justAdded > 1 ? "s" : ""} — paste or upload the next sheet.</div>}<div className="md-prevempty">“Add one”/“Add multiple” fill finals onto the loaded program by event # + name. Any {homeTeam} row marked DQ on the sheet gets flagged as a pending DQ — pick the reason from the usual DQ button after merging — and keeps the time too if the sheet has one. “Save as new meet” sets up a fresh meet and builds it from results sheets alone.</div></div></div>
+            <div className="md-preview"><div className="md-prevtop"><span>{parsed.length} events · {count} results · <b>{matched}</b> merge onto loaded meet{dqCount ? <> · <b className="md-impdqnote">{dqCount} DQ{dqCount > 1 ? "s" : ""}</b> found</> : null}</span></div>
+              <div className="md-prevbody">{justAdded > 0 && <div className="md-impjustadded">✓ Added {justAdded} result{justAdded > 1 ? "s" : ""} — paste or upload the next sheet.</div>}<div className="md-prevempty">“Add one”/“Add multiple” fill finals onto the loaded program by event # + name. Any row marked DQ on the sheet — individual or relay, any team — gets flagged as a DQ and keeps the time too if the sheet has one; {homeTeam} DQs show up under Finalize meet waiting on a reason, other teams' are just a scoring flag. “Save as new meet” sets up a fresh meet and builds it from results sheets alone.</div></div></div>
           </div>
         )}
         <div className="md-mfoot">
@@ -2297,11 +2300,11 @@ function parseResults(text) {
     if (m && /(free|back|breast|fly|medley|relay|\bim\b)/i.test(line)) { ev = { num: m[1], name: m[2].replace(/\)+$/, "").trim(), relay: /relay/i.test(m[2]), heats: [{ num: 1, lanes: [] }] }; events.push(ev); continue; }
     if (!ev) continue;
     if (/^name age team|^team relay|vcsl record|hy-tek|valley cabana|^results|^\d{4} vcsl|meet -|belwood:/i.test(line)) continue;
-    // A DQ'd individual swim shows "DQ" in place of (or alongside) the finals
-    // time — strip it out before matching name/age/team so it doesn't get
-    // swallowed into the team token, but remember it so we can flag a
-    // pending DQ on merge (relay DQ rows aren't handled here).
-    const isDq = !ev.relay && /\bdq\b/i.test(line);
+    // A DQ'd swim (individual or relay) shows "DQ" in place of (or alongside)
+    // the finals time — strip it out before matching name/team so it doesn't
+    // get swallowed into the team token, but remember it so we can flag a
+    // pending DQ on merge/import.
+    const isDq = /\bdq\b/i.test(line);
     const cleanLine = isDq ? line.replace(/\bdq\b/gi, " ").replace(/\s+/g, " ").trim() : line;
     const times = [...cleanLine.matchAll(/\b\d{1,2}:\d{2}\.\d{2}\b|\b\d{1,3}\.\d{2}\b/g)].map((x) => x[0]);
     if (!times.length && !isDq) continue;
@@ -2310,8 +2313,8 @@ function parseResults(text) {
       const nm = cleanLine.match(/^\*?\d+\s+([A-Za-zÀ-ÿ'’.\-]+,\s*[A-Za-zÀ-ÿ'’.\- ]+?)\s+(\d{1,2})\s+([A-Za-z].*)$/);
       if (nm) ev.heats[0].lanes.push({ name: nm[1].trim(), age: +nm[2], team: normTeam(nm[3]), seed, finalTime: final, lane: ev.heats[0].lanes.length + 1, ...(isDq ? { dq: true } : {}) });
     } else {
-      const rm = line.match(/^\*?\d+\s+(.+?)\s+([A-Z])\b/);
-      if (rm) ev.heats[0].lanes.push({ name: normTeam(rm[1]) + " " + rm[2], team: normTeam(rm[1]), relay: rm[2], seed, finalTime: final, lane: ev.heats[0].lanes.length + 1, swimmers: [] });
+      const rm = cleanLine.match(/^\*?\d+\s+(.+?)\s+([A-Z])\b/);
+      if (rm) ev.heats[0].lanes.push({ name: normTeam(rm[1]) + " " + rm[2], team: normTeam(rm[1]), relay: rm[2], seed, finalTime: final, lane: ev.heats[0].lanes.length + 1, swimmers: [], ...(isDq ? { dq: true } : {}) });
     }
   }
   return events;
@@ -3268,6 +3271,15 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
 // redesign or workflow change. Add every new release as a fresh entry at
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
+  {
+    version: "2.4.3",
+    date: "2026-07-24",
+    title: "Fix Go-menu buttons, relay/opponent DQs from results sheets",
+    notes: [
+      "The \"Where should Go send this?\" menu's two buttons were unclickable — an invisible overlay meant to close the menu was sitting on top of them instead of behind them.",
+      "Results-sheet import now catches DQ on relay rows too (it only checked individual swims before) and flags any team's DQ, not just your own — an opposing DQ shows up as a scoring flag, your own team's still lands on the Finalize meet review list waiting for a reason.",
+    ],
+  },
   {
     version: "2.4.2",
     date: "2026-07-24",
@@ -4770,7 +4782,7 @@ html, body, #root { height: 100%; }
 .md-jump { display:inline-flex; align-items:center; gap:5px; background:var(--cyan); color:#062a33; border:none; border-radius:8px; padding:7px 12px; font-weight:800; font-size:12.5px; cursor:pointer; white-space:nowrap; }
 .md-jump:hover { background:#5fe3f5; }
 .md-jumpwrap { display:flex; align-items:center; gap:6px; position:relative; }
-.md-arrowpicker { position:absolute; top:calc(100% + 6px); right:0; z-index:31; width:230px; background:#fff; color:var(--sink); border-radius:12px; box-shadow:0 20px 50px -14px rgba(0,0,0,.5); padding:8px; display:flex; flex-direction:column; gap:6px; }
+.md-arrowpicker { position:absolute; top:calc(100% + 6px); right:0; z-index:53; width:230px; background:#fff; color:var(--sink); border-radius:12px; box-shadow:0 20px 50px -14px rgba(0,0,0,.5); padding:8px; display:flex; flex-direction:column; gap:6px; }
 .md-eventjump { display:flex; align-items:center; gap:2px; background:#fff; border:1px solid var(--sline); border-radius:8px; padding:2px; }
 .md-eventjump button { width:22px; height:24px; display:grid; place-items:center; border:none; background:transparent; border-radius:5px; font-size:10px; color:#475569; cursor:pointer; }
 .md-eventjump button:hover:not(:disabled) { background:#f1f5f9; color:#0e7490; }
