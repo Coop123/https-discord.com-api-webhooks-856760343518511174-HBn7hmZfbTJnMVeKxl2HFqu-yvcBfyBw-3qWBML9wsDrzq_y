@@ -2466,20 +2466,123 @@ const DEMO_DATA = {
   "0:1:7": { time: "24.30", dqs: [], tags: {}, notes: "" },
 };
 
-function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest, onLogout, accounts, onSaveAccounts }) {
-  // Every persisted key is namespaced under its own prefix when signed in as
-  // Test, so a Test login can never read or overwrite real team data (and
-  // vice versa) — same storage, fully separate rows.
-  const K = (base) => isTest ? base.replace(/^meetdeck:/, "meetdeck:test:") : base;
-  const [meetName, setMeetName] = useState(isTest ? "Demo Meet — Sandbox Data" : "2026 VCSL Championship");
+// Lands here right after login, before the meet-day board — the team's own
+// home base: what's coming up, what's already happened, and quick jumps
+// into the rest of the app. Add/edit lives right on the card (no separate
+// modal) since a schedule entry is just a date + opponent + note.
+function UpcomingMeetRow({ m, teams, onSave, onDelete }) {
+  // A freshly-added row has no opponent yet — open it straight into edit
+  // mode instead of showing a blank "Meet" summary the coach has to
+  // remember to go click into.
+  const [editing, setEditing] = useState(!m.opponent);
+  const [date, setDate] = useState(m.date); const [opponent, setOpponent] = useState(m.opponent); const [note, setNote] = useState(m.note || "");
+  if (!editing) return (
+    <div className="md-dashrow">
+      <div className="md-dashrowinfo">
+        <div className="md-dashrowdate">{m.date}</div>
+        <div className="md-dashrowmain">{m.opponent ? <>vs <b style={{ color: teamColor(m.opponent) }}>{TEAM_NAME[m.opponent] || m.opponent}</b></> : "Meet"}{m.note ? <em className="md-dashrownote"> · {m.note}</em> : null}</div>
+      </div>
+      {onSave && <button className="md-mbtn sm" onClick={() => setEditing(true)}>Edit</button>}
+      {onDelete && <button className="md-meetdel sm" onClick={onDelete} aria-label="Delete">🗑</button>}
+    </div>
+  );
+  return (
+    <div className="md-dashrow editing">
+      <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+      <select value={opponent} onChange={(e) => setOpponent(e.target.value)}>
+        <option value="">Opponent…</option>
+        {teams.map((t) => <option key={t.code} value={t.code}>{t.name}</option>)}
+      </select>
+      <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note (optional)" />
+      <button className="md-mbtn sm" onClick={() => { onSave({ ...m, date, opponent, note }); setEditing(false); }}>Save</button>
+    </div>
+  );
+}
+function TeamDashboard({ tenant, homeTeam, session, myRole, isLeadTier, onLogout, seasonMeets, roster, upcoming, onSaveUpcoming, hasMeetSheet, meetName, meetFinalized, onOpenBoard, onOpenModal }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const upcomingSorted = useMemo(() => [...(upcoming || [])].filter((m) => m.date >= today).sort((a, b) => a.date.localeCompare(b.date)), [upcoming, today]);
+  const pastSorted = useMemo(() => [...(seasonMeets || [])].sort((a, b) => (b.date || "").localeCompare(a.date || "")), [seasonMeets]);
+  const addUpcoming = () => onSaveUpcoming([...(upcoming || []), { id: "up" + Date.now(), date: today, opponent: "", note: "" }]);
+  const saveOne = (next) => onSaveUpcoming((upcoming || []).map((m) => m.id === next.id ? next : m));
+  const deleteOne = (id) => onSaveUpcoming((upcoming || []).filter((m) => m.id !== id));
+  return (
+    <div className="md-root md-dashwrap">
+      <div className="md-dashboard">
+        <header className="md-dashhead" style={{ background: `linear-gradient(135deg, ${teamColor(homeTeam)}, #0f2036)` }}>
+          <div className="md-logowrap"><span className="md-logo sm">≈</span></div>
+          <div className="md-dashheadtxt">
+            <div className="md-dashteamname">{TEAM_NAME[homeTeam] || homeTeam}</div>
+            <div className="md-dashsub">Signed in as <b>{session?.username}</b> · {ROLE_LABEL[myRole] || myRole}</div>
+          </div>
+          <button className="md-mbtn sm" onClick={onLogout}>Log out</button>
+        </header>
+
+        {hasMeetSheet && <div className="md-dashlive">
+          <span>🏊 {meetFinalized ? "Last meet" : "Meet in progress"}: <b>{meetName || "Untitled meet"}</b></span>
+          <button className="md-apply sm" onClick={onOpenBoard}>Open live board →</button>
+        </div>}
+        {!hasMeetSheet && <div className="md-dashlive empty">
+          <span>No meet loaded yet.</span>
+          {isLeadTier ? <button className="md-apply sm" onClick={() => onOpenModal("meetsetup")}>Set up a meet</button> : <button className="md-apply sm" onClick={onOpenBoard}>Open board →</button>}
+        </div>}
+
+        <div className="md-dashgrid">
+          <div className="md-dashcard">
+            <div className="md-dashcardhead"><span>📅 Upcoming meets</span>{isLeadTier && <button className="md-mbtn sm" onClick={addUpcoming}>+ Add</button>}</div>
+            {upcomingSorted.length ? upcomingSorted.map((m) => <UpcomingMeetRow key={m.id} m={m} teams={TEAMS.filter((t) => t.code !== homeTeam)} onSave={isLeadTier ? saveOne : null} onDelete={isLeadTier ? () => deleteOne(m.id) : null} />)
+              : <div className="md-prevempty">Nothing on the schedule yet.</div>}
+          </div>
+
+          <div className="md-dashcard">
+            <div className="md-dashcardhead"><span>🏁 Past meets</span><button className="md-mbtn sm" onClick={() => onOpenModal("season")}>Team stats</button></div>
+            {pastSorted.length ? pastSorted.slice(0, 8).map((m) => (
+              <div key={m.id} className="md-dashrow">
+                <div className="md-dashrowinfo">
+                  <div className="md-dashrowdate">{m.date}</div>
+                  <div className="md-dashrowmain">{m.meetName}<em className="md-dashrownote"> · {m.mode === "timetrial" ? "Time trials" : m.mode === "champs" ? "Champs" : "Dual"}</em></div>
+                </div>
+              </div>
+            )) : <div className="md-prevempty">No saved meets yet — they'll show up here once one's finalized or saved.</div>}
+          </div>
+        </div>
+
+        <div className="md-dashgrid">
+          <div className="md-dashcard stat"><div className="md-dashstatval">{roster?.length || 0}</div><div className="md-dashstatlabel">Swimmers on roster</div>
+            {isLeadTier && <button className="md-mbtn sm" onClick={() => onOpenModal("roster")}>Manage roster</button>}</div>
+          <div className="md-dashcard stat"><div className="md-dashstatval">{seasonMeets?.length || 0}</div><div className="md-dashstatlabel">Meets this season</div>
+            <button className="md-mbtn sm" onClick={() => onOpenModal("league")}>League standings</button></div>
+        </div>
+
+        <button className="md-apply lg" onClick={onOpenBoard}>Open live board →</button>
+      </div>
+    </div>
+  );
+}
+
+function MeetDeckBoard({ tenant, session, isAdmin, isOwner, isLeadTier, isAssist, isTest, onLogout, accounts, onSaveAccounts }) {
+  // Every persisted key is namespaced under its own team prefix (Belwood is
+  // the one exception — see accountsKeyFor), and Test logins get a further
+  // nested "test" segment within whichever team they belong to, so a Test
+  // login can never read or overwrite that team's real data (and vice
+  // versa) — same storage, fully separate rows.
+  const K = (base) => {
+    const suffix = base.replace(/^meetdeck:/, "");
+    const parts = ["meetdeck"];
+    if (tenant !== "BDST") parts.push(tenant.toLowerCase());
+    if (isTest) parts.push("test");
+    parts.push(suffix);
+    return parts.join(":");
+  };
+  const isSeededTeam = tenant === "BDST"; // the only tenant with baked-in demo events
+  const [meetName, setMeetName] = useState(isTest ? "Demo Meet — Sandbox Data" : isSeededTeam ? "2026 VCSL Championship" : "");
   const [meetDate, setMeetDate] = useState(new Date().toISOString().slice(0, 10));
-  const [events, setEvents] = useState(isTest ? DEMO_EVENTS : SEED_EVENTS);
-  const [records, setRecords] = useState(isTest ? DEMO_RECORDS : INITIAL_RECORDS);
-  const [data, setData] = useState(isTest ? DEMO_DATA : INITIAL_DATA);
-  const [heatPtr, setHeatPtr] = useState(4);
-  const [homeTeam, setHomeTeam] = useState("BDST");
-  const [hostTeam, setHostTeam] = useState("BDST");
-  const [awayTeam, setAwayTeam] = useState("OAK");
+  const [events, setEvents] = useState(isTest ? DEMO_EVENTS : isSeededTeam ? SEED_EVENTS : []);
+  const [records, setRecords] = useState(isTest ? DEMO_RECORDS : isSeededTeam ? INITIAL_RECORDS : {});
+  const [data, setData] = useState(isTest ? DEMO_DATA : isSeededTeam ? INITIAL_DATA : {});
+  const [heatPtr, setHeatPtr] = useState(isTest || isSeededTeam ? 4 : 0);
+  const [homeTeam, setHomeTeam] = useState(tenant || "BDST");
+  const [hostTeam, setHostTeam] = useState(tenant || "BDST");
+  const [awayTeam, setAwayTeam] = useState(TEAMS.find((t) => t.code !== tenant)?.code || "OAK");
   const [mode, setMode] = useState("champs");
   const [dualLanes, setDualLanes] = useState(6);
   const [dqTarget, setDqTarget] = useState(null);
@@ -2489,6 +2592,17 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
   const [scratchTarget, setScratchTarget] = useState(null);
   const [relayReplaceTarget, setRelayReplaceTarget] = useState(null);
   const [modal, setModal] = useState(null);
+  // Landing screen after login — the team dashboard, not straight into the
+  // live board, so "past meets / upcoming meets / other stuff" has a home
+  // that isn't crammed into the meet-day UI. "board" is the existing
+  // full MeetDeckBoard view, reached via the dashboard's own button.
+  const [screen, setScreen] = useState("dashboard");
+  const UPCOMING_KEY = "meetdeck:upcoming:v1";
+  const [upcoming, setUpcoming] = useState([]);
+  useEffect(() => { if (!STORE) return; let live = true; (async () => {
+    try { const r = await STORE.get(K(UPCOMING_KEY)); if (live && r && r.value) setUpcoming(JSON.parse(r.value)); } catch (e) {}
+  })(); return () => { live = false; }; }, []);
+  const saveUpcoming = (next) => { setUpcoming(next); if (STORE) STORE.set(K(UPCOMING_KEY), JSON.stringify(next)).catch(() => {}); };
   const myRole = findAccount(accounts || [], session?.username)?.role;
   const canViewUpdateLog = isAdmin || myRole === "test";
   // Show the "what's new" popup once per version bump — silently records
@@ -2559,13 +2673,19 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
   // Meet mode is always available once a program is loaded; Result mode
   // unlocks once the meet is over, a saved/finalized meet was loaded, or a
   // results sheet has been uploaded — even mid-meet.
-  const [viewMode, setViewMode] = useState("meet");
+  // Starting a brand-new team's board with no heat sheet loaded yet in
+  // "meet" would render the live left-column panels against an empty
+  // events array before any effect gets a chance to correct it — those
+  // panels assume there's always a current heat, so they'd crash on the
+  // very first paint. Result Mode's panels are already null-safe for an
+  // empty meet, so that's the one safe starting point here.
+  const [viewMode, setViewMode] = useState(isTest || isSeededTeam ? "meet" : "result");
   const [resultsUploaded, setResultsUploaded] = useState(false);
   // Whether the loaded meet actually has a real heat sheet/program (built via
   // Meet setup's roster import) as opposed to being assembled purely from a
   // pasted results sheet (Results -> Save as new meet). Meet Mode's live
   // board only makes sense with an actual heat sheet, so it's gated on this.
-  const [hasMeetSheet, setHasMeetSheet] = useState(true);
+  const [hasMeetSheet, setHasMeetSheet] = useState(isTest || isSeededTeam);
   const lanesPerHeat = dualLanes;
   const sheetRef = useRef(null);
   const evRefs = useRef({});
@@ -2659,7 +2779,11 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
   useEffect(() => { if (meetOver && !lastRacePrompted.current) { lastRacePrompted.current = true; setShowEndRacePrompt(true); } }, [meetOver]);
   // Result Mode is available once there's something to show results for.
   const canResultMode = meetOver || meetFinalized || resultsUploaded;
-  useEffect(() => { if (viewMode === "result" && !canResultMode) setViewMode("meet"); }, [viewMode, canResultMode]);
+  // Guarded on hasMeetSheet too — without it, this fights the effect below
+  // in a loop for a brand-new team with neither a heat sheet nor anything
+  // to show results for yet (both "meet" and "result" would keep bouncing
+  // off each other forever).
+  useEffect(() => { if (viewMode === "result" && !canResultMode && hasMeetSheet) setViewMode("meet"); }, [viewMode, canResultMode, hasMeetSheet]);
   // A meet built purely from a pasted results sheet (no real heat sheet) has
   // no live board worth showing — Meet Mode stays off-limits for it.
   useEffect(() => { if (viewMode === "meet" && !hasMeetSheet) setViewMode("result"); }, [viewMode, hasMeetSheet]);
@@ -3016,6 +3140,21 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
     return () => { ro.disconnect(); window.removeEventListener("resize", measure); };
   }, [showStartGate]);
 
+  if (screen === "dashboard") {
+    return (<>
+      <style>{CSS}</style>
+      <TeamDashboard tenant={tenant} homeTeam={homeTeam} session={session} myRole={myRole} isLeadTier={isLeadTier} onLogout={onLogout}
+        seasonMeets={seasonMeets} roster={roster} upcoming={upcoming} onSaveUpcoming={saveUpcoming}
+        hasMeetSheet={hasMeetSheet} meetName={meetName} meetFinalized={meetFinalized}
+        onOpenBoard={() => setScreen("board")} onOpenModal={(m) => setModal(m)} />
+      {modal === "meetsetup" && <MeetSetupModal onClose={() => setModal(null)} meetName={meetName} setMeetName={setMeetName} meetDate={meetDate} setMeetDate={setMeetDate} mode={mode} setMode={setMode} dualLanes={dualLanes} setDualLanes={setDualLanes} hostTeam={hostTeam} setHostTeam={setHostTeam} awayTeam={awayTeam} setAwayTeam={setAwayTeam} teams={teamsPresent} onImport={() => setModal("import")} />}
+      {modal === "import" && <ImportModal onClose={() => setModal(null)} onApply={applyImport} defaultTeam={homeTeam} />}
+      {modal === "roster" && isLeadTier && <RosterModal onClose={() => setModal(null)} roster={roster} onSave={saveRoster} teams={teamsPresent} defaultTeam={homeTeam} />}
+      {modal === "league" && <LeagueModal onClose={() => { setModal(null); setLeagueProfileTarget(null); }} meets={rankMeets} homeTeam={homeTeam} liveMeet={{ meetName, mode, events, data }} initialProfile={leagueProfileTarget} />}
+      {modal === "season" && <SeasonModal onClose={() => setModal(null)} homeTeam={homeTeam} meets={rankMeets} />}
+    </>);
+  }
+
   return (
     <div className="md-root">
       <div className="md-boardwrap">
@@ -3285,6 +3424,17 @@ function MeetDeckBoard({ session, isAdmin, isOwner, isLeadTier, isAssist, isTest
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
   {
+    version: "3.0.0",
+    date: "2026-07-29",
+    title: "Every VCSL team gets its own login and dashboard",
+    notes: [
+      "New team picker before login — start typing a team name (or just tap one from the list) for Belwood, Montevideo, Los Paseos, Almaden, Oaktree, or Silver Creek, then sign in with that team's own accounts.",
+      "Each team's accounts, roster, saved meets, and in-progress meet are now fully separate from every other team's — one team's coaches can never see or overwrite another's data. Belwood keeps all of its existing data exactly as it was.",
+      "Added a ready-to-use Head Coach login for every team (password 1234) so real coaches — or anyone trying the new team-login flow — have something to sign in with right away.",
+      "New team dashboard after login: upcoming meets (add/edit right on the card), past meets, roster size, season meet count, and quick links into meet setup, roster, and league standings — with a button into the full live board.",
+    ],
+  },
+  {
     version: "2.5.0",
     date: "2026-07-24",
     title: "Fix DQs from real results PDFs, scoreboard event arrows",
@@ -3474,7 +3624,13 @@ const CHANGELOG = [
 const APP_VERSION = CHANGELOG[0].version;
 const UPDATE_SEEN_KEY = "meetdeck:updateseen:v1";
 
-const ACCOUNTS_KEY = "meetdeck:accounts:v1";
+// Every real VCSL team runs its own tenant: its own accounts list and its
+// own storage namespace (see MeetDeckBoard's K()), so one team's coaches can
+// never see or overwrite another's data. Belwood is the exception on
+// purpose — it's the original single-tenant app this grew out of, so it
+// keeps the old unprefixed keys/accounts untouched rather than migrating
+// existing real data to a new namespace.
+const accountsKeyFor = (tenant) => tenant === "BDST" ? "meetdeck:accounts:v1" : `meetdeck:accounts:v1:${tenant}`;
 const SESSION_KEY = "meetdeck:session:v1";
 
 const SEASON_RANGE_KEY = "meetdeck:seasonrange:v1";
@@ -3526,43 +3682,67 @@ function seasonYearOf(dateStr, range) {
 const ROLE_LABEL = { admin: "Admin", test: "Test", assistCoach: "Assistant Coach", headCoach: "Head Coach", teamManager: "Team Manager" };
 const OWNER_ELIGIBLE_ROLES = ["headCoach", "teamManager"];
 const OWNER_CAP = 2;
-const DEFAULT_ACCOUNTS = [
+// Belwood keeps its original seed list untouched; every other team gets a
+// single ready-to-use Head Coach login (password 1234) so its real coaching
+// staff — or anyone trying out the team-login flow — has something to sign
+// in with right away, without an admin having to set one up first.
+const seedAccountsFor = (tenant) => tenant === "BDST" ? [
   { username: "Coach-Cooper", password: "123456", role: "admin" },
   // Dedicated test login — role "test" unlocks the full Update log (every
   // version, not just the latest) from Settings without needing admin, and
   // gets its own sandboxed demo meet instead of the real team's data.
   { username: "Test-Account", password: "test123", role: "test" },
+  { username: "Coach-Belwood", password: "1234", role: "headCoach" },
+] : [
+  { username: `Coach-${TEAM_NAME[tenant].replace(/\s+/g, "")}`, password: "1234", role: "headCoach" },
 ];
 const findAccount = (accounts, username) => accounts.find((a) => a.username.toLowerCase() === (username || "").trim().toLowerCase());
 const ownerCount = (accounts) => (accounts || []).filter((a) => a.owner).length;
 
-// Top-level: gates the board behind a login screen and owns the account list,
-// both kept in persistent storage so a page refresh on the iPad doesn't log
-// the coach back out or forget who else has an account.
+// Top-level: picks a team, gates that team's board behind its own login
+// screen, and owns that team's account list — all kept in persistent
+// storage so a page refresh on the iPad doesn't log the coach back out,
+// forget who else has an account, or lose track of which team they're on.
 export default function App() {
-  const [accounts, setAccounts] = useState(null); // null while loading
+  const [tenant, setTenant] = useState(null); // null = show the team picker
+  const [accounts, setAccounts] = useState(null);
   const [session, setSession] = useState(null);
   const [loginError, setLoginError] = useState("");
+  const [bootDone, setBootDone] = useState(false);
 
-  useEffect(() => { let live = true; (async () => {
-    let acc = DEFAULT_ACCOUNTS, sess = null;
+  const loadOrSeedAccounts = async (t) => {
+    let acc = seedAccountsFor(t);
     if (STORE) {
-      try { const r = await STORE.get(ACCOUNTS_KEY); if (r && r.value) acc = JSON.parse(r.value); else await STORE.set(ACCOUNTS_KEY, JSON.stringify(acc)); } catch (e) {}
-      try { const r = await STORE.get(SESSION_KEY); if (r && r.value) sess = JSON.parse(r.value); } catch (e) {}
+      try { const r = await STORE.get(accountsKeyFor(t)); if (r && r.value) acc = JSON.parse(r.value); else await STORE.set(accountsKeyFor(t), JSON.stringify(acc)); } catch (e) {}
     }
-    if (!live) return;
-    setAccounts(acc);
-    if (sess && findAccount(acc, sess.username)) setSession(sess);
+    return acc;
+  };
+
+  // A saved session carries its own tenant, so a returning device goes
+  // straight back to the right team's board — not just whichever team was
+  // last picked, and never another team's data.
+  useEffect(() => { let live = true; (async () => {
+    let sess = null;
+    if (STORE) { try { const r = await STORE.get(SESSION_KEY); if (r && r.value) sess = JSON.parse(r.value); } catch (e) {} }
+    if (live && sess && sess.tenant && sess.username) {
+      const acc = await loadOrSeedAccounts(sess.tenant);
+      if (!live) return;
+      if (findAccount(acc, sess.username)) { setTenant(sess.tenant); setAccounts(acc); setSession(sess); }
+    }
+    if (live) setBootDone(true);
   })(); return () => { live = false; }; }, []);
 
-  const saveAccounts = (next) => { setAccounts(next); if (STORE) STORE.set(ACCOUNTS_KEY, JSON.stringify(next)).catch(() => {}); };
+  const pickTeam = async (t) => { setLoginError(""); const acc = await loadOrSeedAccounts(t); setTenant(t); setAccounts(acc); };
+  const backToPicker = () => { setTenant(null); setAccounts(null); setSession(null); setLoginError(""); };
+
+  const saveAccounts = (next) => { setAccounts(next); if (STORE && tenant) STORE.set(accountsKeyFor(tenant), JSON.stringify(next)).catch(() => {}); };
   const login = (username, password) => {
     const acc = findAccount(accounts || [], username);
     if (!acc || acc.password !== password) { setLoginError("Incorrect username or password."); return; }
-    const sess = { username: acc.username };
+    const sess = { tenant, username: acc.username };
     setSession(sess); setLoginError(""); if (STORE) STORE.set(SESSION_KEY, JSON.stringify(sess)).catch(() => {});
   };
-  const logout = () => { setSession(null); if (STORE) STORE.delete(SESSION_KEY).catch(() => {}); };
+  const logout = () => { setSession(null); setTenant(null); setAccounts(null); if (STORE) STORE.delete(SESSION_KEY).catch(() => {}); };
   const myAccount = session ? findAccount(accounts || [], session.username) : null;
   const isAdmin = myAccount?.role === "admin";
   const isTest = myAccount?.role === "test";
@@ -3575,20 +3755,48 @@ export default function App() {
 
   return (<>
     <style>{CSS}</style>
-    {accounts === null ? null // brief flash while persisted state loads
-      : !session ? <LoginScreen onLogin={login} error={loginError} />
-      : <MeetDeckBoard session={session} isAdmin={isAdmin} isOwner={isOwner} isLeadTier={isLeadTier} isAssist={isAssist} isTest={isTest} onLogout={logout} accounts={accounts} onSaveAccounts={saveAccounts} />}
+    {!bootDone ? null // brief flash while persisted state loads
+      : !tenant ? <TeamPicker onPick={pickTeam} />
+      : !session ? <LoginScreen tenant={tenant} onLogin={login} onBack={backToPicker} error={loginError} />
+      : <MeetDeckBoard tenant={tenant} session={session} isAdmin={isAdmin} isOwner={isOwner} isLeadTier={isLeadTier} isAssist={isAssist} isTest={isTest} onLogout={logout} accounts={accounts} onSaveAccounts={saveAccounts} />}
   </>);
 }
 
-function LoginScreen({ onLogin, error }) {
+// "Type in the name, a menu comes out" — typing filters TEAMS live, and an
+// empty box already shows all six as a quick-pick menu, so there's always
+// something tappable without having to type a full name correctly.
+function TeamPicker({ onPick }) {
+  const [q, setQ] = useState("");
+  const filtered = TEAMS.filter((t) => t.name.toLowerCase().includes(q.trim().toLowerCase()));
+  return (
+    <div className="md-root md-loginwrap">
+      <div className="md-loginbox">
+        <div className="md-loginlogo">≈ MeetDeck</div>
+        <div className="md-loginsub">Which team's coaches are signing in?</div>
+        <label className="md-mrow">Team name<input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Start typing… e.g. Belwood" autoFocus autoCapitalize="none" autoCorrect="off" /></label>
+        <div className="md-teampicklist">
+          {filtered.length ? filtered.map((t) => (
+            <button key={t.code} className="md-teampickbtn" onClick={() => onPick(t.code)}>
+              <span className="md-teampickdot" style={{ background: teamColor(t.code) }} />
+              {t.name}
+            </button>
+          )) : <div className="md-prevempty">No team matches "{q}".</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LoginScreen({ tenant, onLogin, onBack, error }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const submit = (e) => { e.preventDefault(); onLogin(username, password); };
   return (
     <div className="md-root md-loginwrap">
       <form className="md-loginbox" onSubmit={submit}>
+        <button type="button" className="md-backlink" onClick={onBack}>‹ Not {TEAM_NAME[tenant]}?</button>
         <div className="md-loginlogo">≈ MeetDeck</div>
+        <div className="md-loginteam"><span className="md-teampickdot" style={{ background: teamColor(tenant) }} />{TEAM_NAME[tenant]}</div>
         <div className="md-loginsub">Sign in to load your team's meets &amp; season data.</div>
         <label className="md-mrow">Username<input value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" placeholder="username" /></label>
         <label className="md-mrow">Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
@@ -4642,6 +4850,39 @@ html, body, #root { height: 100%; }
 .md-loginlogo { font-size:22px; font-weight:800; }
 .md-loginsub { font-size:13px; color:#64748b; margin-bottom:4px; }
 .md-loginerr { font-size:12.5px; font-weight:700; color:var(--dq); }
+.md-backlink { align-self:flex-start; border:none; background:none; color:var(--muted); font-size:12.5px; font-weight:700; cursor:pointer; padding:0; margin-bottom:-4px; }
+.md-backlink:hover { color:var(--sink); }
+.md-loginteam { display:flex; align-items:center; gap:8px; font-size:16px; font-weight:800; margin-top:-6px; }
+.md-teampicklist { display:flex; flex-direction:column; gap:6px; max-height:280px; overflow-y:auto; }
+.md-teampickbtn { display:flex; align-items:center; gap:10px; padding:11px 14px; border-radius:11px; border:1px solid var(--sline); background:#fff; font-weight:700; font-size:14px; color:var(--sink); text-align:left; cursor:pointer; }
+.md-teampickbtn:hover { border-color:var(--cyan); background:#f8fdff; }
+.md-teampickdot { width:12px; height:12px; border-radius:50%; flex:none; }
+
+.md-dashwrap { display:block; overflow-y:auto; padding:20px; }
+.md-dashboard { max-width:720px; margin:0 auto; display:flex; flex-direction:column; gap:14px; padding-bottom:20px; }
+.md-dashhead { display:flex; align-items:center; gap:12px; padding:16px 18px; border-radius:16px; color:#fff; box-shadow:0 20px 50px -18px rgba(6,14,28,.5); }
+.md-dashhead .md-logo.sm { background:rgba(255,255,255,.18); color:#fff; }
+.md-dashheadtxt { flex:1; min-width:0; }
+.md-dashteamname { font-size:20px; font-weight:900; }
+.md-dashsub { font-size:12.5px; opacity:.85; margin-top:2px; }
+.md-dashlive { display:flex; align-items:center; justify-content:space-between; gap:10px; background:var(--card); border:1px solid var(--sline); border-radius:14px; padding:12px 16px; font-size:13.5px; font-weight:700; color:var(--sink); box-shadow:0 12px 30px -18px rgba(6,14,28,.3); }
+.md-dashlive.empty { color:#64748b; }
+.md-dashgrid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+@media (max-width:640px) { .md-dashgrid { grid-template-columns:1fr; } }
+.md-dashcard { background:var(--card); border:1px solid var(--sline); border-radius:14px; padding:14px 16px; display:flex; flex-direction:column; gap:8px; box-shadow:0 12px 30px -18px rgba(6,14,28,.3); }
+.md-dashcardhead { display:flex; align-items:center; justify-content:space-between; font-weight:800; font-size:13.5px; color:var(--sink); }
+.md-dashcard.stat { align-items:center; text-align:center; gap:4px; }
+.md-dashstatval { font-size:30px; font-weight:900; color:var(--sink); }
+.md-dashstatlabel { font-size:12px; color:#64748b; font-weight:700; margin-bottom:4px; }
+.md-dashrow { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 0; border-top:1px solid var(--sline); }
+.md-dashrow:first-of-type { border-top:none; }
+.md-dashrow.editing { flex-wrap:wrap; padding:8px 0; }
+.md-dashrow.editing input, .md-dashrow.editing select { padding:6px 8px; border:1px solid var(--sline); border-radius:7px; font-size:12.5px; }
+.md-dashrowinfo { min-width:0; }
+.md-dashrowdate { font-size:10.5px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:.05em; }
+.md-dashrowmain { font-size:13px; font-weight:700; color:var(--sink); }
+.md-dashrownote { font-style:normal; font-weight:600; color:#64748b; }
+.md-apply.lg { padding:14px 20px; font-size:15px; align-self:center; }
 .md-top { display:flex; align-items:center; gap:14px; padding:8px 14px; background:var(--ink); color:var(--text); border-bottom:1px solid var(--line); flex:none; }
 .md-logowrap { position:relative; flex:none; }
 .md-logo { width:40px; height:40px; display:grid; place-items:center; font-size:25px; color:var(--ink); background:var(--cyan); border:none; border-radius:11px; font-weight:800; cursor:pointer; }
