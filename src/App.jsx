@@ -3424,6 +3424,15 @@ function MeetDeckBoard({ tenant, session, isAdmin, isOwner, isLeadTier, isAssist
 // the TOP of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
   {
+    version: "3.0.1",
+    date: "2026-07-29",
+    title: "Fix login on devices that already had data before team logins",
+    notes: [
+      "A device that already had a Belwood login before every team got its own accounts list never picked up the new seeded logins (like Coach-Belwood) — missing seed accounts now get merged in instead of skipped.",
+      "A saved session from before this change had no team attached to it, so a returning Belwood coach was getting dropped back to the team picker instead of straight to their board — that now migrates automatically.",
+    ],
+  },
+  {
     version: "3.0.0",
     date: "2026-07-29",
     title: "Every VCSL team gets its own login and dashboard",
