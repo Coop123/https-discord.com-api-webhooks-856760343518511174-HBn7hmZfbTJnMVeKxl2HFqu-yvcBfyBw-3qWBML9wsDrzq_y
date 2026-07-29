@@ -3711,9 +3711,20 @@ export default function App() {
   const [bootDone, setBootDone] = useState(false);
 
   const loadOrSeedAccounts = async (t) => {
-    let acc = seedAccountsFor(t);
+    const seed = seedAccountsFor(t);
+    let acc = seed, existed = false, changed = false;
     if (STORE) {
-      try { const r = await STORE.get(accountsKeyFor(t)); if (r && r.value) acc = JSON.parse(r.value); else await STORE.set(accountsKeyFor(t), JSON.stringify(acc)); } catch (e) {}
+      try {
+        const r = await STORE.get(accountsKeyFor(t));
+        if (r && r.value) { acc = JSON.parse(r.value); existed = true; }
+      } catch (e) {}
+      // A device that already had an accounts list before a seed account was
+      // introduced (e.g. Belwood's original real accounts, from before every
+      // team got its own login) would otherwise never pick up the new seed
+      // login — merge in any seed account missing by username, without
+      // touching or reordering anything already there.
+      seed.forEach((s) => { if (!findAccount(acc, s.username)) { acc = [...acc, s]; changed = true; } });
+      if (!existed || changed) { try { await STORE.set(accountsKeyFor(t), JSON.stringify(acc)); } catch (e) {} }
     }
     return acc;
   };
@@ -3724,6 +3735,11 @@ export default function App() {
   useEffect(() => { let live = true; (async () => {
     let sess = null;
     if (STORE) { try { const r = await STORE.get(SESSION_KEY); if (r && r.value) sess = JSON.parse(r.value); } catch (e) {} }
+    // A session saved before every team got its own login has no tenant —
+    // Belwood was the only tenant that could have ever existed then, so
+    // treat it as one instead of dropping a returning Belwood coach back to
+    // the team picker.
+    if (sess && sess.username && !sess.tenant) sess = { ...sess, tenant: "BDST" };
     if (live && sess && sess.tenant && sess.username) {
       const acc = await loadOrSeedAccounts(sess.tenant);
       if (!live) return;
