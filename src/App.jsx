@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 
 // ===========================================================================
-// MeetDeck — poolside coaching board for VCSL meets.
+// MeetBuddy — poolside coaching board for VCSL meets.
 // Left (no page scroll): On deck → In the water → Previous (scrolls inside)
 // → Event results (top 6 dual / top 10 champs). Right: meet sheet scrolls,
 // with a Jump-to-current button. Tap any of your swimmers anywhere.
@@ -648,7 +648,7 @@ function ResultsModal({ onClose, events, homeTeam, onApply, onSaveNew }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">{form ? (setupDone ? "New meet — paste results" : "New meet set up") : "Import results sheet"}</div><div className="md-msub">{form ? (setupDone ? "Paste each heat sheet / results page — add as many as you need, then save." : "Name, date, type, teams & lanes — same as Meet setup.") : "Merge finals onto a loaded program, or save a whole new meet from results alone."}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">{form ? (setupDone ? "New meet — paste results" : "New meet set up") : "Import results sheet"}</div><div className="md-msub">{form ? (setupDone ? "Paste each heat sheet / results page — add as many as you need, then save." : "Name, date, type, teams & lanes — same as Meet setup.") : "Merge finals onto a loaded program, or save a whole new meet from results alone."}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         {(!form || setupDone) && <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy}</span></div>}
         {form ? (
           !setupDone ? (
@@ -733,7 +733,7 @@ function StatsModal({ onClose, events, data, mode, filter, homeTeam, teams, away
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className={"md-modal md-imp" + (compareOn && teamB ? " md-statscompare" : "")} onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Meet stats — {homeTeam}{compareOn && teamB ? ` vs ${teamB}` : ""}</div><div className="md-msub">{mode === "timetrial" ? "Time trials" : mode === "champs" ? "Champs" : "Dual"} · by age group · live</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Meet stats — {homeTeam}{compareOn && teamB ? ` vs ${teamB}` : ""}</div><div className="md-msub">{mode === "timetrial" ? "Time trials" : mode === "champs" ? "Champs" : "Dual"} · by age group · live</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         {otherTeams.length > 0 && (
           <div className="md-statscomparebar">
             <button className={"md-statsfilterbtn" + (compareOn ? " on" : "")} onClick={() => setCompareOn((o) => !o)}>⇄ Compare teams{compareOn ? " •" : ""}</button>
@@ -841,7 +841,7 @@ function SeasonModal({ onClose, homeTeam, meets }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp md-tsmodal" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Team stats</div><div className="md-msub">Across {savedCount} saved meet{savedCount === 1 ? "" : "s"}{liveIncluded ? " + this meet (live)" : ""} · season</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Team stats</div><div className="md-msub">Across {savedCount} saved meet{savedCount === 1 ? "" : "s"}{liveIncluded ? " + this meet (live)" : ""} · season</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-tsbanner" style={{ background: `linear-gradient(135deg, ${teamColor(homeTeam)}, #0f2036)` }}>
           <div className="md-tsbannertop">
             <div className="md-tsbannerteam">{TEAM_NAME[homeTeam] || homeTeam}</div>
@@ -1112,7 +1112,7 @@ function ParticipantsModal({ onClose, events, data, homeTeam, onOne, onAll, reve
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Scratches</div><div className="md-msub">Scratch a swimmer per event — relay legs included — or the whole meet. Any team.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Scratches</div><div className="md-msub">Scratch a swimmer per event — relay legs included — or the whole meet. Any team.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl"><label className="md-ctl">Team<select value={team} onChange={(e) => setTeam(e.target.value)}><option>All</option>{teams.map((t) => <option key={t}>{t}</option>)}</select></label><span className="md-lgcount">{rows.length} swimmers</span></div>
         <div className="md-lglist">
           {rows.map((p) => { const key = p.name + "|" + p.team, anyScr = p.entries.some((e) => e.scratched), allScr = p.entries.every((e) => e.scratched);
@@ -1256,7 +1256,7 @@ function RelayReplaceModal({ target, candidates, siblings, plan, planDelta, orig
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Replace {target.name}?</div><div className="md-msub">{shortEvent(target.eventName)} · {target.stroke || (candidates[0] && candidates[0].stroke) || (plan && plan.legs[0].stroke) || ""}{plan ? "" : " leg"} · {target.team}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Replace {target.name}?</div><div className="md-msub">{shortEvent(target.eventName)} · {target.stroke || (candidates[0] && candidates[0].stroke) || (plan && plan.legs[0].stroke) || ""}{plan ? "" : " leg"} · {target.team}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-scratchbtns">
           {plan ? (<>
             <div className="md-planlegs">
@@ -1545,7 +1545,7 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet, initialProfile }) {
     const prof = computeSwimmerProfile(profile.name, profile.team, meets, liveMeet);
     return (
       <div className="md-leaguepage" role="dialog">
-        <div className="md-lgtopbar"><button className="md-lgback" onClick={() => (sel ? setProfile(null) : onClose())}>{sel ? `← ${TEAM_NAME[profile.team] || profile.team}` : "← MeetDeck"}</button><button className="md-x sm" onClick={onClose}>✕</button></div>
+        <div className="md-lgtopbar"><button className="md-lgback" onClick={() => (sel ? setProfile(null) : onClose())}>{sel ? `← ${TEAM_NAME[profile.team] || profile.team}` : "← MeetBuddy"}</button><button className="md-x sm" onClick={onClose}>✕</button></div>
         <div className="md-lgbanner" style={{ background: `linear-gradient(135deg, ${teamColor(profile.team)}, #0f2036)` }}>
           <div className="md-lgbannerteam">{profile.name}{prof.age ? <em className="md-lgbannerage">({prof.age})</em> : null}</div>
           <div className="md-lgbannerstats">
@@ -1631,7 +1631,7 @@ function LeagueModal({ onClose, meets, homeTeam, liveMeet, initialProfile }) {
   }
   return (
     <div className="md-leaguepage" role="dialog">
-      <div className="md-lgtopbar"><button className="md-lgback" onClick={onClose}>← MeetDeck</button><button className="md-x sm" onClick={onClose}>✕</button></div>
+      <div className="md-lgtopbar"><button className="md-lgback" onClick={onClose}>← MeetBuddy</button><button className="md-x sm" onClick={onClose}>✕</button></div>
       <div className="md-lgheader">
         <h1 className="md-lgtitle">League standings</h1>
         <p className="md-lgsub">Across {meets.filter((m) => m.id).length} saved meet{meets.filter((m) => m.id).length === 1 ? "" : "s"}{meets.length > meets.filter((m) => m.id).length ? " + this meet (live)" : ""} · tap a team for the full profile</p>
@@ -1932,7 +1932,7 @@ function SwimmerCompareModal({ onClose, events, data, seasonMeets, homeTeam, mod
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp md-cmpmodal" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Swimmer comparison</div><div className="md-msub">{mode === "complex" ? "Drag up to 4 swimmers from the bank into the slots." : "Pick 2 swimmers by team, age and gender."} Projections use each swimmer's own improvement spread.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Swimmer comparison</div><div className="md-msub">{mode === "complex" ? "Drag up to 4 swimmers from the bank into the slots." : "Pick 2 swimmers by team, age and gender."} Projections use each swimmer's own improvement spread.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl">
           <label className="md-ctl">Stroke<select value={stroke} onChange={(e) => setStroke(e.target.value)}>{PROG_STROKES.map((s) => <option key={s}>{s}</option>)}</select></label>
           <button className="md-cmpmodebtn" onClick={toggleMode}>{mode === "complex" ? "Simple" : "Complex"}</button>
@@ -2262,7 +2262,7 @@ function RelayBuilderModal({ onClose, events, data, seasonMeets, homeTeam }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Relay builder — fastest {relayType.toLowerCase()} relay ({teamLetter} team)</div><div className="md-msub">Built from the whole season ({meets.length} meet{meets.length === 1 ? "" : "s"}) · check off teams to compare against · lock in a lineup to freeze it while comparing.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Relay builder — fastest {relayType.toLowerCase()} relay ({teamLetter} team)</div><div className="md-msub">Built from the whole season ({meets.length} meet{meets.length === 1 ? "" : "s"}) · check off teams to compare against · lock in a lineup to freeze it while comparing.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-rbctl">
           <div className="md-rbtabs">{["Free", "Medley"].map((t) => <button key={t} className={"md-rbtab" + (relayType === t ? " on" : "")} onClick={() => setRelayType(t)}>{t}</button>)}</div>
           <div className="md-rbtabs" title="B/C/D are built from whoever's left after the letter(s) before it">{RELAY_LETTERS.map((l) => <button key={l} className={"md-rbtab" + (teamLetter === l ? " on" : "")} onClick={() => setTeamLetter(l)}>{l} team</button>)}</div>
@@ -2559,7 +2559,7 @@ function TeamDashboard({ tenant, homeTeam, session, myRole, isLeadTier, onLogout
   );
 }
 
-function MeetDeckBoard({ tenant, session, isAdmin, isOwner, isLeadTier, isAssist, isTest, onLogout, accounts, onSaveAccounts }) {
+function MeetBuddyBoard({ tenant, session, isAdmin, isOwner, isLeadTier, isAssist, isTest, onLogout, accounts, onSaveAccounts }) {
   // Every persisted key is namespaced under its own team prefix (Belwood is
   // the one exception — see accountsKeyFor), and Test logins get a further
   // nested "test" segment within whichever team they belong to, so a Test
@@ -2595,7 +2595,7 @@ function MeetDeckBoard({ tenant, session, isAdmin, isOwner, isLeadTier, isAssist
   // Landing screen after login — the team dashboard, not straight into the
   // live board, so "past meets / upcoming meets / other stuff" has a home
   // that isn't crammed into the meet-day UI. "board" is the existing
-  // full MeetDeckBoard view, reached via the dashboard's own button.
+  // full MeetBuddyBoard view, reached via the dashboard's own button.
   const [screen, setScreen] = useState("dashboard");
   const UPCOMING_KEY = "meetdeck:upcoming:v1";
   const [upcoming, setUpcoming] = useState([]);
@@ -3389,7 +3389,7 @@ function MeetDeckBoard({ tenant, session, isAdmin, isOwner, isLeadTier, isAssist
       {modal === "compare" && <SwimmerCompareModal onClose={() => setModal(null)} events={events} data={data} seasonMeets={seasonMeets} homeTeam={homeTeam} mode={cmpMode} onModeChange={setCmpMode} onOpenLeague={openLeagueProfile} />}
       {scratchTarget && <div className="md-scrim" onClick={() => setScratchTarget(null)}>
         <div className="md-modal md-scratchmodal" onClick={(e) => e.stopPropagation()} role="dialog">
-          <div className="md-mhead"><button className="md-logo sm" onClick={() => setScratchTarget(null)} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Scratch {scratchTarget.name}?</div><div className="md-msub">Scratched swims are crossed out and don't score or place.</div></div><button className="md-x" onClick={() => setScratchTarget(null)}>✕</button></div>
+          <div className="md-mhead"><button className="md-logo sm" onClick={() => setScratchTarget(null)} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Scratch {scratchTarget.name}?</div><div className="md-msub">Scratched swims are crossed out and don't score or place.</div></div><button className="md-x" onClick={() => setScratchTarget(null)}>✕</button></div>
           <div className="md-scratchbtns">
             <button className="md-mbtn" onClick={() => { scratchOne(scratchTarget.id); setPop(null);
               if (scratchTarget.relay) { pushRelayUndo("Scratched " + scratchTarget.name, () => { unscratchOne(scratchTarget.id); flash("Undone"); }); setRelayReplaceTarget({ evIdx: scratchTarget.evIdx, htIdx: scratchTarget.htIdx, lane: scratchTarget.lane, leg: scratchTarget.leg, name: scratchTarget.name, team: scratchTarget.team, eventName: scratchTarget.eventName }); }
@@ -3418,13 +3418,26 @@ function MeetDeckBoard({ tenant, session, isAdmin, isOwner, isLeadTier, isAssist
 }
 
 // Version history for the "what's new" popup and the Update log (test/admin
-// only). Naming standard, starting with 1.0.0: MAJOR.MINOR.PATCH — bump
-// PATCH for small fixes, MINOR for new features/screens, MAJOR for a big
-// redesign or workflow change. Add every new release as a fresh entry at
-// the TOP of this array (newest first); APP_VERSION always reflects [0].
+// only). Format: A.B.CL — A stays 0 until told otherwise (bump = everything
+// else resets), B/C bump for real changes (B rarely, C most releases), and L
+// is a letter (A, B, C…) that just counts releases within the same A.B.C —
+// it does not mean anything on its own, it only keeps same-day/same-batch
+// releases unique. If a run under one A.B.C would need a 27th letter, wrap
+// to AA/AB/… instead of back to A (unless B changed during that run, in
+// which case wrap to A). Add every new release as a fresh entry at the TOP
+// of this array (newest first); APP_VERSION always reflects [0].
 const CHANGELOG = [
   {
-    version: "3.0.1",
+    version: "0.3.0C",
+    date: "2026-07-31",
+    title: "Renamed to MeetBuddy, new version-number format",
+    notes: [
+      "MeetDeck is now MeetBuddy — same app, new name, everywhere it shows up on screen.",
+      "Version numbers switched to a new format (this is 0.3.0C) — every past release was renumbered to match; nothing about what shipped in them changed, just the label.",
+    ],
+  },
+  {
+    version: "0.3.0B",
     date: "2026-07-29",
     title: "Fix login on devices that already had data before team logins",
     notes: [
@@ -3433,7 +3446,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "3.0.0",
+    version: "0.3.0A",
     date: "2026-07-29",
     title: "Every VCSL team gets its own login and dashboard",
     notes: [
@@ -3444,7 +3457,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.5.0",
+    version: "0.2.5A",
     date: "2026-07-24",
     title: "Fix DQs from real results PDFs, scoreboard event arrows",
     notes: [
@@ -3453,7 +3466,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.4.3",
+    version: "0.2.4D",
     date: "2026-07-24",
     title: "Fix Go-menu buttons, relay/opponent DQs from results sheets",
     notes: [
@@ -3462,7 +3475,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.4.2",
+    version: "0.2.4C",
     date: "2026-07-24",
     title: "Fix place badges overflowing on Results, bigger Settings",
     notes: [
@@ -3471,7 +3484,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.4.1",
+    version: "0.2.4B",
     date: "2026-07-23",
     title: "Fix menu/gate overlap and stats header ghosting",
     notes: [
@@ -3480,7 +3493,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.4.0",
+    version: "0.2.4A",
     date: "2026-07-23",
     title: "Five account roles, Owner permissions, standalone roster",
     notes: [
@@ -3491,7 +3504,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.3.1",
+    version: "0.2.3B",
     date: "2026-07-23",
     title: "Relay scratch replacement: see both relays, safe cross-relay swaps",
     notes: [
@@ -3501,7 +3514,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.3.0",
+    version: "0.2.3A",
     date: "2026-07-23",
     title: "Relay builder conflict flags, drag-drop replacement screen",
     notes: [
@@ -3511,7 +3524,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.2.1",
+    version: "0.2.2B",
     date: "2026-07-23",
     title: "Import roster: multi-page paste, scrollable team list",
     notes: [
@@ -3520,7 +3533,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.2.0",
+    version: "0.2.2A",
     date: "2026-07-23",
     title: "Simpler event jump, open-splits prompt, Result Mode DQ reasons",
     notes: [
@@ -3532,7 +3545,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.1.0",
+    version: "0.2.1A",
     date: "2026-07-23",
     title: "New-meet-from-results wizard, DQ-aware parsing, Meet Mode gating",
     notes: [
@@ -3544,7 +3557,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.0.1",
+    version: "0.2.0B",
     date: "2026-07-23",
     title: "Swimmer age on profile, comparison layout fit",
     notes: [
@@ -3553,7 +3566,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "2.0.0",
+    version: "0.2.0A",
     date: "2026-07-23",
     title: "Meet Mode / Result Mode",
     notes: [
@@ -3564,7 +3577,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "1.3.0",
+    version: "0.1.3A",
     date: "2026-07-23",
     title: "Meet stats: dual-team comparison mode",
     notes: [
@@ -3572,7 +3585,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "1.2.1",
+    version: "0.1.2B",
     date: "2026-07-23",
     title: "Two-tier swipe gesture, home-team-only DQ review",
     notes: [
@@ -3582,7 +3595,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "1.2.0",
+    version: "0.1.2A",
     date: "2026-07-23",
     title: "Meet finalization: DQ review gate, lock, and review layout",
     notes: [
@@ -3593,7 +3606,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "1.1.1",
+    version: "0.1.1B",
     date: "2026-07-23",
     title: "Comparison layout, live-results gestures, start gate scoped",
     notes: [
@@ -3603,7 +3616,7 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "1.1.0",
+    version: "0.1.1A",
     date: "2026-07-23",
     title: "Meet sheet gestures, smarter splits, custom season range",
     notes: [
@@ -3615,9 +3628,9 @@ const CHANGELOG = [
     ],
   },
   {
-    version: "1.0.0",
+    version: "0.1.0A",
     date: "2026-07-22",
-    title: "MeetDeck 1.0 — versioned releases begin",
+    title: "MeetBuddy — versioned releases begin",
     notes: [
       "Introduced version numbers, this update log, and a “what's new” popup that appears once after each update.",
       "Live meet sheet with race timer, tap-to-lap splits, and auto-advancing heats.",
@@ -3634,7 +3647,7 @@ const APP_VERSION = CHANGELOG[0].version;
 const UPDATE_SEEN_KEY = "meetdeck:updateseen:v1";
 
 // Every real VCSL team runs its own tenant: its own accounts list and its
-// own storage namespace (see MeetDeckBoard's K()), so one team's coaches can
+// own storage namespace (see MeetBuddyBoard's K()), so one team's coaches can
 // never see or overwrite another's data. Belwood is the exception on
 // purpose — it's the original single-tenant app this grew out of, so it
 // keeps the old unprefixed keys/accounts untouched rather than migrating
@@ -3783,7 +3796,7 @@ export default function App() {
     {!bootDone ? null // brief flash while persisted state loads
       : !tenant ? <TeamPicker onPick={pickTeam} />
       : !session ? <LoginScreen tenant={tenant} onLogin={login} onBack={backToPicker} error={loginError} />
-      : <MeetDeckBoard tenant={tenant} session={session} isAdmin={isAdmin} isOwner={isOwner} isLeadTier={isLeadTier} isAssist={isAssist} isTest={isTest} onLogout={logout} accounts={accounts} onSaveAccounts={saveAccounts} />}
+      : <MeetBuddyBoard tenant={tenant} session={session} isAdmin={isAdmin} isOwner={isOwner} isLeadTier={isLeadTier} isAssist={isAssist} isTest={isTest} onLogout={logout} accounts={accounts} onSaveAccounts={saveAccounts} />}
   </>);
 }
 
@@ -3796,7 +3809,7 @@ function TeamPicker({ onPick }) {
   return (
     <div className="md-root md-loginwrap">
       <div className="md-loginbox">
-        <div className="md-loginlogo">≈ MeetDeck</div>
+        <div className="md-loginlogo">≈ MeetBuddy</div>
         <div className="md-loginsub">Which team's coaches are signing in?</div>
         <label className="md-mrow">Team name<input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Start typing… e.g. Belwood" autoFocus autoCapitalize="none" autoCorrect="off" /></label>
         <div className="md-teampicklist">
@@ -3820,7 +3833,7 @@ function LoginScreen({ tenant, onLogin, onBack, error }) {
     <div className="md-root md-loginwrap">
       <form className="md-loginbox" onSubmit={submit}>
         <button type="button" className="md-backlink" onClick={onBack}>‹ Not {TEAM_NAME[tenant]}?</button>
-        <div className="md-loginlogo">≈ MeetDeck</div>
+        <div className="md-loginlogo">≈ MeetBuddy</div>
         <div className="md-loginteam"><span className="md-teampickdot" style={{ background: teamColor(tenant) }} />{TEAM_NAME[tenant]}</div>
         <div className="md-loginsub">Sign in to load your team's meets &amp; season data.</div>
         <label className="md-mrow">Username<input value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" placeholder="username" /></label>
@@ -3880,7 +3893,7 @@ function AccountsModal({ onClose, accounts, onSave, currentUsername, isAdmin, is
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">👤 Manage accounts</div><div className="md-msub">{isAdmin ? "Admin — full access to every account, including password resets." : "Owner — reassign Owner / Assistant Coach / Head Coach."}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">👤 Manage accounts</div><div className="md-msub">{isAdmin ? "Admin — full access to every account, including password resets." : "Owner — reassign Owner / Assistant Coach / Head Coach."}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
           {visibleAccounts.map((a) => {
             const editableHere = isAdmin || editableRoles.includes(a.role);
@@ -3943,7 +3956,7 @@ function RosterModal({ onClose, roster, onSave, teams, defaultTeam }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">🏊 Manage roster</div><div className="md-msub">The season's full swimmer list — paste a roster export or add names one at a time. Independent of any single meet.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">🏊 Manage roster</div><div className="md-msub">The season's full swimmer list — paste a roster export or add names one at a time. Independent of any single meet.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-impgrid">
           <div>
             <textarea className="md-imparea" placeholder={"Paste here — one swimmer per line…\n\nWong, Madelyn  11  BDST  Girls\nErtell, Ava E  12  BDST  Girls"} value={text} onChange={(e) => setText(e.target.value)} />
@@ -3985,7 +3998,7 @@ function WhatsNewModal({ entry, onClose }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">🎉 What's new — v{entry.version}</div><div className="md-msub">{entry.title} · {entry.date}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">🎉 What's new — v{entry.version}</div><div className="md-msub">{entry.title} · {entry.date}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
           <ul className="md-whatsnewlist">{entry.notes.map((n, i) => <li key={i}>{n}</li>)}</ul>
         </div>
@@ -4001,7 +4014,7 @@ function UpdateLogModal({ onClose }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">📋 Update log</div><div className="md-msub">Every version, newest first.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">📋 Update log</div><div className="md-msub">Every version, newest first.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
           {CHANGELOG.map((entry) => (
             <div key={entry.version} className="md-lgsection">
@@ -4242,7 +4255,7 @@ function MeetSetupModal({ onClose, meetName, setMeetName, meetDate, setMeetDate,
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Meet set up</div><div className="md-msub">Name, date, type, teams, lanes &amp; roster</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Meet set up</div><div className="md-msub">Name, date, type, teams, lanes &amp; roster</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
           <label className="md-mrow">Meet name<input value={meetName} onChange={(e) => setMeetName(e.target.value)} /></label>
           <label className="md-mrow">Meet date<input type="date" value={meetDate} onChange={(e) => setMeetDate(e.target.value)} /></label>
@@ -4289,7 +4302,7 @@ function SettingsModal({ onClose, homeTeam, setHomeTeam, teams, onMeetSetup, onR
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-settings" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">⚙ Settings</div><div className="md-msub">Setup, team, saved meets &amp; data · v{APP_VERSION}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">⚙ Settings</div><div className="md-msub">Setup, team, saved meets &amp; data · v{APP_VERSION}</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-setbody">
           {session && <div className="md-acctrow"><span>Signed in as <b>{session.username}</b> · {ROLE_LABEL[role] || role}{isOwner ? " · Owner" : ""}</span><button className="md-mbtn sm" onClick={onLogout}>Log out</button></div>}
           {((isAdmin || isOwner) || canViewUpdateLog) && <div className="md-mbtngrid">
@@ -4813,7 +4826,7 @@ function ImportModal({ onClose, onApply, defaultTeam }) {
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Import roster</div><div className="md-msub">Upload the VCSL meet program PDF (or paste text) — paste more than one page with “+ Add multiple”.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Import roster</div><div className="md-msub">Upload the VCSL meet program PDF (or paste text) — paste more than one page with “+ Add multiple”.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-impbar"><label className="md-filebtn">Choose file<input type="file" accept=".pdf,.txt,.csv,.tsv,application/pdf,text/plain" onChange={onFile} hidden /></label><span className="md-impnote">{busy || "PDF, .txt or .csv"}</span></div>
         <div className="md-impgrid">
           <textarea className="md-imparea" placeholder={"Paste here…\n\n#13 Girls 15-18 50 Yard Butterfly\nVCSL Record: 26.69 2018 Chelsea Huffman\nHeat 1 of 5 Finals\n3 Greenberg, Maayan 15 BDST 47.78"} value={text} onChange={(e) => setText(e.target.value)} />
@@ -4850,7 +4863,7 @@ function ExportModal({ onClose, events, data, myTeam, places, records, meetName 
   return (
     <div className="md-scrim" onClick={onClose}>
       <div className="md-modal md-imp" onClick={(e) => e.stopPropagation()} role="dialog">
-        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetDeck — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Export to Google Sheets — {myTeam}</div><div className="md-msub">Roster down the side, strokes across the top. Cells show place, time (B best · BR record), DQ codes, comments.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
+        <div className="md-mhead"><button className="md-logo sm" onClick={onClose} aria-label="Home" title="MeetBuddy — home">≈</button><div className="md-mheadtxt"><div className="md-mtitle">Export to Google Sheets — {myTeam}</div><div className="md-msub">Roster down the side, strokes across the top. Cells show place, time (B best · BR record), DQ codes, comments.</div></div><button className="md-x" onClick={onClose}>✕</button></div>
         <div className="md-exwrap"><table className="md-extable"><thead><tr>{matrix[0].map((h, i) => <th key={i}>{h}</th>)}</tr></thead><tbody>{matrix.slice(1).map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j} className={j === 0 ? "nm" : ""}>{c}</td>)}</tr>)}{matrix.length === 1 && <tr><td colSpan={matrix[0].length} className="md-exempty">No {myTeam} entries yet.</td></tr>}</tbody></table></div>
         {msg && <div className="md-exmsg">{msg}</div>}
         <div className="md-mfoot"><button className="md-cancel" onClick={onClose}>Close</button><button className="md-ghost2" onClick={download}>Download CSV</button><button className="md-apply" onClick={copy}>Copy for Google Sheets</button></div>
